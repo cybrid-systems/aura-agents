@@ -1,0 +1,27 @@
+;; Shared line and key=value parsing for planner and worker replies.
+(require "std/string")
+
+(define (text:lines s)
+  (if (string? s) (string-split s "\n") '()))
+
+(define (text:after line prefix)
+  (substring line (string-length prefix) (string-length line)))
+
+(define (text:pairs line)
+  (let loop ((words (string-split-words (if (string? line) line ""))) (acc '()))
+    (if (not (pair? words))
+      (reverse acc)
+      (let ((parts (if (string-contains? (car words) "=")
+                     (string-split (car words) "=")
+                     '())))
+        (if (and (pair? parts) (pair? (cdr parts))
+                 (string? (car parts)) (> (string-length (car parts)) 0))
+          (loop (cdr words) (cons (list (car parts) (cadr parts)) acc))
+          (loop (cdr words) acc))))))
+
+(define (text:lookup pairs key)
+  (let loop ((xs pairs))
+    (cond
+      ((not (pair? xs)) #f)
+      ((equal? (car (car xs)) key) (cadr (car xs)))
+      (else (loop (cdr xs))))))

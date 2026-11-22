@@ -1,0 +1,59 @@
+(require "lib/supervisor")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(line "cpu-online" (supervisor:parse-cpu-online "0-3\n"))
+(line "cpu-span" (supervisor:parse-cpu-online "0-1,4-6\n"))
+(line "cpu-single" (supervisor:parse-cpu-online "0\n"))
+(line "mem-kb" (supervisor:parse-meminfo "MemTotal: 100 kB\nMemFree: 7 kB\nMemAvailable:    42 kB\n"))
+(line "mem-free" (supervisor:parse-meminfo "MemFree: 9 kB\n"))
+(line "load" (number->string (supervisor:parse-loadavg "1.50 0.20 0.10 1/2 3\n")))
+
+(define (sized cpus load mem)
+  (supervisor:size (hash "cpus" cpus "load" load "mem-available-kb" mem)))
+
+(define a (sized 8 0.2 8000000))
+(line "case-a-workers" (hash-ref a "workers"))
+(line "case-a-cpu" (hash-ref a "cpu-free"))
+(line "case-a-mem" (hash-ref a "mem-slots"))
+(line "case-a-reason" (hash-ref a "reason"))
+
+(define b (sized 64 0 67108864))
+(line "case-b-workers" (hash-ref b "workers"))
+(line "case-b-reason" (hash-ref b "reason"))
+
+(define c (sized 2 0 600000))
+(line "case-c-workers" (hash-ref c "workers"))
+(line "case-c-reason" (hash-ref c "reason"))
+
+(define d (sized 1 0 8000000))
+(line "case-d-workers" (hash-ref d "workers"))
+(line "case-d-reason" (hash-ref d "reason"))
+
+(define e (sized 1 2 1000))
+(line "case-e-workers" (hash-ref e "workers"))
+(line "case-e-reason" (hash-ref e "reason"))
+
+(define f (supervisor:size (hash "cpus" 3 "load" 0 "mem-available-kb" 2500
+                                 "per-worker-kb" 1000 "reserve-cpus" 0 "reserve-mem-kb" 0)))
+(line "case-f-workers" (hash-ref f "workers"))
+(line "case-f-reason" (hash-ref f "reason"))
+
+(define live (supervisor:read-sample))
+(define live-sized (supervisor:size live))
+(line "live-probe"
+      (if (and (number? (hash-ref live "cpus"))
+               (>= (hash-ref live "cpus") 1)
+               (number? (hash-ref live "mem-available-kb"))
+               (> (hash-ref live "mem-available-kb") 0)
+               (number? (hash-ref live "load"))
+               (>= (hash-ref live "load") 0)
+               (number? (hash-ref live-sized "workers"))
+               (>= (hash-ref live-sized "workers") 0)
+               (string? (hash-ref live-sized "reason")))
+        "ok"
+        "bad"))

@@ -1,0 +1,12 @@
+(require "lib/orchestrate")
+
+(define sample (hash "cpus" 3 "load" 0 "mem-available-kb" 8000000))
+
+(define result
+  (orchestrate:run (hash "requirement" "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。"
+                         "sample" sample
+                         "mode" "mock"
+                         "workspace" 5914
+                         "approve" "approved"
+                         "now" 0)))
+(void)

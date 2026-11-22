@@ -1,0 +1,12 @@
+open=contract
+backend=stand-in
+pending=pending
+decide=approved
+approved=approved
+stays=approved
+deny=denied
+denied=denied
+timeout=timeout
+timeout-stays=timeout
+missing=missing
+unhost=ok

@@ -1,0 +1,19 @@
+;; End-to-end demo against the bus on current Aura main.
+;; Mock LLM unless AURA_AGENTS_LLM=real (or a key is set and the
+;; flag is unset). Approval is injected through the aura#5404 stand-in
+;; so the smoke can finish; set AURA_AGENTS_APPROVE=timeout or denied
+;; to exercise the fail-closed path.
+(require "lib/orchestrate")
+
+(define (demo:approve)
+  (let ((v (getenv "AURA_AGENTS_APPROVE")))
+    (if (and (string? v) (> (string-length v) 0)) v "approved")))
+
+(define result
+  (orchestrate:run (hash "workspace" 5398
+                         "approve" (demo:approve)
+                         "now" 0)))
+
+(if (not (equal? (hash-ref result "demo") "ok"))
+  (error "demo failed")
+  (void))

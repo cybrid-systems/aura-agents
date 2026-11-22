@@ -1,0 +1,105 @@
+;; Supervisor policy (aura#5400).
+;; Worker count is the machine's spare CPUs and spare memory.
+;; There is no fixed worker cap. A per-worker memory budget is a
+;; size of one worker, not a limit on how many may run.
+(require "std/string")
+
+(define supervisor:per-worker-kb 262144)
+(define supervisor:reserve-cpus 1)
+(define supervisor:reserve-mem-kb 524288)
+
+(define (supervisor:num sample key missing)
+  (let ((v (if (hash? sample) (hash-ref sample key missing) missing)))
+    (if (number? v) v missing)))
+
+(define (supervisor:nonneg n)
+  (if (< n 0) 0 n))
+
+(define (supervisor:occupied load)
+  (if (number? load) (inexact->exact (ceiling load)) 0))
+
+(define (supervisor:count-range part)
+  (let ((ends (string-split part "-")))
+    (if (and (pair? ends) (pair? (cdr ends)))
+      (let ((a (string->number (car ends)))
+            (b (string->number (cadr ends))))
+        (if (and (number? a) (number? b) (>= b a))
+          (+ (- b a) 1)
+          0))
+      (let ((a (string->number part)))
+        (if (number? a) 1 0)))))
+
+(define (supervisor:parse-cpu-online text)
+  (if (not (string? text))
+    0
+    (let ((s (string-trim text)))
+      (if (string=? s "")
+        0
+        (let loop ((parts (string-split s ",")) (n 0))
+          (if (not (pair? parts))
+            n
+            (loop (cdr parts) (+ n (supervisor:count-range (string-trim (car parts)))))))))))
+
+(define (supervisor:mem-line-kb line key)
+  (let ((words (string-split-words line)))
+    (if (and (pair? words) (equal? (car words) key) (pair? (cdr words)))
+      (let ((n (string->number (cadr words))))
+        (if (number? n) n #f))
+      #f)))
+
+(define (supervisor:parse-meminfo text)
+  (if (not (string? text))
+    0
+    (let loop ((lines (string-split text "\n")) (avail #f) (free #f))
+      (if (not (pair? lines))
+        (cond
+          ((number? avail) avail)
+          ((number? free) free)
+          (else 0))
+        (let ((a (supervisor:mem-line-kb (car lines) "MemAvailable:"))
+              (f (supervisor:mem-line-kb (car lines) "MemFree:")))
+          (loop (cdr lines)
+                (if (number? a) a avail)
+                (if (number? f) f free)))))))
+
+(define (supervisor:parse-loadavg text)
+  (if (not (string? text))
+    0
+    (let ((words (string-split-words (string-trim text))))
+      (if (pair? words)
+        (let ((n (string->number (car words))))
+          (if (number? n) n 0))
+        0))))
+
+(define (supervisor:read-sample)
+  (hash "cpus" (supervisor:parse-cpu-online (read-file "/sys/devices/system/cpu/online"))
+        "load" (supervisor:parse-loadavg (read-file "/proc/loadavg"))
+        "mem-available-kb" (supervisor:parse-meminfo (read-file "/proc/meminfo"))))
+
+;; sample keys: cpus, load, mem-available-kb, and optional
+;; per-worker-kb, reserve-cpus, reserve-mem-kb.
+;; Returns workers, cpu-free, mem-slots, reason.
+;; reason is "no" when at least one worker fits.
+(define (supervisor:size sample)
+  (let* ((cpus (supervisor:num sample "cpus" 0))
+         (load (supervisor:num sample "load" 0))
+         (mem (supervisor:num sample "mem-available-kb" 0))
+         (per (supervisor:num sample "per-worker-kb" supervisor:per-worker-kb))
+         (reserve-cpus (supervisor:num sample "reserve-cpus" supervisor:reserve-cpus))
+         (reserve-mem (supervisor:num sample "reserve-mem-kb" supervisor:reserve-mem-kb))
+         (occupied (supervisor:occupied load))
+         (cpu-raw (- cpus occupied reserve-cpus))
+         (mem-raw (- mem reserve-mem))
+         (cpu-free (supervisor:nonneg cpu-raw))
+         (mem-slots (if (<= per 0) 0 (quotient (supervisor:nonneg mem-raw) per)))
+         (workers (if (<= per 0) 0 (min cpu-free mem-slots)))
+         (reason (cond
+                   ((<= per 0) "per-worker-kb")
+                   ((> workers 0) "no")
+                   ((and (<= cpu-raw 0) (<= mem-slots 0)) "cpu+memory")
+                   ((<= cpu-raw 0) "cpu")
+                   (else "memory"))))
+    (hash "workers" workers
+          "cpu-free" cpu-free
+          "mem-slots" mem-slots
+          "reason" reason)))
