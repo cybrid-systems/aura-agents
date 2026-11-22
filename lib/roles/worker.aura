@@ -1,0 +1,22 @@
+;; Worker: load prompts/worker.txt and turn one task into evidence pairs.
+;; Role id on the bus stays 0 until aura#5400 adds a worker role.
+(require "lib/text")
+(require "lib/llm/chat")
+
+(define (worker:parse text)
+  (let loop ((lines (text:lines text)))
+    (if (not (pair? lines))
+      (list "error" "parse" "no RESULT")
+      (let ((line (string-trim (car lines))))
+        (if (string-prefix? line "RESULT ")
+          (let ((pairs (text:pairs (text:after line "RESULT "))))
+            (if (pair? pairs)
+              (list "ok" pairs)
+              (list "error" "parse" "RESULT has no checks")))
+          (loop (cdr lines)))))))
+
+(define (worker:run spec mode)
+  (let ((system (read-file "prompts/worker.txt")))
+    (if (not (string? system))
+      (list "error" "prompt" "missing worker prompt")
+      (worker:parse (chat:complete mode "worker" system spec)))))

@@ -1,0 +1,8 @@
+name = "aura-agents"
+entry = "demo/run.aura"
+preset = "dev"
+out = "out"
+
+# Rolling Aura nightly from main. CI installs that same prebuilt release.
+[dependencies]
+aura = "nightly"

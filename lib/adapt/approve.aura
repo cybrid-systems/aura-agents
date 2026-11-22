@@ -1,0 +1,73 @@
+;; In-process stand-in for the human approval point.
+;; Waits on https://github.com/cybrid-systems/aura/issues/5404
+;; (bus:approve). Timeout is a denial. This module does not implement
+;; the verb in Aura.
+(require "lib/adapt/op")
+
+(define *approve-backend* "unchecked")
+(define *approvals* '())
+
+(define (approve:reset!)
+  (set! *approve-backend* "unchecked")
+  (set! *approvals* '()))
+
+(define (approve:backend) *approve-backend*)
+
+(define (approve:ensure! session)
+  (if (equal? *approve-backend* "unchecked")
+    (set! *approve-backend* (adapt:classify session "approve"))
+    *approve-backend*)
+  *approve-backend*)
+
+(define (approve:find object-id)
+  (let loop ((xs *approvals*))
+    (cond
+      ((not (pair? xs)) #f)
+      ((equal? (hash-ref (car xs) "id") object-id) (car xs))
+      (else (loop (cdr xs))))))
+
+(define (approve:open session object-id deadline)
+  (approve:ensure! session)
+  (if (equal? *approve-backend* "bus")
+    (list "error" "unsupported" "bus:approve open waits on aura#5404")
+    (let ((row (approve:find object-id)))
+      (if row
+        (begin
+          (hash-set! row "decision" "pending")
+          (hash-set! row "deadline" deadline)
+          (list "ok" object-id))
+        (begin
+          (set! *approvals* (cons (hash "id" object-id
+                                        "decision" "pending"
+                                        "deadline" deadline)
+                                  *approvals*))
+          (list "ok" object-id))))))
+
+(define (approve:standin-decide object-id decision)
+  (let ((row (approve:find object-id)))
+    (if (not row)
+      (list "error" "missing" "no approval")
+      (if (not (or (equal? decision "approved") (equal? decision "denied")))
+        (list "error" "validation-failed" "decision must be approved or denied")
+        (begin
+          (hash-set! row "decision" decision)
+          (list "ok" decision))))))
+
+(define (approve:decide session object-id decision)
+  (if (equal? (approve:ensure! session) "bus")
+    (bus-call "approve" session object-id decision)
+    (approve:standin-decide object-id decision)))
+
+;; now >= deadline while still pending is a timeout denial (fail closed).
+(define (approve:status session object-id now)
+  (if (equal? (approve:ensure! session) "bus")
+    (list "error" "unsupported" "bus:approve status waits on aura#5404")
+    (let ((row (approve:find object-id)))
+      (if (not row)
+        (list "error" "missing" "no approval")
+        (begin
+          (if (and (equal? (hash-ref row "decision") "pending")
+                   (>= now (hash-ref row "deadline")))
+            (hash-set! row "decision" "timeout")
+            #f)
+          (list "ok" (hash-ref row "decision")))))))

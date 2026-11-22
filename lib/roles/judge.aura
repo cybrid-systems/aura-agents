@@ -1,0 +1,15 @@
+;; Judge glue. The prompt is loaded so a missing file fails closed,
+;; and the decision is the gate, not a model narrative.
+;; Keep and rollback are the real bus verbs. The gate itself is the
+;; stand-in in lib/adapt/gate.aura until aura#5391 and aura#5402.
+(require "std/bus")
+(require "lib/adapt/gate")
+
+(define (judge:decide session worldline contract evidence)
+  (let ((prompt (read-file "prompts/judge.txt")))
+    (if (not (string? prompt))
+      (list "error" "prompt" "missing judge prompt")
+      (let ((g (gate:evidence session contract evidence)))
+        (if (and (pair? g) (equal? (car g) "ok"))
+          (list "ok" "keep" (bus:keep session worldline 0 1) g)
+          (list "ok" "rollback" (bus:rollback session worldline) g))))))

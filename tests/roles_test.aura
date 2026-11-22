@@ -1,0 +1,54 @@
+(require "std/string")
+(require "lib/llm/mock")
+(require "lib/llm/chat")
+(require "lib/roles/planner")
+(require "lib/roles/worker")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (has path needle)
+  (let ((s (read-file path)))
+    (and (string? s) (string-contains? s needle))))
+
+(line "prompts"
+      (if (and (has "prompts/planner.txt" "CONTRACT")
+               (has "prompts/worker.txt" "RESULT")
+               (has "prompts/judge.txt" "gate")
+               (has "demo/requirement.txt" "ZRANGEBYSCORE"))
+        "ok"
+        "bad"))
+
+(mock:reset!)
+(define a (mock:complete "planner" "need"))
+(define b (mock:complete "planner" "need"))
+(line "mock-stable" (if (equal? a b) "ok" "bad"))
+(line "mock-calls" (mock:calls))
+
+(define plan (planner:parse a))
+(line "plan" (if (equal? (car plan) "ok") "ok" "bad"))
+(line "tasks" (length (caddr plan)))
+(line "contract-tests" (cadr (car (cadr plan))))
+(line "contract-p99" (cadr (cadr (cadr plan))))
+
+(define worker (worker:parse (mock:complete "worker" "implement-zrangebyscore")))
+(line "worker" (if (equal? (car worker) "ok") "ok" "bad"))
+(line "worker-tests" (cadr (car (cadr worker))))
+
+(define failed (worker:parse (mock:complete "worker" "SIMULATE-FAIL")))
+(line "worker-fail" (cadr (car (cadr failed))))
+
+(define planned (planner:plan "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。" "mock"))
+(line "planner-plan" (if (equal? (car planned) "ok") "ok" "bad"))
+(define ran (worker:run "implement-zrangebyscore" "mock"))
+(line "worker-run" (if (equal? (car ran) "ok") "ok" "bad"))
+
+(line "mode-default" (chat:mode-of #f #f))
+(line "mode-key" (chat:mode-of #f #t))
+(line "mode-mock" (chat:mode-of "mock" #t))
+(line "mode-real" (chat:mode-of "real" #f))
+(line "model-default" (chat:model-of #f))
+(line "model-env" (chat:model-of "custom-model"))

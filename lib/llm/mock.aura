@@ -1,0 +1,21 @@
+;; Deterministic mock LLM. No network, no key, no clock.
+;; The planner and worker replies match prompts/planner.txt and prompts/worker.txt.
+(require "std/string")
+
+(define *mock-calls* 0)
+
+(define (mock:reset!)
+  (set! *mock-calls* 0))
+
+(define (mock:calls) *mock-calls*)
+
+(define (mock:complete role user)
+  (set! *mock-calls* (+ *mock-calls* 1))
+  (cond
+    ((equal? role "planner")
+     "CONTRACT tests=pass p99=ok\nTASK implement-zrangebyscore\nTASK check-p99\n")
+    ((equal? role "worker")
+     (if (and (string? user) (string-contains? user "SIMULATE-FAIL"))
+       "RESULT tests=fail p99=ok\n"
+       "RESULT tests=pass p99=ok\n"))
+    (else "RESULT tests=pass p99=ok\n")))

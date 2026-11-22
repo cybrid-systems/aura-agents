@@ -1,0 +1,263 @@
+;; Role orchestration over the bus that exists on Aura main today:
+;; host, attach, subscribe, publish, query, trial, keep, rollback, audit.
+;; Task, approval and gate verbs go through the stand-in adapters.
+;; Planner and worker attach as role 0. aura#5400 has not added those
+;; role ids yet; an unknown role is rejected by the host.
+(require "std/bus")
+(require "lib/supervisor")
+(require "lib/text")
+(require "lib/llm/chat")
+(require "lib/roles/planner")
+(require "lib/roles/worker")
+(require "lib/roles/judge")
+(require "lib/adapt/task-board")
+(require "lib/adapt/approve")
+(require "lib/adapt/gate")
+
+(define orchestrate:lines
+  '("demo" "llm" "workers" "refused" "approve" "tasks" "completed"
+    "gate" "result" "bus-attach"
+    "task-backend" "approve-backend" "gate-backend"
+    "bus-host" "bus-publish" "bus-subscribe" "bus-query"
+    "bus-trial" "bus-keep" "bus-rollback" "bus-audit" "bus-unhost"))
+
+(define (orchestrate:ok? record)
+  (and (pair? record) (equal? (car record) "ok")))
+
+(define (orchestrate:flag record)
+  (if (orchestrate:ok? record) "ok" "fail"))
+
+(define (orchestrate:emit flags)
+  (for-each
+    (lambda (k)
+      (display k)
+      (display "=")
+      (display (hash-ref flags k))
+      (newline))
+    orchestrate:lines))
+
+(define (orchestrate:requirement cfg)
+  (let ((given (hash-ref cfg "requirement" #f)))
+    (if (and (string? given) (> (string-length given) 0))
+      given
+      (let ((env (getenv "AURA_AGENTS_REQUIREMENT")))
+        (if (and (string? env) (> (string-length env) 0))
+          env
+          (let ((file (read-file "demo/requirement.txt")))
+            (if (string? file)
+              (string-trim file)
+              "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。")))))))
+
+(define (orchestrate:attach-workers ws n)
+  (let loop ((i 0) (acc '()))
+    (if (>= i n)
+      (reverse acc)
+      (let ((a (bus:attach "" ws 0 127 31)))
+        (if (orchestrate:ok? a)
+          (loop (+ i 1) (cons (cadr a) acc))
+          (cons #f acc))))))
+
+(define (orchestrate:sessions planner-a judge-a workers)
+  (let ((head (if (orchestrate:ok? planner-a) (list (cadr planner-a)) '())))
+    (append (if (orchestrate:ok? judge-a) (append head (list (cadr judge-a))) head)
+            (filter number? workers))))
+
+(define (orchestrate:audit-flag session)
+  (let ((au (bus:audit session 0)))
+    (if (and (orchestrate:ok? au) (number? (cadr au)) (> (cadr au) 0))
+      "ok"
+      "fail")))
+
+(define (orchestrate:read-channel flags session)
+  (hash-set! flags "bus-subscribe" (orchestrate:flag (bus:subscribe session 1)))
+  (hash-set! flags "bus-query" (orchestrate:flag (bus:query session 1 0 0)))
+  (hash-set! flags "bus-audit" (orchestrate:audit-flag session)))
+
+(define (orchestrate:fold-key key expected results)
+  (let loop ((xs results) (val expected))
+    (if (not (pair? xs))
+      val
+      (let ((got (text:lookup (car xs) key)))
+        (cond
+          ((not (string? got)) "missing")
+          ((equal? got expected) (loop (cdr xs) val))
+          (else got))))))
+
+(define (orchestrate:merged contract results)
+  (if (not (pair? results))
+    '()
+    (map (lambda (pair)
+           (list (car pair)
+                 (orchestrate:fold-key (car pair) (cadr pair) results)))
+         contract)))
+
+(define (orchestrate:worker-name i)
+  (string-append "w" (number->string i)))
+
+(define (orchestrate:run-workers worker-ss mode now)
+  (let loop ((ss worker-ss) (i 0) (acc '()))
+    (if (not (pair? ss))
+      (reverse acc)
+      (let* ((session (car ss))
+             (name (orchestrate:worker-name i))
+             (claim (task:claim session name now)))
+        (if (not (orchestrate:ok? claim))
+          (loop (cdr ss) (+ i 1) acc)
+          (let* ((id (cadr claim))
+                 (hb (task:heartbeat session id name now))
+                 (ev (if (orchestrate:ok? hb) (worker:run (task:spec id) mode) #f)))
+            (if (and (orchestrate:ok? hb) (orchestrate:ok? ev))
+              (begin
+                (task:complete session id name now "done")
+                (loop (cdr ss) (+ i 1) (cons (cadr ev) acc)))
+              (begin
+                (task:fail session id name now "worker-error")
+                (loop (cdr ss) (+ i 1) acc)))))))))
+
+(define (orchestrate:reject flags judge-s)
+  (orchestrate:read-channel flags judge-s)
+  (let ((tr (bus:trial judge-s 1)))
+    (hash-set! flags "bus-trial" (orchestrate:flag tr))
+    (if (orchestrate:ok? tr)
+      (begin
+        (hash-set! flags "bus-rollback" (orchestrate:flag (bus:rollback judge-s (cadr tr))))
+        (hash-set! flags "result" "rollback"))
+      #f))
+  (hash-set! flags "bus-audit" (orchestrate:audit-flag judge-s)))
+
+(define (orchestrate:deliver flags judge-s worker-ss contract tasks mode now)
+  (let ((ids (let loop ((xs tasks) (acc '()))
+               (if (not (pair? xs))
+                 (reverse acc)
+                 (let ((posted (task:post-task judge-s (car xs))))
+                   (if (orchestrate:ok? posted)
+                     (loop (cdr xs) (cons (cadr posted) acc))
+                     (loop (cdr xs) acc)))))))
+    (hash-set! flags "task-backend" (task:backend))
+    (hash-set! flags "tasks" (length ids))
+    (let* ((results (orchestrate:run-workers worker-ss mode now))
+           (evidence (orchestrate:merged contract results)))
+      (hash-set! flags "completed" (length results))
+      (let ((ready (and (= (length results) (length ids)) (pair? results))))
+        (hash-set! flags "bus-publish"
+                   (orchestrate:flag (bus:publish judge-s 1 (if ready 1 0))))
+        (hash-set! flags "bus-subscribe" (orchestrate:flag (bus:subscribe judge-s 1)))
+        (hash-set! flags "bus-query" (orchestrate:flag (bus:query judge-s 1 0 0)))
+        (let ((tr (bus:trial judge-s 1)))
+        (hash-set! flags "bus-trial" (orchestrate:flag tr))
+        (if (orchestrate:ok? tr)
+          (let ((d (judge:decide judge-s (cadr tr) contract
+                                 (if ready evidence '()))))
+            (hash-set! flags "gate-backend" (gate:backend))
+            (if (orchestrate:ok? d)
+              (let ((gate-record (car (cddr (cdr d)))))
+                (hash-set! flags "result" (cadr d))
+                (hash-set! flags "gate"
+                           (if (equal? (cadr d) "keep")
+                             "ok"
+                             (if (and (pair? gate-record) (pair? (cdr gate-record)))
+                               (cadr gate-record)
+                               "fail")))
+                (if (equal? (cadr d) "keep")
+                  (hash-set! flags "bus-keep" (orchestrate:flag (caddr d)))
+                  (hash-set! flags "bus-rollback" (orchestrate:flag (caddr d)))))
+              (hash-set! flags "gate" "fail")))
+          (hash-set! flags "gate" "fail"))
+        (hash-set! flags "bus-audit" (orchestrate:audit-flag judge-s)))))))
+
+(define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now)
+  (let ((plan (planner:plan requirement mode)))
+    (if (not (orchestrate:ok? plan))
+      (hash-set! flags "gate" "plan-fail")
+      (let ((contract (cadr plan))
+            (tasks (caddr plan))
+            (deadline (+ now 5)))
+        (approve:open planner-s "contract" deadline)
+        (hash-set! flags "approve-backend" (approve:backend))
+        (cond
+          ((equal? approve-mode "approved")
+           (approve:decide planner-s "contract" "approved"))
+          ((equal? approve-mode "denied")
+           (approve:decide planner-s "contract" "denied"))
+          (else #f))
+        (let* ((when (if (equal? approve-mode "timeout") deadline now))
+               (st (approve:status planner-s "contract" when))
+               (decision (if (orchestrate:ok? st) (cadr st) "error")))
+          (hash-set! flags "approve" decision)
+          (if (equal? decision "approved")
+            (orchestrate:deliver flags judge-s worker-ss contract tasks mode now)
+            (orchestrate:reject flags judge-s)))))))
+
+(define (orchestrate:cleanup flags sessions ws)
+  (for-each
+    (lambda (s) (if (number? s) (bus:detach s) #f))
+    sessions)
+  (hash-set! flags "bus-unhost" (orchestrate:flag (bus:unhost ws)))
+  (if (and (equal? (hash-ref flags "bus-host") "ok")
+           (equal? (hash-ref flags "bus-attach") "ok")
+           (equal? (hash-ref flags "bus-unhost") "ok")
+           (not (equal? (hash-ref flags "gate") "plan-fail")))
+    (hash-set! flags "demo" "ok")
+    (hash-set! flags "demo" "fail"))
+  (orchestrate:emit flags)
+  flags)
+
+(define (orchestrate:hosted flags ws n requirement mode approve-mode now)
+  (let* ((planner-a (bus:attach "" ws 0 127 31))
+         (judge-a (bus:attach "" ws 0 127 31))
+         (worker-ss (orchestrate:attach-workers ws n))
+         (attached (and (orchestrate:ok? planner-a)
+                        (orchestrate:ok? judge-a)
+                        (= (length (filter number? worker-ss)) n))))
+    (hash-set! flags "bus-attach" (if attached "ok" "fail"))
+    (if (not attached)
+      (orchestrate:cleanup flags (orchestrate:sessions planner-a judge-a worker-ss) ws)
+      (begin
+        (orchestrate:pipeline flags (cadr planner-a) (cadr judge-a) worker-ss
+                              requirement mode approve-mode now)
+        (orchestrate:cleanup flags (orchestrate:sessions planner-a judge-a worker-ss) ws)))))
+
+(define (orchestrate:fresh-flags sample mode host)
+  (let ((sized (supervisor:size sample)))
+    (hash "demo" "fail"
+          "llm" mode
+          "workers" (hash-ref sized "workers")
+          "refused" (hash-ref sized "reason")
+          "approve" "skipped"
+          "tasks" 0
+          "completed" 0
+          "gate" "skipped"
+          "result" "none"
+          "bus-attach" "fail"
+          "task-backend" "not-called"
+          "approve-backend" "not-called"
+          "gate-backend" "not-called"
+          "bus-host" (orchestrate:flag host)
+          "bus-publish" "skipped"
+          "bus-subscribe" "skipped"
+          "bus-query" "skipped"
+          "bus-trial" "skipped"
+          "bus-keep" "skipped"
+          "bus-rollback" "skipped"
+          "bus-audit" "skipped"
+          "bus-unhost" "skipped")))
+
+(define (orchestrate:run cfg)
+  (task:reset!)
+  (approve:reset!)
+  (gate:reset!)
+  (let* ((mode-given (hash-ref cfg "mode" #f))
+         (mode (if (string? mode-given) mode-given (chat:mode)))
+         (ws (let ((n (hash-ref cfg "workspace" 5398))) (if (number? n) n 5398)))
+         (sample0 (hash-ref cfg "sample" #f))
+         (sample (if (hash? sample0) sample0 (supervisor:read-sample)))
+         (approve-mode (let ((a (hash-ref cfg "approve" "approved")))
+                         (if (string? a) a "approved")))
+         (now (let ((n (hash-ref cfg "now" 0))) (if (number? n) n 0)))
+         (host (bus:host ws))
+         (flags (orchestrate:fresh-flags sample mode host)))
+    (if (not (orchestrate:ok? host))
+      (begin (orchestrate:emit flags) flags)
+      (orchestrate:hosted flags ws (hash-ref flags "workers")
+                          (orchestrate:requirement cfg)
+                          mode approve-mode now))))

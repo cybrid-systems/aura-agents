@@ -1,0 +1,43 @@
+;; In-process stand-in for contract admission.
+;; Waits on https://github.com/cybrid-systems/aura/issues/5391
+;; (bus:gate-evidence) and https://github.com/cybrid-systems/aura/issues/5402
+;; (that gate generalized to "the contract is fully satisfied").
+;; This module does not implement the verb in Aura.
+;; An empty contract is refused. Every contract pair must be present
+;; and equal in the evidence.
+(require "lib/adapt/op")
+(require "lib/text")
+
+(define *gate-backend* "unchecked")
+
+(define (gate:reset!)
+  (set! *gate-backend* "unchecked"))
+
+(define (gate:backend) *gate-backend*)
+
+(define (gate:ensure! session)
+  (if (equal? *gate-backend* "unchecked")
+    (set! *gate-backend* (adapt:classify session "gate-evidence"))
+    *gate-backend*)
+  *gate-backend*)
+
+(define (gate:standin contract evidence)
+  (if (not (pair? contract))
+    (list "error" "empty-contract" "contract has no checks")
+    (let loop ((xs contract))
+      (if (not (pair? xs))
+        (list "ok" "satisfied")
+        (let* ((key (car (car xs)))
+               (want (cadr (car xs)))
+               (got (text:lookup evidence key)))
+          (cond
+            ((not (string? got))
+             (list "error" "incomplete" (string-append "missing " key)))
+            ((not (equal? got want))
+             (list "error" "contract-unsatisfied" (string-append key "=" got)))
+            (else (loop (cdr xs)))))))))
+
+(define (gate:evidence session contract evidence)
+  (if (equal? (gate:ensure! session) "bus")
+    (bus-call "gate-evidence" session contract evidence)
+    (gate:standin contract evidence)))

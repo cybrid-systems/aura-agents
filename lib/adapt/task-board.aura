@@ -1,0 +1,119 @@
+;; In-process stand-in for the task channel.
+;; Waits on https://github.com/cybrid-systems/aura/issues/5399
+;; (bus:post-task, bus:claim, bus:heartbeat, bus:complete, bus:fail).
+;; The kernel on current main answers
+;; (error unsupported "unknown bus-call op"). This module does not
+;; implement those verbs in Aura.
+(require "lib/adapt/op")
+
+(define *task-backend* "unchecked")
+(define *tasks* '())
+(define *task-next* 1)
+(define *task-lease* 2)
+
+(define (task:reset!)
+  (set! *task-backend* "unchecked")
+  (set! *tasks* '())
+  (set! *task-next* 1))
+
+(define (task:backend) *task-backend*)
+
+(define (task:ensure! session)
+  (if (equal? *task-backend* "unchecked")
+    (set! *task-backend* (adapt:classify session "post-task"))
+    *task-backend*)
+  *task-backend*)
+
+(define (task:find id)
+  (let loop ((xs *tasks*))
+    (cond
+      ((not (pair? xs)) #f)
+      ((= (hash-ref (car xs) "id") id) (car xs))
+      (else (loop (cdr xs))))))
+
+(define (task:claimable? row now)
+  (or (equal? (hash-ref row "status") "open")
+      (and (equal? (hash-ref row "status") "claimed")
+           (>= now (hash-ref row "expiry")))))
+
+(define (task:held? row now)
+  (and (equal? (hash-ref row "status") "claimed")
+       (< now (hash-ref row "expiry"))))
+
+(define (task:standin-post spec)
+  (let ((id *task-next*))
+    (set! *task-next* (+ *task-next* 1))
+    (set! *tasks* (append *tasks* (list (hash "id" id
+                                              "status" "open"
+                                              "holder" ""
+                                              "expiry" 0
+                                              "spec" spec
+                                              "result" ""))))
+    (list "ok" id)))
+
+(define (task:post-task session spec)
+  (if (equal? (task:ensure! session) "bus")
+    (bus-call "post-task" session spec)
+    (task:standin-post spec)))
+
+(define (task:standin-claim worker now)
+  (let loop ((xs *tasks*) (held #f))
+    (cond
+      ((not (pair? xs))
+       (if held
+         (list "error" "lease-held" "task leased")
+         (list "error" "empty" "no task")))
+      ((task:claimable? (car xs) now)
+       (begin
+         (hash-set! (car xs) "status" "claimed")
+         (hash-set! (car xs) "holder" worker)
+         (hash-set! (car xs) "expiry" (+ now *task-lease*))
+         (list "ok" (hash-ref (car xs) "id"))))
+      (else (loop (cdr xs) (or held (task:held? (car xs) now)))))))
+
+(define (task:claim session worker now)
+  (if (equal? (task:ensure! session) "bus")
+    (bus-call "claim" session worker now)
+    (task:standin-claim worker now)))
+
+(define (task:lease-ok? row worker now)
+  (and row
+       (equal? (hash-ref row "status") "claimed")
+       (equal? (hash-ref row "holder") worker)
+       (< now (hash-ref row "expiry"))))
+
+(define (task:standin-heartbeat id worker now)
+  (let ((row (task:find id)))
+    (if (task:lease-ok? row worker now)
+      (begin
+        (hash-set! row "expiry" (+ now *task-lease*))
+        (list "ok" id))
+      (list "error" "lease-lost" "heartbeat rejected"))))
+
+(define (task:heartbeat session id worker now)
+  (if (equal? (task:ensure! session) "bus")
+    (bus-call "heartbeat" session id worker now)
+    (task:standin-heartbeat id worker now)))
+
+(define (task:standin-finish id worker now status result)
+  (let ((row (task:find id)))
+    (if (task:lease-ok? row worker now)
+      (begin
+        (hash-set! row "status" status)
+        (hash-set! row "result" result)
+        (list "ok" id))
+      (list "error" "lease-lost" "not the holder"))))
+
+(define (task:complete session id worker now result)
+  (if (equal? (task:ensure! session) "bus")
+    (bus-call "complete" session id worker now result)
+    (task:standin-finish id worker now "done" result)))
+
+(define (task:fail session id worker now reason)
+  (if (equal? (task:ensure! session) "bus")
+    (bus-call "fail" session id worker now reason)
+    (task:standin-finish id worker now "failed" reason)))
+
+(define (task:spec id)
+  (let ((row (task:find id)))
+    (if row (hash-ref row "spec") "")))

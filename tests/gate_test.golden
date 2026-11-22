@@ -1,0 +1,10 @@
+empty=empty-contract
+pass=satisfied
+backend=stand-in
+regressed=contract-unsatisfied
+incomplete=incomplete
+judge=keep
+keep=ok
+judge-rollback=rollback
+rollback=ok
+unhost=ok

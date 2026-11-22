@@ -1,0 +1,26 @@
+;; Planner: load prompts/planner.txt, ask the LLM seam, parse the reply
+;; into a contract and tasks. Role id on the bus stays 0 until
+;; aura#5400 adds a planner role.
+(require "lib/text")
+(require "lib/llm/chat")
+
+(define (planner:parse text)
+  (let loop ((lines (text:lines text)) (contract #f) (tasks '()))
+    (if (not (pair? lines))
+      (if (and (pair? contract) (pair? tasks))
+        (list "ok" contract (reverse tasks))
+        (list "error" "parse" "need CONTRACT and TASK"))
+      (let ((line (string-trim (car lines))))
+        (cond
+          ((string=? line "") (loop (cdr lines) contract tasks))
+          ((string-prefix? line "CONTRACT ")
+           (loop (cdr lines) (text:pairs (text:after line "CONTRACT ")) tasks))
+          ((string-prefix? line "TASK ")
+           (loop (cdr lines) contract (cons (text:after line "TASK ") tasks)))
+          (else (loop (cdr lines) contract tasks)))))))
+
+(define (planner:plan requirement mode)
+  (let ((system (read-file "prompts/planner.txt")))
+    (if (not (string? system))
+      (list "error" "prompt" "missing planner prompt")
+      (planner:parse (chat:complete mode "planner" system requirement)))))

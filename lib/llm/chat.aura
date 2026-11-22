@@ -1,0 +1,55 @@
+;; LLM seam. Tests and CI stay on the mock.
+;; Real calls go through std/llm llm:chat.
+;; LLM_API_KEY, LLM_BASE_URL and LLM_MODEL are read by llm:chat from
+;; the environment (llm:chat's own base URL already defaults to
+;; https://api.deepseek.com/v1). llm:chat's model default is
+;; deepseek-chat; when LLM_MODEL is unset this module asks for
+;; deepseek-flash, the DeepSeek V4.1 Flash preset used by aura-runner.
+;; AURA_AGENTS_LLM=mock forces the mock even if a key is present.
+;; AURA_AGENTS_LLM=real forces llm:chat. Unset uses real only when a
+;; key is present, otherwise the mock.
+(require "std/llm")
+(require "lib/llm/mock")
+
+(define (chat:key?)
+  (let ((k (getenv "LLM_API_KEY")))
+    (and (string? k) (> (string-length k) 0))))
+
+(define (chat:mode-of flag key?)
+  (cond
+    ((equal? flag "mock") "mock")
+    ((equal? flag "real") "real")
+    (key? "real")
+    (else "mock")))
+
+(define (chat:mode)
+  (chat:mode-of (getenv "AURA_AGENTS_LLM") (chat:key?)))
+
+(define (chat:model-of env)
+  (if (and (string? env) (> (string-length env) 0))
+    env
+    "deepseek-flash"))
+
+(define (chat:model)
+  (chat:model-of (getenv "LLM_MODEL")))
+
+(define (chat:real system user)
+  (let* ((model (chat:model))
+         (from-env (getenv "LLM_MODEL"))
+         (extra (if (and (string? from-env) (> (string-length from-env) 0))
+                  (hash "temperature" 0)
+                  (hash "model" model "temperature" 0)))
+         (r (llm:chat (if (string? system) system "")
+                      (if (string? user) user "")
+                      extra)))
+    (cond
+      ((and (hash? r) (hash-ref r "ok" #f))
+       (let ((content (hash-ref r "content" "")))
+         (if (string? content) content "")))
+      ((hash? r) (string-append "ERROR " (hash-ref r "error" "llm")))
+      (else "ERROR llm"))))
+
+(define (chat:complete mode role system user)
+  (if (equal? mode "real")
+    (chat:real system user)
+    (mock:complete role user)))

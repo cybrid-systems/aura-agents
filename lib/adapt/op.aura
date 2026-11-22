@@ -1,0 +1,24 @@
+;; Classify a bus verb that may not be on this Aura build.
+;; An unknown op is (error unsupported "unknown bus-call op").
+;; A live session is required: the kernel reports unregistered-id
+;; before it looks at the op name.
+(require "std/bus")
+(require "std/string")
+
+(define (adapt:unknown-op? record)
+  (and (pair? record)
+       (equal? (car record) "error")
+       (pair? (cdr record))
+       (equal? (cadr record) "unsupported")
+       (pair? (cddr record))
+       (string? (caddr record))
+       (string-contains? (caddr record) "unknown bus-call op")))
+
+(define (adapt:classify session op)
+  (let ((r (bus-call op session)))
+    (cond
+      ((adapt:unknown-op? r) "stand-in")
+      ((and (pair? r) (equal? (car r) "error")
+            (pair? (cdr r)) (equal? (cadr r) "unregistered-id"))
+       "unchecked")
+      (else "bus"))))
