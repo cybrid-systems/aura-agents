@@ -1,0 +1,101 @@
+;; Worldline-bound invalidation (#6).
+;;
+;; A rollback / canary revert / constraint change must not leave stale
+;; downstream conclusions feeding the planner. Propagation walks the
+;; reverse of depends-on and produced-by: if a node depends on an
+;; invalidated predecessor, the node is invalidated too. The rule is
+;; deliberately conservative: any invalid critical predecessor
+;; invalidates the dependent node. Nodes on unrelated worldlines are
+;; untouched. History is never deleted; an overturned-by edge points at
+;; the new evidence.
+(require "std/string")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+
+(define (invalidate:critical? type)
+  (or (equal? type "depends-on") (equal? type "produced-by")))
+
+(define (invalidate:dependents g id)
+  (let ((edges (graph:edges-to g id)))
+    (map (lambda (e) (hash-ref e "from"))
+         (filter (lambda (e) (invalidate:critical? (hash-ref e "type" "")))
+                 edges))))
+
+(define (invalidate:mark! g id event-seq reason new-node-id acc)
+  (let* ((node (graph:get-node g id))
+         (was-valid (and node (equal? (hash-ref node "status" "") "valid")))
+         (marked (if node
+                   (graph:invalidate-node! g id event-seq reason)
+                   (list "error" "missing" id))))
+    (if (and node new-node-id (not (equal? new-node-id id)))
+      (graph:add-edge!
+        g
+        (let ((made (graph:make-edge
+                      (hash "type" "overturned-by"
+                            "from" id
+                            "to" new-node-id
+                            "workspace_id" (graph:workspace g)
+                            "worldline" (hash-ref node "worldline" 0)
+                            "event_seq" (if (> event-seq 0) event-seq 1)
+                            "task_id" (let ((f (hash-ref node "facts" (hash))))
+                                        (let ((t (hash-ref f "task" 0)))
+                                          (if (number? t) t 0)))
+                            "timestamp_ms" (current-time-ms)))))
+          (if (graph:node-ok? made) (cadr made) #f))))
+    (if was-valid (cons id acc) acc)))
+
+;; (invalidate:downstream! g root-id event-seq reason [new-node-id])
+;; -> (ok count ids)
+(define (invalidate:downstream! g root-id event-seq reason . rest)
+  (let ((new-node-id (if (pair? rest) (car rest) #f)))
+    (let loop ((queue (list root-id))
+               (seen (hash))
+               (acc '())
+               (steps 0))
+      (cond
+        ((not (pair? queue))
+         (list "ok" (length acc) (reverse acc)))
+        ((>= steps 1024)
+         (list "ok" (length acc) (reverse acc)))
+        (else
+          (let ((id (car queue)))
+            (if (hash-ref seen id #f)
+              (loop (cdr queue) seen acc (+ steps 1))
+              (begin
+                (hash-set! seen id #t)
+                (let ((acc2 (invalidate:mark! g id event-seq reason new-node-id acc)))
+                  (loop (append (invalidate:dependents g id) (cdr queue))
+                        seen acc2 (+ steps 1)))))))))))
+
+;; Invalidate every valid node bound to a worldline, then propagate.
+(define (invalidate:worldline! g worldline event-seq reason . rest)
+  (let ((new-node-id (if (pair? rest) (car rest) #f))
+        (roots (filter (lambda (n)
+                         (and (equal? (hash-ref n "worldline" 0) worldline)
+                              (equal? (hash-ref n "status" "") "valid")
+                              (not (and new-node-id
+                                        (equal? (hash-ref n "node_id" "") new-node-id)))))
+                       (graph:all-nodes g))))
+    (let loop ((ids (map (lambda (n) (hash-ref n "node_id")) roots))
+               (count 0)
+               (acc '()))
+      (cond
+        ((not (pair? ids)) (list "ok" count (reverse acc)))
+        (else
+          (let* ((r (invalidate:downstream! g (car ids) event-seq reason new-node-id))
+                 (n (cadr r))
+                 (got (caddr r)))
+            (loop (cdr ids) (+ count n) (append got acc))))))))
+
+;; Apply a rollback-evidence node: invalidate its worldline and point
+;; every newly-invalidated node at the rollback evidence.
+(define (invalidate:on-rollback! g rollback-id event-seq)
+  (let ((node (graph:get-node g rollback-id)))
+    (if (not node)
+      (list "error" "missing" rollback-id)
+      (invalidate:worldline! g (hash-ref node "worldline" 0) event-seq
+                             (hash-ref node "reason" "rollback")
+                             rollback-id))))
+
+(define (invalidate:count g)
+  (length (graph:invalid-nodes g)))

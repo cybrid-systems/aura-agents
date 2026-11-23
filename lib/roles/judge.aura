@@ -4,6 +4,7 @@
 ;; stand-in in lib/adapt/gate.aura until aura#5391 and aura#5402.
 (require "std/bus")
 (require "lib/adapt/gate")
+(require "lib/adapt/journal")
 
 (define (judge:decide session worldline contract evidence)
   (let ((prompt (read-file "prompts/judge.txt")))
@@ -11,5 +12,17 @@
       (list "error" "prompt" "missing judge prompt")
       (let ((g (gate:evidence session contract evidence)))
         (if (and (pair? g) (equal? (car g) "ok"))
-          (list "ok" "keep" (bus:keep session worldline 0 1) g)
-          (list "ok" "rollback" (bus:rollback session worldline) g))))))
+          (begin
+            (journal:emit! "gate-keep" 0 worldline
+                           (hash "summary" "gate keep"
+                                 "contract_hash" "judged-contract"
+                                 "facts" (hash "gate" "satisfied")))
+            (list "ok" "keep" (bus:keep session worldline 0 1) g))
+          (begin
+            (journal:emit! "gate-rollback" 0 worldline
+                           (hash "summary" "gate rollback"
+                                 "contract_hash" "judged-contract"
+                                 "reason" (if (and (pair? g) (pair? (cdr g)))
+                                            (cadr g) "gate")
+                                 "facts" (hash "gate" "rejected")))
+            (list "ok" "rollback" (bus:rollback session worldline) g)))))))

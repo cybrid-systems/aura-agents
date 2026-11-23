@@ -5,6 +5,7 @@
 ;; (error unsupported "unknown bus-call op"). This module does not
 ;; implement those verbs in Aura.
 (require "lib/adapt/op")
+(require "lib/adapt/journal")
 
 (define *task-backend* "unchecked")
 (define *tasks* '())
@@ -49,6 +50,9 @@
                                               "expiry" 0
                                               "spec" spec
                                               "result" ""))))
+    (journal:emit! "task-posted" id 0
+                   (hash "summary" (string-append "task " (number->string id) " posted")
+                         "facts" (hash "task" id)))
     (list "ok" id)))
 
 (define (task:post-task session spec)
@@ -68,6 +72,11 @@
          (hash-set! (car xs) "status" "claimed")
          (hash-set! (car xs) "holder" worker)
          (hash-set! (car xs) "expiry" (+ now *task-lease*))
+         (journal:emit! "task-claimed" (hash-ref (car xs) "id") 0
+                        (hash "summary" (string-append "task "
+                                                       (number->string (hash-ref (car xs) "id"))
+                                                       " claimed")
+                              "facts" (hash "task" (hash-ref (car xs) "id"))))
          (list "ok" (hash-ref (car xs) "id"))))
       (else (loop (cdr xs) (or held (task:held? (car xs) now)))))))
 
@@ -101,6 +110,13 @@
       (begin
         (hash-set! row "status" status)
         (hash-set! row "result" result)
+        (journal:emit! (if (equal? status "done") "task-completed" "task-failed")
+                       id 0
+                       (hash "summary" (string-append "task " (number->string id)
+                                                      (if (equal? status "done")
+                                                        " completed" " failed"))
+                             "reason" (if (string? result) result "task-finished")
+                             "facts" (hash "task" id)))
         (list "ok" id))
       (list "error" "lease-lost" "not the holder"))))
 

@@ -1,0 +1,17 @@
+first=ok
+first-count=3
+invalid=3
+d-valid=valid
+a-valid=invalidated
+a-from=20
+hint-has-chain=0
+multi-invalid=invalidated
+multi-valid=valid
+cycle=ok
+cycle-invalid=2
+repeat=0
+overturned=4
+save=ok
+reload-invalid=6
+reload-total=9
+ok

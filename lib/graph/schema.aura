@@ -1,0 +1,289 @@
+;; Experience graph schema (#3).
+;;
+;; Auditable, structured experience only: KEEP / ROLLBACK evidence,
+;; contract results, constraint rejections and data-free patterns.
+;; This is deliberately not a LoRA/parameter store, an embedding index
+;; or an unbounded conversation summary. Every node is bound to a
+;; workspace, a worldline, a candidate/contract hash and a bus sequence.
+;;
+;; Nodes carry two time axes:
+;;   valid_from_seq / invalid_from_seq  -- bus (logical) time
+;;   valid_from_ms  / invalid_from_ms   -- wall clock, for operators
+;; Invalidated history is retained; nothing here deletes evidence.
+;;
+;; Edges are deterministic bus-derived relations only:
+;;   produced-by, depends-on, overturned-by, conflicts-with, precedes
+;; A free-text relation is refused.
+(require "std/string")
+(require "std/json")
+
+(define graph:schema-version 1)
+
+(define graph:node-types
+  '("keep-evidence" "rollback-evidence" "contract-result"
+    "constraint-rejection" "pattern"))
+
+(define graph:edge-types
+  '("produced-by" "depends-on" "overturned-by" "conflicts-with" "precedes"))
+
+(define graph:statuses '("valid" "invalidated" "overturned"))
+
+(define graph:origins
+  '("bus" "seed" "cross-workspace-pattern" "synthetic"))
+
+(define (graph:member? x xs)
+  (cond ((not (pair? xs)) #f)
+        ((equal? x (car xs)) #t)
+        (else (graph:member? x (cdr xs)))))
+
+(define (graph:hex-digits) "0123456789abcdef")
+
+(define (graph:hex n)
+  (let loop ((v (if (negative? n) (- n) n)) (acc ""))
+    (if (= v 0)
+      (if (string=? acc "") "0" acc)
+      (loop (quotient v 16)
+            (string-append (substring (graph:hex-digits) (modulo v 16)
+                                      (+ 1 (modulo v 16)))
+                           acc)))))
+
+(define (graph:digest text)
+  (string-fnv1-32 (if (string? text) text "")))
+
+(define (graph:canon value)
+  (cond
+    ((string? value) value)
+    ((number? value) (number->string value))
+    ((boolean? value) (if value "1" "0"))
+    ((symbol? value) (symbol->string value))
+    ((list? value)
+     (string-append "[" (string-join (map graph:canon value) ",") "]"))
+    ((hash? value)
+     (string-append
+       "{"
+       (string-join
+         (map (lambda (k)
+                (string-append k "=" (graph:canon (hash-ref value k))))
+              (sort (hash-keys value) string<?))
+         ",")
+       "}"))
+    (else "")))
+
+(define (graph:make-id prefix parts)
+  (string-append prefix "-" (graph:hex (graph:digest (graph:canon parts)))))
+
+(define (graph:node-id type ws worldline seq tag)
+  (graph:make-id type (list type ws worldline seq tag)))
+
+(define (graph:edge-id type from to event-seq task-id)
+  (graph:make-id "edge" (list type from to event-seq task-id)))
+
+(define (graph:str? v)
+  (and (string? v) (> (string-length v) 0)))
+
+(define (graph:num? v)
+  (and (number? v) (>= v 0)))
+
+(define (graph:seq? v)
+  (and (number? v) (> v 0)))
+
+(define (graph:hash-keys-bounded? h limit)
+  (and (hash? h) (<= (length (hash-keys h)) limit)))
+
+;; Fail closed on text that looks like target source, a filesystem path,
+;; a credential, or a private endpoint. The graph stores abstractions, so
+;; a legitimate summary never needs these.
+(define (graph:unsafe-text? s)
+  (and (string? s)
+       (or
+         (> (string-length s) 512)
+         (string-contains? s "/")
+         (string-contains? s "..")
+         (string-contains? s "://")
+         (string-contains? s "(define ")
+         (string-contains? s "#include")
+         (string-contains? s "BEGIN ")
+         (string-contains? s "LLM_API_KEY")
+         (string-contains? s "API_KEY")
+         (string-contains? s "SECRET")
+         (string-contains? s "PASSWORD")
+         (string-contains? s "TOKEN=")
+         (string-contains? s "ghp_")
+         (string-contains? s "AKIA"))))
+
+(define (graph:safe-scalar? v)
+  (cond
+    ((string? v) (not (graph:unsafe-text? v)))
+    ((number? v) #t)
+    ((boolean? v) #t)
+    (else #f)))
+
+(define (graph:safe-facts? facts)
+  (cond
+    ((not (hash? facts)) #f)
+    ((> (length (hash-keys facts)) 16) #f)
+    (else
+      (let loop ((ks (hash-keys facts)))
+        (cond
+          ((not (pair? ks)) #t)
+          ((not (graph:safe-scalar? (hash-ref facts (car ks)))) #f)
+          ((graph:unsafe-text? (car ks)) #f)
+          (else (loop (cdr ks))))))))
+
+(define (graph:valid-tags? tags)
+  (cond
+    ((not (list? tags)) #f)
+    ((> (length tags) 16) #f)
+    (else
+      (let loop ((xs tags))
+        (cond
+          ((not (pair? xs)) #t)
+          ((not (string? (car xs))) #f)
+          ((graph:unsafe-text? (car xs)) #f)
+          ((> (string-length (car xs)) 64) #f)
+          (else (loop (cdr xs))))))))
+
+(define (graph:validate-node node)
+  (cond
+    ((not (hash? node))
+     (list "error" "schema" "node must be a hash"))
+    ((not (graph:str? (hash-ref node "node_id" #f)))
+     (list "error" "schema" "missing node_id"))
+    ((not (graph:member? (hash-ref node "type" #f) graph:node-types))
+     (list "error" "schema" "invalid node type"))
+    ((or (not (graph:num? (hash-ref node "workspace_id" #f)))
+         (= (hash-ref node "workspace_id" 0) 0))
+     (list "error" "schema" "missing workspace_id"))
+    ((not (graph:num? (hash-ref node "worldline" #f)))
+     (list "error" "schema" "missing worldline"))
+    ((and (not (equal? (hash-ref node "type" "") "pattern"))
+          (= (hash-ref node "worldline" 0) 0))
+     (list "error" "schema" "missing worldline"))
+    ((and (not (graph:str? (hash-ref node "candidate_hash" "")))
+          (not (graph:str? (hash-ref node "contract_hash" ""))))
+     (list "error" "schema" "missing candidate_hash or contract_hash"))
+    ((not (graph:num? (hash-ref node "caps_mask" #f)))
+     (list "error" "schema" "missing caps_mask"))
+    ((not (graph:hash-keys-bounded? (hash-ref node "budget_snapshot" #f) 8))
+     (list "error" "schema" "missing or oversized budget_snapshot"))
+    ((not (graph:seq? (hash-ref node "seq" #f)))
+     (list "error" "schema" "missing seq"))
+    ((not (graph:num? (hash-ref node "timestamp_ms" #f)))
+     (list "error" "schema" "missing timestamp_ms"))
+    ((not (graph:num? (hash-ref node "valid_from_seq" #f)))
+     (list "error" "schema" "missing valid_from_seq"))
+    ((not (graph:num? (hash-ref node "invalid_from_seq" #f)))
+     (list "error" "schema" "missing invalid_from_seq"))
+    ((not (graph:num? (hash-ref node "valid_from_ms" #f)))
+     (list "error" "schema" "missing valid_from_ms"))
+    ((not (graph:num? (hash-ref node "invalid_from_ms" #f)))
+     (list "error" "schema" "missing invalid_from_ms"))
+    ((not (graph:member? (hash-ref node "status" #f) graph:statuses))
+     (list "error" "schema" "invalid status"))
+    ((not (graph:member? (hash-ref node "origin" #f) graph:origins))
+     (list "error" "schema" "invalid origin"))
+    ((not (graph:safe-scalar? (hash-ref node "reason" "")))
+     (list "error" "privacy" "node reason is unsafe"))
+    ((not (graph:safe-scalar? (hash-ref node "candidate_hash" "")))
+     (list "error" "privacy" "node candidate hash is unsafe"))
+    ((not (graph:safe-scalar? (hash-ref node "contract_hash" "")))
+     (list "error" "privacy" "node contract hash is unsafe"))
+    ((not (hash? (hash-ref node "facts" #f)))
+     (list "error" "schema" "missing facts"))
+    ((not (graph:safe-facts? (hash-ref node "facts")))
+     (list "error" "privacy" "node carries unsafe text"))
+    ((not (graph:valid-tags? (hash-ref node "tags" '())))
+     (list "error" "privacy" "node tags are unsafe or oversized"))
+    ((not (graph:safe-scalar? (hash-ref node "summary" "")))
+     (list "error" "privacy" "node summary is unsafe or oversized"))
+    (else (list "ok" (hash-ref node "node_id")))))
+
+(define (graph:validate-edge edge)
+  (cond
+    ((not (hash? edge))
+     (list "error" "schema" "edge must be a hash"))
+    ((not (graph:str? (hash-ref edge "edge_id" #f)))
+     (list "error" "schema" "missing edge_id"))
+    ((not (graph:member? (hash-ref edge "type" #f) graph:edge-types))
+     (list "error" "schema" "invalid edge type"))
+    ((not (graph:str? (hash-ref edge "from" #f)))
+     (list "error" "schema" "missing edge from"))
+    ((not (graph:str? (hash-ref edge "to" #f)))
+     (list "error" "schema" "missing edge to"))
+    ((or (not (graph:num? (hash-ref edge "workspace_id" #f)))
+         (= (hash-ref edge "workspace_id" 0) 0))
+     (list "error" "schema" "missing edge workspace_id"))
+    ((not (graph:num? (hash-ref edge "worldline" #f)))
+     (list "error" "schema" "missing edge worldline"))
+    ((not (graph:seq? (hash-ref edge "event_seq" #f)))
+     (list "error" "schema" "missing edge event_seq"))
+    ((not (graph:num? (hash-ref edge "task_id" #f)))
+     (list "error" "schema" "missing edge task_id"))
+    (else (list "ok" (hash-ref edge "edge_id")))))
+
+(define (graph:node-ok? record)
+  (and (pair? record) (equal? (car record) "ok")))
+
+;; (graph:make-node fields) normalizes defaults from :seq/:timestamp_ms.
+;; fields keys: type, workspace_id, worldline, candidate_hash,
+;; contract_hash, caps_mask, budget_snapshot, seq, timestamp_ms, status,
+;; reason, facts, tags, summary, origin, node_id, tag.
+(define (graph:make-node fields)
+  (let* ((type (hash-ref fields "type" ""))
+         (ws (hash-ref fields "workspace_id" 0))
+         (wl (hash-ref fields "worldline" 0))
+         (seq (hash-ref fields "seq" 0))
+         (tag (hash-ref fields "tag" ""))
+         (id (let ((given (hash-ref fields "node_id" #f)))
+               (if (graph:str? given)
+                 given
+                 (graph:node-id type ws wl seq tag))))
+         (node
+           (hash
+             "node_id" id
+             "type" type
+             "workspace_id" ws
+             "worldline" wl
+             "candidate_hash" (hash-ref fields "candidate_hash" "")
+             "contract_hash" (hash-ref fields "contract_hash" "")
+             "caps_mask" (hash-ref fields "caps_mask" 0)
+             "budget_snapshot" (hash-ref fields "budget_snapshot" (hash))
+             "seq" seq
+             "timestamp_ms" (hash-ref fields "timestamp_ms" 0)
+             "status" (hash-ref fields "status" "valid")
+             "reason" (hash-ref fields "reason" "")
+             "valid_from_seq" (hash-ref fields "valid_from_seq" seq)
+             "invalid_from_seq" (hash-ref fields "invalid_from_seq" 0)
+             "valid_from_ms" (hash-ref fields "valid_from_ms"
+                                          (hash-ref fields "timestamp_ms" 0))
+             "invalid_from_ms" (hash-ref fields "invalid_from_ms" 0)
+             "origin" (hash-ref fields "origin" "bus")
+             "facts" (hash-ref fields "facts" (hash))
+             "tags" (hash-ref fields "tags" '())
+             "summary" (hash-ref fields "summary" ""))))
+    (let ((v (graph:validate-node node)))
+      (if (graph:node-ok? v) (list "ok" node) v))))
+
+(define (graph:make-edge fields)
+  (let* ((type (hash-ref fields "type" ""))
+         (from (hash-ref fields "from" ""))
+         (to (hash-ref fields "to" ""))
+         (event-seq (hash-ref fields "event_seq" 0))
+         (task-id (hash-ref fields "task_id" 0))
+         (id (let ((given (hash-ref fields "edge_id" #f)))
+               (if (graph:str? given)
+                 given
+                 (graph:edge-id type from to event-seq task-id))))
+         (edge
+           (hash
+             "edge_id" id
+             "type" type
+             "from" from
+             "to" to
+             "workspace_id" (hash-ref fields "workspace_id" 0)
+             "worldline" (hash-ref fields "worldline" 0)
+             "event_seq" event-seq
+             "task_id" task-id
+             "timestamp_ms" (hash-ref fields "timestamp_ms" 0))))
+    (let ((v (graph:validate-edge edge)))
+      (if (graph:node-ok? v) (list "ok" edge) v))))

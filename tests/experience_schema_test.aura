@@ -1,0 +1,113 @@
+(require "std/fs")
+(require "std/string")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+
+(define ws 9101)
+(define other 9102)
+(graph:reset! ws)
+(graph:reset! other)
+
+(define g (graph:new ws))
+
+(define (node type wl seq summary)
+  (let ((made (graph:make-node
+                (hash "type" type
+                      "workspace_id" ws
+                      "worldline" wl
+                      "candidate_hash" (if (equal? type "pattern") "" "cand")
+                      "contract_hash" (if (equal? type "keep-evidence") "" "contract")
+                      "caps_mask" 31
+                      "budget_snapshot" (hash "tokens" 10)
+                      "seq" seq
+                      "timestamp_ms" (* seq 10)
+                      "summary" summary
+                      "tags" (list (string-append "tag" (number->string seq)))))))
+    (if (equal? (car made) "ok")
+      (begin (graph:add-node! g (cadr made)) (hash-ref (cadr made) "node_id"))
+      #f)))
+
+(define a (node "keep-evidence" 1 1 "keep one"))
+(define b (node "rollback-evidence" 1 2 "rollback two"))
+(define c (node "contract-result" 1 3 "contract three"))
+(define d (node "constraint-rejection" 2 4 "reject four"))
+(define e (node "pattern" 0 5 "pattern five"))
+
+(define (edge type from to seq)
+  (let ((made (graph:make-edge
+                (hash "type" type "from" from "to" to
+                      "workspace_id" ws "worldline" 1 "event_seq" seq
+                      "task_id" 0))))
+    (if (equal? (car made) "ok")
+      (begin (graph:add-edge! g (cadr made)) #t)
+      #f)))
+
+(edge "produced-by" a b 1)
+(edge "depends-on" c a 2)
+(edge "overturned-by" d a 3)
+(edge "conflicts-with" b c 4)
+(edge "precedes" c d 5)
+
+(display "schema=") (display graph:schema-version) (newline)
+(display "node-types=") (display (length graph:node-types)) (newline)
+(display "edge-types=") (display (length graph:edge-types)) (newline)
+(display "nodes=") (display (graph:node-count g)) (newline)
+(display "edges=") (display (graph:edge-count g)) (newline)
+
+(define bad-type (graph:make-node (hash "type" "bogus" "workspace_id" ws "worldline" 1
+                                        "candidate_hash" "x" "caps_mask" 1
+                                        "budget_snapshot" (hash) "seq" 9 "timestamp_ms" 9)))
+(display "bad-type=") (display (cadr bad-type)) (newline)
+
+(define missing-wl (graph:make-node (hash "type" "keep-evidence" "workspace_id" ws
+                                           "candidate_hash" "x" "caps_mask" 1
+                                           "budget_snapshot" (hash) "seq" 9 "timestamp_ms" 9)))
+(display "missing-wl=") (display (cadr missing-wl)) (newline)
+
+(define missing-hash (graph:make-node (hash "type" "keep-evidence" "workspace_id" ws
+                                             "worldline" 1 "caps_mask" 1
+                                             "budget_snapshot" (hash) "seq" 9 "timestamp_ms" 9)))
+(display "missing-hash=") (display (cadr missing-hash)) (newline)
+
+(define dirty (graph:make-node (hash "type" "keep-evidence" "workspace_id" ws "worldline" 1
+                                     "candidate_hash" "x" "caps_mask" 1
+                                     "budget_snapshot" (hash) "seq" 9 "timestamp_ms" 9
+                                     "summary" "/home/private/source.cpp")))
+(display "dirty=") (display (cadr dirty)) (newline)
+
+(define oversized (graph:make-node (hash "type" "keep-evidence" "workspace_id" ws "worldline" 1
+                                          "candidate_hash" "x" "caps_mask" 1
+                                          "budget_snapshot" (hash) "seq" 9 "timestamp_ms" 9
+                                          "summary" (string-repeat "x" 600))))
+(display "oversized=") (display (cadr oversized)) (newline)
+
+(define secret (graph:make-node (hash "type" "keep-evidence" "workspace_id" ws "worldline" 1
+                                       "candidate_hash" "x" "caps_mask" 1
+                                       "budget_snapshot" (hash) "seq" 9 "timestamp_ms" 9
+                                       "summary" "API_KEY is present")))
+(display "secret=") (display (cadr secret)) (newline)
+
+(define missing-edge (graph:make-edge (hash "type" "free-text" "from" a "to" b
+                                            "workspace_id" ws "worldline" 1
+                                            "event_seq" 9 "task_id" 0)))
+(display "bad-edge=") (display (cadr missing-edge)) (newline)
+
+(display "save=") (display (car (graph:save! g))) (newline)
+(define reloaded (graph:load ws))
+(display "reload-nodes=") (display (graph:node-count reloaded)) (newline)
+(display "reload-edges=") (display (graph:edge-count reloaded)) (newline)
+
+(define other-g (graph:new other))
+(define other-node (graph:make-node (hash "type" "keep-evidence" "workspace_id" other
+                                           "worldline" 1 "candidate_hash" "x" "caps_mask" 1
+                                           "budget_snapshot" (hash) "seq" 1 "timestamp_ms" 1
+                                           "summary" "other workspace only")))
+(graph:add-node! other-g (cadr other-node))
+(graph:save! other-g)
+(display "isolation=") (display (graph:node-count (graph:load ws))) (newline)
+(display "other-count=") (display (graph:node-count (graph:load other))) (newline)
+
+(define replay (graph:replay-log (graph:new ws) ws))
+(display "replay-nodes=") (display (graph:node-count replay)) (newline)
+(display "replay-edges=") (display (graph:edge-count replay)) (newline)
+(display "ok") (newline)

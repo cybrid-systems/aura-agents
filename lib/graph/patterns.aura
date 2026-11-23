@@ -1,0 +1,268 @@
+;; Data-free pattern export/import (#9).
+;;
+;; Only abstract experience crosses a workspace boundary: a category,
+;; an abstract summary, contract key names, a verification skeleton and
+;; a support count. Paths, source text, environment variable names,
+;; credentials and private URLs are refused fail-closed. A bundle never
+;; carries the source workspace id or source node ids, so workspace B
+;; cannot query back into workspace A.
+(require "std/string")
+(require "std/json")
+(require "std/fs")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+
+(define patterns:schema-version 1)
+
+(define (patterns:upper-word? w)
+  (if (< (string-length w) 3)
+    #f
+    (let loop ((i 0) (has-underscore #f))
+      (if (>= i (string-length w))
+        has-underscore
+        (let ((c (string-ref w i)))
+          (cond
+            ((and (>= c 65) (<= c 90)) (loop (+ i 1) has-underscore))
+            ((and (>= c 48) (<= c 57)) (loop (+ i 1) has-underscore))
+            ((= c 95) (loop (+ i 1) #t))
+            (else #f)))))))
+
+(define (patterns:unsafe? s)
+  (and (string? s)
+       (or
+         (> (string-length s) 512)
+         (string-contains? s "/")
+         (string-contains? s "..")
+         (string-contains? s "://")
+         (string-contains? s "<")
+         (string-contains? s ">")
+         (string-contains? s "(define ")
+         (string-contains? s "#include")
+         (string-contains? s "BEGIN ")
+         (string-contains? s "LLM_API_KEY")
+         (string-contains? s "API_KEY")
+         (string-contains? s "SECRET")
+         (string-contains? s "PASSWORD")
+         (string-contains? s "TOKEN")
+         (string-contains? s "ghp_")
+         (string-contains? s "AKIA")
+         (let loop ((ws (string-split-words s)))
+           (cond
+             ((not (pair? ws)) #f)
+             ((patterns:upper-word? (car ws)) #t)
+             (else (loop (cdr ws))))))))
+
+(define patterns:allowed-keys
+  '("category" "summary" "contract_keys" "verification" "support" "confidence" "origin"))
+
+(define (patterns:keys-ok? p)
+  (if (not (hash? p))
+    #f
+    (let loop ((ks (hash-keys p)))
+      (cond
+        ((not (pair? ks)) #t)
+        ((not (graph:member? (car ks) patterns:allowed-keys)) #f)
+        (else (loop (cdr ks)))))))
+
+(define (patterns:safe-list? xs)
+  (and (list? xs)
+       (<= (length xs) 8)
+       (let loop ((ys xs))
+         (cond
+           ((not (pair? ys)) #t)
+           ((not (string? (car ys))) #f)
+           ((patterns:unsafe? (car ys)) #f)
+           (else (loop (cdr ys)))))))
+
+(define (patterns:node-support node)
+  (let* ((facts (hash-ref node "facts" (hash)))
+         (s (hash-ref facts "support" 0))
+         (r (hash-ref facts "reuse" 0)))
+    (cond ((and (number? s) (> s 0)) s)
+          ((and (number? r) (> r 0)) r)
+          (else 1))))
+
+(define (patterns:node-category node)
+  (let* ((facts (hash-ref node "facts" (hash)))
+         (c (hash-ref facts "category" #f))
+         (tags (hash-ref node "tags" '())))
+    (cond
+      ((and (string? c) (> (string-length c) 0)) c)
+      ((pair? tags) (car tags))
+      (else "generic"))))
+
+(define (patterns:node-contract-keys node)
+  (let* ((facts (hash-ref node "facts" (hash)))
+         (ck (hash-ref facts "contract_keys" #f)))
+    (cond
+      ((string? ck) (filter (lambda (s) (> (string-length s) 0))
+                            (string-split ck ",")))
+      ((list? ck) ck)
+      (else '()))))
+
+;; A node may be exported only when it is valid, verified enough and
+;; every abstract field passes the sanitizer.
+(define (patterns:from-node node min-support)
+  (let ((support (patterns:node-support node))
+        (status (hash-ref node "status" ""))
+        (type (hash-ref node "type" "")))
+    (cond
+      ((not (equal? status "valid"))
+       (list "error" "unsupported" "invalidated experience"))
+      ((not (or (equal? type "keep-evidence")
+                (equal? type "constraint-rejection")
+                (equal? type "rollback-evidence")))
+       (list "error" "unsupported" "node type is not exportable"))
+      ((< support min-support)
+       (list "error" "support" "below minimum support"))
+      (else
+        (let* ((summary (hash-ref node "summary" ""))
+               (category (patterns:node-category node))
+               (keys (patterns:node-contract-keys node))
+               (verification (let ((v (hash-ref (hash-ref node "facts" (hash))
+                                                "verification" #f)))
+                               (if (string? v) v "re-run the acceptance contract"))))
+          (cond
+            ((patterns:unsafe? summary)
+             (list "error" "privacy-violation" "unsafe summary"))
+            ((patterns:unsafe? category)
+             (list "error" "privacy-violation" "unsafe category"))
+            ((not (patterns:safe-list? keys))
+             (list "error" "privacy-violation" "unsafe contract keys"))
+            ((patterns:unsafe? verification)
+             (list "error" "privacy-violation" "unsafe verification"))
+            (else
+              (list "ok"
+                    (hash "category" category
+                          "summary" summary
+                          "contract_keys" keys
+                          "verification" verification
+                          "support" support
+                          "confidence" 0.2)))))))))
+
+(define (patterns:bundle-id patterns)
+  (graph:make-id "patterns" (map (lambda (p)
+                                   (list (hash-ref p "category" "")
+                                         (hash-ref p "summary" "")
+                                         (hash-ref p "support" 0)))
+                                 patterns)))
+
+(define (patterns:export g opts)
+  (let ((min-support (let ((n (hash-ref opts "min-support" 2)))
+                       (if (number? n) n 2))))
+    (let loop ((xs (graph:valid-nodes g)) (acc '()) (rejected '()))
+      (cond
+        ((not (pair? xs))
+         (list "ok" (hash "schema" patterns:schema-version
+                          "kind" "data-free-patterns"
+                          "bundle_id" (patterns:bundle-id acc)
+                          "patterns" (reverse acc))
+               (reverse rejected)))
+        (else
+          (let ((r (patterns:from-node (car xs) min-support)))
+            (cond
+              ((graph:node-ok? r)
+               (loop (cdr xs) (cons (cadr r) acc) rejected))
+              ((equal? (cadr r) "unsupported")
+               (loop (cdr xs) acc rejected))
+              ((equal? (cadr r) "support")
+               (loop (cdr xs) acc rejected))
+              (else
+                ;; Fail closed: a dirty node aborts the export.
+                (list "error" (cadr r) (caddr r))))))))))
+
+(define (patterns:validate-bundle bundle)
+  (cond
+    ((not (hash? bundle))
+     (list "error" "schema" "bundle must be a hash"))
+    ((not (equal? (hash-ref bundle "kind" "") "data-free-patterns"))
+     (list "error" "schema" "not a data-free pattern bundle"))
+    ((not (equal? (hash-ref bundle "schema" 0) patterns:schema-version))
+     (list "error" "schema" "unsupported bundle schema"))
+    ((not (list? (hash-ref bundle "patterns" #f)))
+     (list "error" "schema" "patterns must be a list"))
+    ((> (length (hash-ref bundle "patterns")) 64)
+     (list "error" "schema" "bundle too large"))
+    (else
+      (let loop ((ps (hash-ref bundle "patterns")))
+        (cond
+          ((not (pair? ps)) (list "ok"))
+          ((not (hash? (car ps)))
+           (list "error" "schema" "pattern must be a hash"))
+          ((not (patterns:keys-ok? (car ps)))
+           (list "error" "schema" "pattern has an unknown field"))
+          ((patterns:unsafe? (hash-ref (car ps) "category" ""))
+           (list "error" "privacy-violation" "unsafe category"))
+          ((patterns:unsafe? (hash-ref (car ps) "summary" ""))
+           (list "error" "privacy-violation" "unsafe summary"))
+          ((not (patterns:safe-list? (hash-ref (car ps) "contract_keys" '())))
+           (list "error" "privacy-violation" "unsafe contract keys"))
+          ((patterns:unsafe? (hash-ref (car ps) "verification" ""))
+           (list "error" "privacy-violation" "unsafe verification"))
+          (else (loop (cdr ps))))))))
+
+(define (patterns:find g category summary)
+  (let loop ((xs (graph:nodes-by-type g "pattern")))
+    (cond
+      ((not (pair? xs)) #f)
+      ((and (equal? (hash-ref (hash-ref (car xs) "facts" (hash)) "category" "")
+                    category)
+            (equal? (hash-ref (car xs) "summary" "") summary))
+       #t)
+      (else (loop (cdr xs))))))
+
+(define (patterns:import! g bundle)
+  (let ((v (patterns:validate-bundle bundle)))
+    (if (not (graph:node-ok? v))
+      v
+      (let loop ((ps (hash-ref bundle "patterns")) (n 0))
+        (cond
+          ((not (pair? ps)) (list "ok" n))
+          (else
+            (let* ((p (car ps))
+                   (category (hash-ref p "category" "generic"))
+                   (summary (hash-ref p "summary" ""))
+                   (seq (graph:next-seq! g))
+                   (made (graph:make-node
+                           (hash "type" "pattern"
+                                 "workspace_id" (graph:workspace g)
+                                 "worldline" 0
+                                 "contract_hash" (string-append "pattern-"
+                                                                (hash-ref p "category" "generic"))
+                                 "candidate_hash" ""
+                                 "caps_mask" 0
+                                 "budget_snapshot" (hash)
+                                 "seq" seq
+                                 "timestamp_ms" (current-time-ms)
+                                 "status" "valid"
+                                 "reason" "cross-workspace-pattern"
+                                 "origin" "cross-workspace-pattern"
+                                 "summary" (hash-ref p "summary" "")
+                                 "tags" (list "pattern" (hash-ref p "category" "generic"))
+                                 "facts" (hash "category" (hash-ref p "category" "generic")
+                                               "contract_keys"
+                                               (string-join (hash-ref p "contract_keys" '()) ",")
+                                               "verification" (hash-ref p "verification" "")
+                                               "confidence" (let ((c (hash-ref p "confidence" 0.2)))
+                                                              (if (number? c) c 0.2)))))))
+              (if (patterns:find g category summary)
+                (loop (cdr ps) n)
+                (begin
+                  (if (graph:node-ok? made)
+                    (graph:add-node! g (cadr made))
+                    #f)
+                  (loop (cdr ps) (if (graph:node-ok? made) (+ n 1) n)))))))))))
+
+(define (patterns:export-file g path)
+  (let ((r (patterns:export g (hash "min-support" 2))))
+    (if (graph:node-ok? r)
+      (begin (file-write path (json-encode (cadr r))) (list "ok" path))
+      r)))
+
+(define (patterns:import-file g path)
+  (if (not (file-exists? path))
+    (list "error" "missing" path)
+    (let ((parsed (try (json-parse (file-read path)) (catch (e) #f))))
+      (if (hash? parsed)
+        (patterns:import! g parsed)
+        (list "error" "schema" "invalid bundle file")))))

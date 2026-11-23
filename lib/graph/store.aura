@@ -1,0 +1,341 @@
+;; Per-workspace experience graph store (#3).
+;;
+;; One graph per workspace_id, physically isolated under
+;;   out/experience/<workspace_id>/
+;;     snapshot.json   full graph, JSON object
+;;     events.jsonl    append-only logical mutation log
+;;
+;; Load = snapshot + replay of the event log, deduplicated by node/edge
+;; id. A workspace path is never derived from caller-supplied text: the
+;; id must be a positive integer, and the path is built here.
+(require "std/string")
+(require "std/fs")
+(require "std/json")
+(require "lib/graph/schema")
+
+(define graph:root "out/experience")
+
+(define (graph:num? v)
+  (and (number? v) (>= v 0)))
+
+(define (graph:ws? v)
+  (and (number? v) (> v 0)))
+
+(define (graph:ws-text ws)
+  (number->string ws))
+
+(define (graph:dir ws)
+  (string-append graph:root "/" (graph:ws-text ws)))
+
+(define (graph:snapshot-path ws)
+  (string-append (graph:dir ws) "/snapshot.json"))
+
+(define (graph:log-path ws)
+  (string-append (graph:dir ws) "/events.jsonl"))
+
+(define (graph:new ws)
+  (hash "kind" "experience-graph"
+        "schema" graph:schema-version
+        "workspace_id" ws
+        "nodes" (hash)
+        "edges" (hash)
+        "events" '()
+        "seq" 0
+        "last_ingested_seq" 0
+        "created_ms" (current-time-ms)
+        "updated_ms" (current-time-ms)))
+
+(define (graph:graph? g)
+  (and (hash? g)
+       (equal? (hash-ref g "kind" "") "experience-graph")))
+
+(define (graph:workspace g)
+  (hash-ref g "workspace_id" 0))
+
+(define (graph:node-table g) (hash-ref g "nodes" (hash)))
+(define (graph:edge-table g) (hash-ref g "edges" (hash)))
+
+(define (graph:node-count g)
+  (length (hash-keys (graph:node-table g))))
+
+(define (graph:edge-count g)
+  (length (hash-keys (graph:edge-table g))))
+
+(define (graph:get-node g id)
+  (hash-ref (graph:node-table g) id #f))
+
+(define (graph:get-edge g id)
+  (hash-ref (graph:edge-table g) id #f))
+
+(define (graph:has-node? g id)
+  (if (graph:get-node g id) #t #f))
+
+(define (graph:all-nodes g)
+  (let ((tbl (graph:node-table g)))
+    (map (lambda (k) (hash-ref tbl k))
+         (sort (hash-keys tbl) string<?))))
+
+(define (graph:all-edges g)
+  (let ((tbl (graph:edge-table g)))
+    (map (lambda (k) (hash-ref tbl k))
+         (sort (hash-keys tbl) string<?))))
+
+(define (graph:status= node status)
+  (equal? (hash-ref node "status" "") status))
+
+(define (graph:valid-nodes g)
+  (filter (lambda (n) (graph:status= n "valid")) (graph:all-nodes g)))
+
+(define (graph:invalid-nodes g)
+  (filter (lambda (n) (not (graph:status= n "valid"))) (graph:all-nodes g)))
+
+(define (graph:nodes-by-type g type)
+  (filter (lambda (n) (equal? (hash-ref n "type" "") type))
+          (graph:all-nodes g)))
+
+(define (graph:edges-of g id direction)
+  (let ((field (if (equal? direction "in") "to" "from")))
+    (filter (lambda (e) (equal? (hash-ref e field "") id))
+            (graph:all-edges g))))
+
+(define (graph:edges-from g id) (graph:edges-of g id "out"))
+(define (graph:edges-to g id) (graph:edges-of g id "in"))
+
+(define (graph:touch! g)
+  (hash-set! g "updated_ms" (current-time-ms))
+  g)
+
+(define (graph:next-seq! g)
+  (let ((n (+ (hash-ref g "seq" 0) 1)))
+    (hash-set! g "seq" n)
+    n))
+
+(define (graph:record! g op value)
+  (let ((ev (hash "op" op "value" value "at_ms" (current-time-ms))))
+    (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+    ev))
+
+(define (graph:add-node! g node)
+  (cond
+    ((not (graph:graph? g))
+     (list "error" "graph" "not an experience graph"))
+    ((not (equal? (hash-ref node "workspace_id" #f) (graph:workspace g)))
+     (list "error" "isolation" "node workspace differs from graph"))
+    (else
+      (let ((v (graph:validate-node node)))
+        (if (not (graph:node-ok? v))
+          v
+          (let* ((id (hash-ref node "node_id"))
+                 (tbl (graph:node-table g))
+                 (old (hash-ref tbl id #f)))
+            (if old
+              (list "ok" id "exists")
+              (begin
+                (hash-set! tbl id node)
+                (hash-set! g "nodes" tbl)
+                (graph:record! g "add-node" node)
+                (graph:touch! g)
+                (list "ok" id)))))))))
+
+(define (graph:add-edge! g edge)
+  (cond
+    ((not (graph:graph? g))
+     (list "error" "graph" "not an experience graph"))
+    ((not (equal? (hash-ref edge "workspace_id" #f) (graph:workspace g)))
+     (list "error" "isolation" "edge workspace differs from graph"))
+    (else
+      (let ((v (graph:validate-edge edge)))
+        (if (not (graph:node-ok? v))
+          v
+          (let* ((from (hash-ref edge "from"))
+                 (to (hash-ref edge "to"))
+                 (tbl (graph:edge-table g))
+                 (id (hash-ref edge "edge_id")))
+            (cond
+              ((not (graph:has-node? g from))
+               (list "error" "dangling" (string-append "missing from " from)))
+              ((not (graph:has-node? g to))
+               (list "error" "dangling" (string-append "missing to " to)))
+              ((hash-ref tbl id #f)
+               (list "ok" id "exists"))
+              (else
+                (begin
+                  (hash-set! tbl id edge)
+                  (hash-set! g "edges" tbl)
+                  (graph:record! g "add-edge" edge)
+                  (graph:touch! g)
+                  (list "ok" id))))))))))
+
+;; Invalidation updates the node in place (status + invalid time) and
+;; records the mutation. The previous body and provenance stay readable.
+(define (graph:invalidate-node! g id event-seq reason)
+  (let ((node (graph:get-node g id)))
+    (cond
+      ((not node)
+       (list "error" "missing" (string-append "no node " id)))
+      ((not (graph:status= node "valid"))
+       (list "ok" id "already"))
+      (else
+        (let ((tbl (graph:node-table g)))
+          (hash-set! node "status" "invalidated")
+          (hash-set! node "reason" (if (string? reason) reason "upstream-invalidated"))
+          (hash-set! node "invalid_from_seq" event-seq)
+          (hash-set! node "invalid_from_ms" (current-time-ms))
+          (hash-set! tbl id node)
+          (hash-set! g "nodes" tbl)
+          (graph:record! g "invalidate-node"
+                         (hash "node_id" id
+                               "event_seq" event-seq
+                               "reason" (if (string? reason) reason "upstream-invalidated")))
+          (graph:touch! g)
+          (list "ok" id))))))
+
+(define (graph:drop-node! g id)
+  (let ((tbl (graph:node-table g)))
+    (if (not (hash-ref tbl id #f))
+      (list "error" "missing" (string-append "no node " id))
+      (begin
+        (hash-set! tbl id #f)
+        ;; Aura hashes cannot delete a key; rebuild without it.
+        (hash-set! g "nodes"
+                   (let loop ((ks (hash-keys tbl)) (out (hash)))
+                     (if (not (pair? ks))
+                       out
+                       (let ((v (hash-ref tbl (car ks) #f)))
+                         (if v (hash-set! out (car ks) v) #f)
+                         (loop (cdr ks) out)))))
+        (graph:record! g "drop-node" (hash "node_id" id))
+        (graph:touch! g)
+        (list "ok" id)))))
+
+(define (graph:drop-edge! g id)
+  (let ((tbl (graph:edge-table g)))
+    (if (not (hash-ref tbl id #f))
+      (list "error" "missing" (string-append "no edge " id))
+      (begin
+        (hash-set! g "edges"
+                   (let loop ((ks (hash-keys tbl)) (out (hash)))
+                     (if (not (pair? ks))
+                       out
+                       (let ((v (hash-ref tbl (car ks) #f)))
+                         (if (and v (not (equal? (car ks) id)))
+                           (hash-set! out (car ks) v)
+                           #f)
+                         (loop (cdr ks) out)))))
+        (graph:record! g "drop-edge" (hash "edge_id" id))
+        (graph:touch! g)
+        (list "ok" id)))))
+
+(define (graph:apply-event! g ev)
+  (let ((op (hash-ref ev "op" ""))
+        (v (hash-ref ev "value" #f)))
+    (cond
+      ((equal? op "add-node")
+       (if (and (hash? v) (not (graph:has-node? g (hash-ref v "node_id" ""))))
+         (begin
+           (let ((tbl (graph:node-table g)))
+             (hash-set! tbl (hash-ref v "node_id") v)
+             (hash-set! g "nodes" tbl))
+           (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+           #t)
+         #f))
+      ((equal? op "add-edge")
+       (if (and (hash? v) (not (graph:get-edge g (hash-ref v "edge_id" ""))))
+         (begin
+           (let ((tbl (graph:edge-table g)))
+             (hash-set! tbl (hash-ref v "edge_id") v)
+             (hash-set! g "edges" tbl))
+           (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+           #t)
+         #f))
+      ((equal? op "invalidate-node")
+       (let ((node (graph:get-node g (hash-ref v "node_id" ""))))
+         (if node
+           (begin
+             (hash-set! node "status" "invalidated")
+             (hash-set! node "reason" (hash-ref v "reason" "upstream-invalidated"))
+             (hash-set! node "invalid_from_seq" (hash-ref v "event_seq" 0))
+             (hash-set! node "invalid_from_ms" (hash-ref v "invalid_from_ms" 0))
+             (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+             #t)
+           #f)))
+      ((equal? op "drop-node")
+       (if (graph:get-node g (hash-ref v "node_id" ""))
+         (begin (graph:drop-node! g (hash-ref v "node_id")) #t)
+         #f))
+      ((equal? op "drop-edge")
+       (if (graph:get-edge g (hash-ref v "edge_id" ""))
+         (begin (graph:drop-edge! g (hash-ref v "edge_id")) #t)
+         #f))
+      ((equal? op "cursor")
+       (begin
+         (hash-set! g "last_ingested_seq" (hash-ref v "seq" 0))
+         #t))
+      (else #f))))
+
+(define (graph:save! g)
+  (if (not (graph:graph? g))
+    (list "error" "graph" "not an experience graph")
+    (let ((ws (graph:workspace g)))
+      (make-directory (graph:dir ws))
+      (hash-set! g "updated_ms" (current-time-ms))
+      (file-write (graph:snapshot-path ws) (json-encode g))
+      (file-write (graph:log-path ws)
+                  (string-join
+                    (map json-encode (hash-ref g "events" '()))
+                    "\n"))
+      (list "ok" (graph:node-count g) (graph:edge-count g)))))
+
+(define (graph:replay-log g ws)
+  (let ((path (graph:log-path ws)))
+    (if (not (file-exists? path))
+      g
+      (let ((text (file-read path)))
+        (if (not (string? text))
+          g
+          (let loop ((lines (string-split text "\n")))
+            (cond
+              ((not (pair? lines)) g)
+              ((string=? (string-trim (car lines)) "")
+               (loop (cdr lines)))
+              (else
+                (let ((ev (try (json-parse (car lines)) (catch (e) #f))))
+                  (if (hash? ev) (graph:apply-event! g ev) #f)
+                  (loop (cdr lines)))))))))))
+
+(define (graph:load ws)
+  (if (not (graph:ws? ws))
+    (list "error" "workspace" "workspace_id must be a positive integer")
+    (let* ((path (graph:snapshot-path ws))
+           (base (if (file-exists? path)
+                   (let ((parsed (try (json-parse (file-read path)) (catch (e) #f))))
+                     (if (and (hash? parsed)
+                              (equal? (hash-ref parsed "kind" "") "experience-graph"))
+                       parsed
+                       (graph:new ws)))
+                   (graph:new ws))))
+      (graph:replay-log base ws))))
+
+(define (graph:open ws)
+  (graph:load ws))
+
+(define (graph:reset! ws)
+  (if (not (graph:ws? ws))
+    (list "error" "workspace" "workspace_id must be a positive integer")
+    (begin
+      (let ((snap (graph:snapshot-path ws)) (log (graph:log-path ws)))
+        (if (file-exists? snap) (file-delete snap) #f)
+        (if (file-exists? log) (file-delete log) #f))
+      (graph:new ws))))
+
+(define (graph:summary g)
+  (list (graph:workspace g)
+        (graph:node-count g)
+        (graph:edge-count g)
+        (hash-ref g "last_ingested_seq" 0)))
+
+(define (graph:set-cursor! g seq)
+  (hash-set! g "last_ingested_seq" seq)
+  (graph:record! g "cursor" (hash "seq" seq))
+  (graph:touch! g)
+  seq)

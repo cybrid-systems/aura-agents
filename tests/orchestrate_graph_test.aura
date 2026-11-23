@@ -1,0 +1,48 @@
+(require "lib/orchestrate")
+(require "lib/graph/store")
+
+(define ws 9170)
+(graph:reset! ws)
+
+(define sample (hash "cpus" 3 "load" 0 "mem-available-kb" 8000000))
+(define result
+  (orchestrate:run (hash "requirement" "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。"
+                         "sample" sample
+                         "mode" "mock"
+                         "workspace" ws
+                         "approve" "approved"
+                         "now" 0
+                         "graph" "on")))
+(display "result-graph=") (display (hash-ref result "graph")) (newline)
+(display "result-nodes=") (display (hash-ref result "graph-nodes")) (newline)
+(display "result-edges=") (display (hash-ref result "graph-edges")) (newline)
+(display "result-demo=") (display (hash-ref result "demo")) (newline)
+(display "result-keep=") (display (hash-ref result "result")) (newline)
+
+(define g (graph:load ws))
+(display "persisted-nodes=") (display (graph:node-count g)) (newline)
+(display "persisted-edges=") (display (graph:edge-count g)) (newline)
+(display "has-task=") (display (if (pair? (filter (lambda (n)
+                                                     (equal? (hash-ref n "reason" "") "task-anchor"))
+                                                   (graph:all-nodes g))) 1 0)) (newline)
+(display "has-keep=") (display (if (pair? (graph:nodes-by-type g "keep-evidence")) 1 0)) (newline)
+(display "cursor=") (display (> (hash-ref g "last_ingested_seq" 0) 0)) (newline)
+
+(graph:reset! 9173)
+(define timeout-result
+  (orchestrate:run (hash "requirement" "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。"
+                         "sample" sample "mode" "mock" "workspace" 9173
+                         "approve" "timeout" "now" 0 "graph" "on")))
+(display "timeout-result=") (display (hash-ref timeout-result "result")) (newline)
+(display "timeout-nodes=") (display (hash-ref timeout-result "graph-nodes")) (newline)
+
+(graph:reset! 9174)
+(define rollback-result
+  (orchestrate:run (hash "requirement" "SIMULATE-P99 add ZRANGEBYSCORE"
+                         "sample" sample "mode" "mock" "workspace" 9174
+                         "approve" "approved" "now" 0 "graph" "on")))
+(define rg (graph:load 9174))
+(display "rollback-result=") (display (hash-ref rollback-result "result")) (newline)
+(display "rollback-node=") (display (if (pair? (graph:nodes-by-type rg "rollback-evidence")) 1 0)) (newline)
+(display "invalidated=") (display (> (length (graph:invalid-nodes rg)) 0)) (newline)
+(display "ok") (newline)

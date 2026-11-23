@@ -1,0 +1,83 @@
+(require "lib/graph/query")
+(require "lib/graph/invalidate")
+(require "lib/roles/planner")
+
+(define ws 9120)
+(graph:reset! ws)
+(define g (graph:new ws))
+
+(define (node type seq summary tags facts)
+  (let ((made (graph:make-node
+                (hash "type" type "workspace_id" ws "worldline" 1
+                      "candidate_hash" (string-append "c" (number->string seq))
+                      "contract_hash" "contract"
+                      "caps_mask" 1 "budget_snapshot" (hash)
+                      "seq" seq "timestamp_ms" seq
+                      "summary" summary "tags" tags "facts" facts))))
+    (graph:add-node! g (cadr made))
+    (hash-ref (cadr made) "node_id")))
+
+(define keep (node "keep-evidence" 1 "KEEP p99 guard verified" (list "p99" "guard")
+                   (hash "reuse" 5)))
+(define reject (node "constraint-rejection" 2 "AVOID p99 regression" (list "p99" "avoid")
+                     (hash "category" "p99-regression-guard")))
+(define stale (node "keep-evidence" 3 "p99 stale conclusion" (list "p99")
+                    (hash)))
+(define base (node "keep-evidence" 4 "baseline guard" (list "baseline")
+                   (hash)))
+(define neighbor (node "constraint-rejection" 5 "neighbor p99 warning" (list "p99")
+                       (hash)))
+
+(define (edge type from to seq)
+  (let ((made (graph:make-edge
+                (hash "type" type "from" from "to" to "workspace_id" ws
+                      "worldline" 1 "event_seq" seq "task_id" 0))))
+    (graph:add-edge! g (cadr made))))
+
+(edge "depends-on" keep reject 10)
+(edge "depends-on" neighbor keep 11)
+(edge "depends-on" base keep 12)
+
+(display "invalidate=") (display (car (invalidate:downstream! g stale 20 "stale"))) (newline)
+
+(define q (graph:query-for-planner g (list "p99") (hash "max-hops" 2 "max-nodes" 8)))
+(display "valid=") (display (length (hash-ref q "valid"))) (newline)
+(display "invalid=") (display (length (hash-ref q "invalid"))) (newline)
+(display "hint-bytes=") (display (hash-ref q "bytes")) (newline)
+(display "hint-lines=") (display (length (string-split (hash-ref q "hint") "\n"))) (newline)
+
+(define stale-id (hash-ref (graph:get-node g stale) "node_id"))
+(display "stale-in-valid=")
+(display (let loop ((xs (hash-ref q "valid")))
+           (cond ((not (pair? xs)) 0)
+                 ((equal? (hash-ref (car xs) "node_id") stale-id) 1)
+                 (else (loop (cdr xs))))))
+(newline)
+(display "stale-in-hint=")
+(display (if (string-contains? (hash-ref q "hint") "stale conclusion") 1 0))
+(newline)
+
+(define q2 (graph:query-for-planner g (list "baseline") (hash "max-hops" 2 "max-nodes" 8)))
+(display "two-hop=") (display (length (hash-ref q2 "valid"))) (newline)
+(display "two-hop-has-neighbor=")
+(display (let loop ((xs (hash-ref q2 "valid")))
+           (cond ((not (pair? xs)) 0)
+                 ((equal? (hash-ref (car xs) "summary") "neighbor p99 warning") 1)
+                 (else (loop (cdr xs))))))
+(newline)
+
+(define q3 (graph:query-for-planner g (list "p99") (hash "max-chars" 20)))
+(display "budget=") (display (<= (hash-ref q3 "bytes") 20)) (newline)
+
+(define before-count (graph:node-count g))
+(define plan (planner:plan-with "p99 requirement" "mock" g))
+(display "plan=") (display (car plan)) (newline)
+(display "write-free=") (display (= before-count (graph:node-count g))) (newline)
+(display "planner-hits=") (display (> (length (planner:last-hits)) 0)) (newline)
+(display "hits=") (display (> (length (hash-ref q "hits")) 0)) (newline)
+(display "contract=") (display (length (cadr plan))) (newline)
+(display "tasks=") (display (length (caddr plan))) (newline)
+
+(define baseline (planner:plan "p99 requirement" "mock"))
+(display "off=") (display (car baseline)) (newline)
+(display "ok") (newline)

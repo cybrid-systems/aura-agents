@@ -1,0 +1,184 @@
+;; Planner-facing read-only path walk (#5).
+;;
+;; The planner gets a bounded, deterministic slice of the graph. Matching
+;; is lexical over structured fields (summary, tags, facts values, type);
+;; there is no embedding index and no model call. Invalidated nodes are
+;; hard-filtered from the positive set and may appear only as AVOID
+;; warnings. The hint is truncated by both node count and byte budget.
+(require "std/string")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+
+(define (query:stopper word)
+  (let ((w (string-downcase word)))
+    (or (string=? w "the") (string=? w "and") (string=? w "for")
+        (string=? w "with") (string=? w "that") (string=? w "this")
+        (string=? w "from") (string=? w "into") (string=? w "must")
+        (string=? w "should") (string=? w "task") (string=? w "test"))))
+
+(define (query:seeds text)
+  (if (not (string? text))
+    '()
+    (let loop ((words (string-split-words (string-downcase text))) (acc '()))
+      (cond
+        ((not (pair? words)) (reverse acc))
+        ((< (string-length (car words)) 3) (loop (cdr words) acc))
+        ((query:stopper (car words)) (loop (cdr words) acc))
+        (else (loop (cdr words) (cons (car words) acc)))))))
+
+(define (query:node-text node)
+  (string-downcase
+    (string-append
+      (hash-ref node "type" "") " "
+      (hash-ref node "summary" "") " "
+      (string-join (hash-ref node "tags" '()) " ") " "
+      (string-join (map (lambda (k)
+                          (let ((v (hash-ref (hash-ref node "facts" (hash)) k)))
+                            (if (string? v) v (if (number? v) (number->string v) ""))))
+                        (hash-keys (hash-ref node "facts" (hash))))
+                   " "))))
+
+(define (query:matches? node seeds)
+  (let ((text (query:node-text node)))
+    (let loop ((ss seeds))
+      (cond
+        ((not (pair? ss)) #f)
+        ((string-contains? text (car ss)) #t)
+        (else (loop (cdr ss)))))))
+
+(define (query:seed-nodes g seeds)
+  (if (not (pair? seeds))
+    '()
+    (filter (lambda (n) (query:matches? n seeds)) (graph:valid-nodes g))))
+
+(define (query:neighbor-ids g id)
+  (let ((out (graph:edges-from g id))
+        (in (graph:edges-to g id)))
+    (append
+      (map (lambda (e) (hash-ref e "to"))
+           (filter (lambda (e)
+                     (let ((t (hash-ref e "type" "")))
+                       (or (equal? t "depends-on")
+                           (equal? t "conflicts-with")
+                           (equal? t "overturned-by"))))
+                   out))
+      (map (lambda (e) (hash-ref e "from"))
+           (filter (lambda (e)
+                     (let ((t (hash-ref e "type" "")))
+                       (or (equal? t "depends-on")
+                           (equal? t "produced-by"))))
+                   in)))))
+
+(define (query:take n xs)
+  (let loop ((k n) (ys xs) (acc '()))
+    (if (or (<= k 0) (not (pair? ys)))
+      (reverse acc)
+      (loop (- k 1) (cdr ys) (cons (car ys) acc)))))
+
+(define (query:unique xs)
+  (let loop ((rest xs) (seen (hash)) (acc '()))
+    (cond
+      ((not (pair? rest)) (reverse acc))
+      ((hash-ref seen (car rest) #f) (loop (cdr rest) seen acc))
+      (else
+        (begin
+          (hash-set! seen (car rest) #t)
+          (loop (cdr rest) seen (cons (car rest) acc)))))))
+
+;; Bounded multi-hop walk from seed nodes. Returns (positive invalid).
+(define (query:walk g seeds opts)
+  (let* ((max-hops (let ((n (hash-ref opts "max-hops" 2)))
+                     (if (number? n) n 2)))
+         (max-nodes (let ((n (hash-ref opts "max-nodes" 8)))
+                      (if (number? n) n 8)))
+         (start (query:take max-nodes (query:seed-nodes g seeds))))
+    (let loop ((frontier (map (lambda (n) (list (hash-ref n "node_id") 0)) start))
+               (seen (hash))
+               (positive '())
+               (negative '())
+               (count 0))
+      (cond
+        ((not (pair? frontier))
+         (list (reverse positive) (reverse negative)))
+        ((>= count max-nodes)
+         (list (reverse positive) (reverse negative)))
+        (else
+          (let* ((item (car frontier))
+                 (id (car item))
+                 (depth (cadr item)))
+            (if (hash-ref seen id #f)
+              (loop (cdr frontier) seen positive negative count)
+              (let ((node (graph:get-node g id)))
+                (begin
+                  (hash-set! seen id #t)
+                  (if (not node)
+                    (loop (cdr frontier) seen positive negative count)
+                    (let ((next (if (< depth max-hops)
+                                  (append
+                                    (map (lambda (x) (list x (+ depth 1)))
+                                         (query:neighbor-ids g id))
+                                    (cdr frontier))
+                                  (cdr frontier))))
+                      (if (equal? (hash-ref node "status" "") "valid")
+                        (loop next seen (cons node positive) negative (+ count 1))
+                        (loop next seen positive (cons node negative) (+ count 1))))))))))))))
+
+(define (query:line node)
+  (let* ((type (hash-ref node "type" ""))
+         (summary (hash-ref node "summary" ""))
+         (explicit (cond
+                     ((string-prefix? summary "KEEP ") "KEEP")
+                     ((string-prefix? summary "AVOID ") "AVOID")
+                     (else #f)))
+         (prefix (cond
+                   (explicit explicit)
+                   ((equal? type "rollback-evidence") "AVOID")
+                   ((equal? type "constraint-rejection") "AVOID")
+                   ((equal? (hash-ref node "status" "") "valid") "KEEP")
+                   (else "AVOID")))
+         (text (if explicit
+                 (string-trim (substring summary
+                                         (if (equal? explicit "KEEP") 5 6)
+                                         (string-length summary)))
+                 summary))
+         (id (hash-ref node "node_id" "")))
+    (string-append prefix " " text " [" id "]")))
+
+(define (query:hint positive negative max-chars)
+  (let* ((header "EXPERIENCE GRAPH (read-only):")
+         (lines (append
+                  (map query:line positive)
+                  (map query:line negative))))
+    (if (or (not (pair? lines)) (< max-chars (string-length header)))
+      ""
+      (let loop ((xs lines) (out header) (bytes (string-length header)))
+        (cond
+          ((not (pair? xs)) out)
+          (else
+            (let ((line (string-append "
+" (car xs))))
+              (if (> (+ bytes (string-length line)) max-chars)
+                out
+                (loop (cdr xs) (string-append out line)
+                      (+ bytes (string-length line)))))))))))
+
+;; Returns a hash: valid, invalid, hits, hint, bytes.
+(define (graph:query-for-planner g seeds opts)
+  (if (not (graph:graph? g))
+    (hash "valid" '() "invalid" '() "hits" '() "hint" "" "bytes" 0)
+    (let* ((seeds (if (pair? seeds) seeds (query:seeds (if (string? seeds) seeds ""))))
+           (walked (query:walk g seeds (if (hash? opts) opts (hash))))
+           (positive (car walked))
+           (negative (cadr walked))
+           (max-chars (let ((n (hash-ref opts "max-chars" 600)))
+                        (if (number? n) n 600)))
+           (hint (query:hint positive negative max-chars)))
+      (hash "valid" positive
+            "invalid" negative
+            "hits" (append (map (lambda (n) (hash-ref n "node_id")) positive)
+                           (map (lambda (n) (hash-ref n "node_id")) negative))
+            "hint" hint
+            "bytes" (string-length hint)))))
+
+(define (graph:query-text g text)
+  (graph:query-for-planner g (query:seeds text) (hash)))

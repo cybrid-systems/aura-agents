@@ -1,0 +1,215 @@
+;; Bounded growth, std/qd elite pruning and cold start (#7).
+;;
+;; The graph keeps "different good" experience instead of a top-N of
+;; near-identical KEEP rows. valid nodes compete inside MAP-Elites cells
+;; keyed by (type, status, cost); constraint rejections get their own
+;; cells and are never displaced by a positive KEEP. Invalidated nodes
+;; stay for an audit window, then become the first pruning candidates.
+;; Everything uses std/qd; there is no external dependency.
+(require "std/string")
+(require "std/qd")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+
+(define prune:type-index
+  (hash "keep-evidence" 0
+        "rollback-evidence" 1
+        "contract-result" 2
+        "constraint-rejection" 3
+        "pattern" 4))
+
+(define prune:status-index
+  (hash "valid" 0 "invalidated" 1 "overturned" 2))
+
+(define (prune:num v default)
+  (if (number? v) v default))
+
+(define (prune:cost node)
+  (let* ((budget (hash-ref node "budget_snapshot" (hash)))
+         (tokens (prune:num (hash-ref budget "tokens" 0) 0))
+         (bucket (quotient tokens 1000)))
+    (if (> bucket 4) 4 (if (< bucket 0) 0 bucket))))
+
+(define (prune:behavior node)
+  (list (prune:num (hash-ref prune:type-index (hash-ref node "type" "") 4) 4)
+        (prune:num (hash-ref prune:status-index (hash-ref node "status" "") 2) 2)
+        (prune:cost node)))
+
+(define (prune:reuse node)
+  (let ((facts (hash-ref node "facts" (hash))))
+    (prune:num (hash-ref facts "reuse" 0) 0)))
+
+(define (prune:quality node)
+  (let* ((type (hash-ref node "type" ""))
+         (status (hash-ref node "status" ""))
+         (seq (prune:num (hash-ref node "seq" 0) 0))
+         (base (cond
+                 ((equal? status "valid") 1.0)
+                 ((equal? status "invalidated") 0.1)
+                 (else 0.2)))
+         (kind (cond
+                 ((equal? type "keep-evidence") 0.5)
+                 ((equal? type "constraint-rejection") 1.2)
+                 ((equal? type "rollback-evidence") 0.8)
+                 ((equal? type "contract-result") 0.3)
+                 (else 0.0)))
+         (reuse (* 0.1 (prune:reuse node)))
+         (recency (/ 1.0 (+ 1.0 (/ seq 100.0)))))
+    (+ base kind reuse recency)))
+
+(define (prune:map g)
+  (qd:map-elites
+    (hash "descriptors" (list (list "type" 0 4 5)
+                              (list "status" 0 2 3)
+                              (list "cost" 0 4 5))
+          "quality" "quality")))
+
+(define (prune:elites g)
+  (let ((m (prune:map g)))
+    (for-each
+      (lambda (node)
+        (qd:insert! m node (prune:quality node) (prune:behavior node)))
+      (graph:all-nodes g))
+    (map (lambda (e) (hash-ref e "cand")) (qd:elites m))))
+
+(define (prune:tier node last-seq audit-window elite?)
+  (let ((status (hash-ref node "status" ""))
+        (type (hash-ref node "type" ""))
+        (seq (prune:num (hash-ref node "seq" 0) 0)))
+    (cond
+      ((and (not (equal? status "valid"))
+            (>= seq (- last-seq audit-window))) 0)
+      ((equal? type "constraint-rejection") 1)
+      ((and (equal? status "valid") elite?) 2)
+      ((equal? type "pattern") 3)
+      (else 4))))
+
+(define (prune:sort-by-quality nodes)
+  (sort nodes (lambda (a b) (> (prune:quality a) (prune:quality b)))))
+
+;; (prune:run! g opts) -> (ok before after dropped)
+;; opts: max-nodes (soft/hard cap), audit-window (seqs of invalidated
+;; history to keep), keep-seeds (#t).
+(define (prune:last-seq g)
+  (let loop ((ns (graph:all-nodes g)) (m (hash-ref g "seq" 0)))
+    (cond
+      ((not (pair? ns)) m)
+      ((> (prune:num (hash-ref (car ns) "seq" 0) 0) m)
+       (loop (cdr ns) (hash-ref (car ns) "seq" 0)))
+      (else (loop (cdr ns) m)))))
+
+(define (prune:max-nodes opts)
+  (let ((n (hash-ref opts "max-nodes" 256)))
+    (if (and (number? n) (> n 0)) n 256)))
+
+(define (prune:run! g opts)
+  (if (not (graph:graph? g))
+    (list "error" "graph" "not an experience graph")
+    (if (<= (graph:node-count g) (prune:max-nodes opts))
+      (list "ok" (graph:node-count g) (graph:node-count g) 0)
+      (let* ((before (graph:node-count g))
+           (max-nodes (prune:max-nodes opts))
+           (audit-window (let ((n (hash-ref opts "audit-window" 32)))
+                           (if (and (number? n) (>= n 0)) n 32)))
+           (last-seq (prune:last-seq g))
+           (elites (if (hash-ref opts "elites" #t) (prune:elites g) '()))
+           (elite-ids (map (lambda (n) (hash-ref n "node_id")) elites))
+           (elite-hash (let ((h (hash)))
+                         (for-each (lambda (id) (hash-set! h id #t)) elite-ids)
+                         h))
+           (tiered
+             (sort
+               (map (lambda (n)
+                      (let ((id (hash-ref n "node_id")))
+                        (list (prune:tier n last-seq audit-window
+                                          (hash-ref elite-hash id #f))
+                              (- 0.0 (prune:quality n))
+                              id)))
+                    (graph:all-nodes g))
+               (lambda (a b)
+                 (if (= (car a) (car b))
+                   (< (cadr a) (cadr b))
+                   (< (car a) (car b))))))
+           (chosen
+             (let loop ((xs tiered) (keep '()) (n 0))
+               (cond
+                 ((not (pair? xs)) keep)
+                 ((>= n max-nodes) keep)
+                 ((> (car (car xs)) 2) keep)
+                 (else
+                   (loop (cdr xs) (cons (caddr (car xs)) keep) (+ n 1))))))
+           (chosen-hash (let ((h (hash)))
+                          (for-each (lambda (id) (hash-set! h id #t)) chosen)
+                          h))
+           (doomed (filter (lambda (n)
+                             (not (hash-ref chosen-hash (hash-ref n "node_id") #f)))
+                           (graph:all-nodes g))))
+      (for-each (lambda (n) (graph:drop-node! g (hash-ref n "node_id"))) doomed)
+      (let ((alive (let ((h (hash)))
+                     (for-each (lambda (n) (hash-set! h (hash-ref n "node_id") #t))
+                               (graph:all-nodes g))
+                     h)))
+        (for-each
+          (lambda (e)
+            (if (or (not (hash-ref alive (hash-ref e "from") #f))
+                    (not (hash-ref alive (hash-ref e "to") #f)))
+              (graph:drop-edge! g (hash-ref e "edge_id"))
+              #f))
+          (graph:all-edges g)))
+      (list "ok" before (graph:node-count g) (length doomed))))))
+
+;; Built-in, data-free seed patterns. Only abstract shapes: no paths,
+;; source text, business parameter values or private names.
+(define prune:default-seeds
+  (list
+    (hash "category" "p99-regression-guard"
+          "summary" "AVOID p99 regression: add a baseline comparison and a metric floor"
+          "contract_keys" (list "p99" "baseline")
+          "verification" "compare p99 against the baseline on the same workload")
+    (hash "category" "lease-timeout-retry"
+          "summary" "AVOID stale task lease: heartbeat before the deadline and retry after expiry"
+          "contract_keys" (list "lease" "heartbeat")
+          "verification" "kill the holder and confirm the task is re-claimed after expiry")
+    (hash "category" "contract-first"
+          "summary" "KEEP explicit acceptance contract before implementation"
+          "contract_keys" (list "tests" "metric")
+          "verification" "require a non-empty contract and gate evidence")
+    (hash "category" "rollback-preserves-history"
+          "summary" "KEEP rollback invalidation instead of deleting history"
+          "contract_keys" (list "worldline" "rollback")
+          "verification" "audit replay still shows the overturned node")))
+
+(define (prune:seed! g patterns)
+  (if (not (graph:graph? g))
+    (list "error" "graph" "not an experience graph")
+    (let loop ((ps patterns) (n 0))
+      (cond
+        ((not (pair? ps)) (list "ok" n))
+        ((not (hash? (car ps))) (loop (cdr ps) n))
+        (else
+          (let* ((seq (graph:next-seq! g))
+                 (made (graph:make-node
+                         (hash "type" "pattern"
+                               "workspace_id" (graph:workspace g)
+                               "worldline" 0
+                               "contract_hash" (string-append "seed-"
+                                                              (hash-ref (car ps) "category" "pattern"))
+                               "candidate_hash" ""
+                               "caps_mask" 0
+                               "budget_snapshot" (hash)
+                               "seq" seq
+                               "timestamp_ms" (current-time-ms)
+                               "status" "valid"
+                               "reason" "seed"
+                               "origin" "seed"
+                               "summary" (hash-ref (car ps) "summary" "")
+                               "tags" (list "seed" (hash-ref (car ps) "category" ""))
+                               "facts" (hash "category" (hash-ref (car ps) "category" "")
+                                             "contract_keys"
+                                             (string-join (hash-ref (car ps) "contract_keys" '()) ",")
+                                             "verification" (hash-ref (car ps) "verification" ""))))))
+            (if (graph:node-ok? made) (graph:add-node! g (cadr made)) #f)
+            (loop (cdr ps) (if (graph:node-ok? made) (+ n 1) n))))))))
+
+(define (prune:seed-default! g)
+  (prune:seed! g prune:default-seeds))

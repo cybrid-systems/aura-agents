@@ -1,0 +1,62 @@
+(require "lib/graph/ingest")
+(require "lib/llm/mock")
+
+(define ws 9110)
+(graph:reset! ws)
+(define g (graph:new ws))
+
+(define events
+  (list
+    (hash "seq" 1 "timestamp_ms" 100 "kind" "task-posted" "worldline" 7 "task_id" 11)
+    (hash "seq" 2 "timestamp_ms" 110 "kind" "task-claimed" "worldline" 7 "task_id" 11)
+    (hash "seq" 3 "timestamp_ms" 120 "kind" "approval-approved" "worldline" 7 "task_id" 11)
+    (hash "seq" 4 "timestamp_ms" 130 "kind" "task-completed" "worldline" 7 "task_id" 11)
+    (hash "seq" 5 "timestamp_ms" 140 "kind" "gate-keep" "worldline" 7 "task_id" 11
+          "candidate_hash" "cand-1" "contract_hash" "contract-1"
+          "summary" "keep p99 guard" "tags" (list "p99" "guard"))
+    (hash "seq" 6 "timestamp_ms" 200 "kind" "task-posted" "worldline" 8 "task_id" 12)
+    (hash "seq" 7 "timestamp_ms" 210 "kind" "approval-denied" "worldline" 8 "task_id" 12)
+    (hash "seq" 8 "timestamp_ms" 220 "kind" "task-failed" "worldline" 8 "task_id" 12)
+    (hash "seq" 9 "timestamp_ms" 230 "kind" "gate-rollback" "worldline" 8 "task_id" 12
+          "candidate_hash" "cand-2" "contract_hash" "contract-2"
+          "summary" "rollback p99 regression" "tags" (list "p99" "avoid"))
+    (hash "seq" 10 "timestamp_ms" 240 "kind" "rollback" "worldline" 8 "task_id" 12
+          "summary" "worldline rollback" "tags" (list "rollback"))))
+
+(mock:reset!)
+(define r (ingest:events g events))
+(display "mock-calls=") (display (mock:calls)) (newline)
+(display "ingest=") (display (car r)) (newline)
+(display "added-nodes=") (display (cadr r)) (newline)
+(display "added-edges=") (display (caddr r)) (newline)
+(display "cursor=") (display (list-ref r 3)) (newline)
+(display "nodes=") (display (graph:node-count g)) (newline)
+(display "edges=") (display (graph:edge-count g)) (newline)
+
+(define (count-type type)
+  (length (graph:nodes-by-type g type)))
+(display "contract-result=") (display (count-type "contract-result")) (newline)
+(display "keep-evidence=") (display (count-type "keep-evidence")) (newline)
+(display "constraint-rejection=") (display (count-type "constraint-rejection")) (newline)
+(display "rollback-evidence=") (display (count-type "rollback-evidence")) (newline)
+
+(define (count-edge type)
+  (length (filter (lambda (e) (equal? (hash-ref e "type" "") type))
+                  (graph:all-edges g))))
+(display "produced-by=") (display (count-edge "produced-by")) (newline)
+(display "precedes=") (display (count-edge "precedes")) (newline)
+(display "edge-source=")
+(display (let ((e (car (graph:all-edges g))))
+           (and (hash-ref e "event_seq" 0) (hash-ref e "event_seq" 0))))
+(newline)
+
+(define again (ingest:events g events))
+(display "replay=") (display (car again)) (newline)
+(display "replay-nodes=") (display (cadr again)) (newline)
+(display "replay-edges=") (display (caddr again)) (newline)
+(display "replay-skipped=") (display (list-ref again 4)) (newline)
+(display "stable-nodes=") (display (graph:node-count g)) (newline)
+(display "stable-edges=") (display (graph:edge-count g)) (newline)
+(display "save=") (display (car (graph:save! g))) (newline)
+(display "reload-nodes=") (display (graph:node-count (graph:load ws))) (newline)
+(display "ok") (newline)

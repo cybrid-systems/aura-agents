@@ -1,0 +1,9 @@
+baseline-success=0
+graph-success=1
+baseline-result=contract-unsatisfied
+graph-result=keep
+hint-bytes=115
+invalidated-seeds=4
+after-invalidation-success=0
+invalidated-hits=0
+ok=#t

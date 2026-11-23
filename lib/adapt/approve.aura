@@ -3,6 +3,7 @@
 ;; (bus:approve). Timeout is a denial. This module does not implement
 ;; the verb in Aura.
 (require "lib/adapt/op")
+(require "lib/adapt/journal")
 
 (define *approve-backend* "unchecked")
 (define *approvals* '())
@@ -41,6 +42,10 @@
                                         "decision" "pending"
                                         "deadline" deadline)
                                   *approvals*))
+          (journal:emit! "approval-requested" 0 0
+                         (hash "summary" (string-append "approval requested "
+                                                       (if (string? object-id) object-id "object"))
+                               "facts" (hash "object" (if (string? object-id) object-id "object"))))
           (list "ok" object-id))))))
 
 (define (approve:standin-decide object-id decision)
@@ -51,6 +56,12 @@
         (list "error" "validation-failed" "decision must be approved or denied")
         (begin
           (hash-set! row "decision" decision)
+          (journal:emit! (if (equal? decision "approved")
+                           "approval-approved" "approval-denied")
+                         0 0
+                         (hash "summary" (string-append "approval " decision)
+                               "reason" decision
+                               "facts" (hash "object" (if (string? object-id) object-id "object"))))
           (list "ok" decision))))))
 
 (define (approve:decide session object-id decision)
@@ -68,6 +79,11 @@
         (begin
           (if (and (equal? (hash-ref row "decision") "pending")
                    (>= now (hash-ref row "deadline")))
-            (hash-set! row "decision" "timeout")
+            (begin
+              (hash-set! row "decision" "timeout")
+              (journal:emit! "approval-timeout" 0 0
+                             (hash "summary" "approval timeout"
+                                   "reason" "timeout"
+                                   "facts" (hash "object" (if (string? object-id) object-id "object")))))
             #f)
           (list "ok" (hash-ref row "decision")))))))

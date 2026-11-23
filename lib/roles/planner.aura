@@ -3,6 +3,7 @@
 ;; aura#5400 adds a planner role.
 (require "lib/text")
 (require "lib/llm/chat")
+(require "lib/graph/query")
 
 (define (planner:parse text)
   (let loop ((lines (text:lines text)) (contract #f) (tasks '()))
@@ -19,8 +20,26 @@
            (loop (cdr lines) contract (cons (text:after line "TASK ") tasks)))
           (else (loop (cdr lines) contract tasks)))))))
 
-(define (planner:plan requirement mode)
-  (let ((system (read-file "prompts/planner.txt")))
+;; Read-only experience-graph injection (#5). graph may be #f or an
+;; experience graph; the returned CONTRACT/TASK shape is unchanged.
+(define *planner-last-hits* '())
+
+(define (planner:last-hits) *planner-last-hits*)
+
+(define (planner:plan-with requirement mode graph)
+  (let* ((q (if graph
+              (graph:query-for-planner graph (query:seeds requirement) (hash))
+              (hash "hint" "" "hits" '())))
+         (hint (hash-ref q "hint" ""))
+         (hits (hash-ref q "hits" '()))
+         (system (read-file "prompts/planner.txt"))
+         (user (if (and (string? hint) (> (string-length hint) 0))
+                 (string-append requirement "\n\n" hint)
+                 requirement)))
+    (set! *planner-last-hits* hits)
     (if (not (string? system))
       (list "error" "prompt" "missing planner prompt")
-      (planner:parse (chat:complete mode "planner" system requirement)))))
+      (planner:parse (chat:complete mode "planner" system user)))))
+
+(define (planner:plan requirement mode)
+  (planner:plan-with requirement mode #f))

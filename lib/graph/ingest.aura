@@ -1,0 +1,347 @@
+;; Deterministic bus-event ingest (#4).
+;;
+;; Events are projected to nodes and edges by fixed rules. No LLM, no
+;; network, no free-text extraction. The same event sequence produces the
+;; same graph on replay; node ids are content-addressed and add-node is
+;; idempotent, so a restarted ingestor does not grow the graph.
+;;
+;; Accepted event shape (hash):
+;;   seq timestamp_ms kind worldline task_id actor
+;;   candidate_hash contract_hash caps_mask reason
+;;   summary? facts? tags?
+;;
+;; kind is one of:
+;;   task-posted task-claimed task-completed task-failed
+;;   contract-created contract-evidence
+;;   approval-approved approval-denied approval-timeout
+;;   gate-keep gate-rollback constraint-rejection constraint-change
+;;   rollback canary-revert
+(require "std/string")
+(require "std/json")
+(require "std/bus")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+
+(define (ingest:get ev key default)
+  (hash-ref ev key default))
+
+(define (ingest:event-seq ev)
+  (let ((n (ingest:get ev "seq" 0)))
+    (if (number? n) n 0)))
+
+(define (ingest:event-kind ev)
+  (let ((k (ingest:get ev "kind" "")))
+    (if (string? k) k "")))
+
+(define (ingest:task-id ev)
+  (let ((n (ingest:get ev "task_id" 0)))
+    (if (number? n) n 0)))
+
+(define (ingest:worldline ev)
+  (let ((wl (ingest:get ev "worldline" 0)))
+    (cond
+      ((and (number? wl) (> wl 0)) wl)
+      ((> (ingest:task-id ev) 0) (ingest:task-id ev))
+      (else 0))))
+
+(define (ingest:merge base extra)
+  (if (hash? extra)
+    (begin
+      (for-each (lambda (k) (hash-set! base k (hash-ref extra k)))
+                (hash-keys extra))
+      base)
+    base))
+
+(define (ingest:hash ev key default)
+  (let ((v (hash-ref ev key default)))
+    (if (hash? v) v default)))
+
+(define (ingest:list ev key default)
+  (let ((v (hash-ref ev key default)))
+    (if (list? v) v default)))
+
+(define (ingest:task-anchor-id ws task)
+  (graph:make-id "contract-result" (list ws task "task-anchor")))
+
+(define (ingest:task-anchor-node ws ev)
+  (let* ((task (ingest:task-id ev))
+         (seq (ingest:event-seq ev)))
+    (hash "node_id" (ingest:task-anchor-id ws task)
+          "type" "contract-result"
+          "workspace_id" ws
+          "worldline" (ingest:worldline ev)
+          "contract_hash" (string-append "task-" (number->string task))
+          "candidate_hash" ""
+          "caps_mask" (ingest:get ev "caps_mask" 0)
+          "budget_snapshot" (hash "task" task)
+          "seq" (if (> seq 0) seq 1)
+          "timestamp_ms" (ingest:get ev "timestamp_ms" 0)
+          "status" "valid"
+          "reason" "task-anchor"
+          "origin" "bus"
+          "summary" (string-append "task " (number->string task))
+          "tags" (list "task")
+          "facts" (hash "task" task "kind" "task"))))
+
+(define (ingest:ensure-anchor! g ws ev)
+  (let* ((id (ingest:task-anchor-id ws (ingest:task-id ev)))
+         (existing (graph:get-node g id)))
+    (if existing
+      id
+      (let ((made (graph:make-node (ingest:task-anchor-node ws ev))))
+        (if (graph:node-ok? made)
+          (begin (graph:add-node! g (cadr made)) id)
+          #f)))))
+
+(define (ingest:add-edge! g ev type from to)
+  (if (or (not (string? from))
+          (not (string? to))
+          (not (graph:has-node? g from))
+          (not (graph:has-node? g to)))
+    #f
+    (let* ((s (ingest:event-seq ev))
+           (made (graph:make-edge
+                   (hash "type" type
+                         "from" from
+                         "to" to
+                         "workspace_id" (graph:workspace g)
+                         "worldline" (ingest:worldline ev)
+                         "event_seq" (if (> s 0) s 1)
+                         "task_id" (ingest:task-id ev)
+                         "timestamp_ms" (ingest:get ev "timestamp_ms" 0)))))
+      (if (graph:node-ok? made)
+        (begin (graph:add-edge! g (cadr made)) #t)
+        #f))))
+
+(define (ingest:base-fields g ev type summary extra-facts)
+  (let* ((ws (graph:workspace g))
+         (task (ingest:task-id ev))
+         (seq (ingest:event-seq ev))
+         (given-c (ingest:get ev "candidate_hash" ""))
+         (given-k (ingest:get ev "contract_hash" "")))
+    (hash "type" type
+          "workspace_id" ws
+          "worldline" (ingest:worldline ev)
+          "candidate_hash" (if (and (string? given-c) (> (string-length given-c) 0))
+                             given-c
+                             (string-append "event-" (number->string seq)))
+          "contract_hash" (if (and (string? given-k) (> (string-length given-k) 0))
+                            given-k
+                            (string-append "task-" (number->string task)))
+          "caps_mask" (ingest:get ev "caps_mask" 0)
+          "budget_snapshot" (ingest:hash ev "budget" (hash "task" task))
+          "seq" (if (> seq 0) seq 1)
+          "timestamp_ms" (ingest:get ev "timestamp_ms" 0)
+          "status" "valid"
+          "reason" (let ((r (ingest:get ev "reason" "")))
+                     (if (and (string? r) (> (string-length r) 0))
+                       r
+                       (ingest:event-kind ev)))
+          "origin" "bus"
+          "summary" (if (and (string? summary) (> (string-length summary) 0))
+                      summary
+                      (ingest:event-kind ev))
+          "tags" (ingest:list ev "tags" '())
+          "facts" (ingest:merge
+                   (hash "task" task "kind" (ingest:event-kind ev))
+                   extra-facts))))
+
+(define (ingest:event-node! g ev type summary extra-facts)
+  (let ((made (graph:make-node (ingest:base-fields g ev type summary extra-facts))))
+    (if (graph:node-ok? made)
+      (let* ((node (cadr made))
+             (added (graph:add-node! g node)))
+        (if (graph:node-ok? added) (hash-ref node "node_id") #f))
+      #f)))
+
+(define (ingest:kind->type kind)
+  (cond
+    ((equal? kind "task-failed") "constraint-rejection")
+    ((equal? kind "approval-approved") "contract-result")
+    ((or (equal? kind "approval-denied")
+         (equal? kind "approval-timeout")
+         (equal? kind "constraint-rejection")
+         (equal? kind "constraint-change")) "constraint-rejection")
+    ((equal? kind "gate-keep") "keep-evidence")
+    ((or (equal? kind "gate-rollback")
+         (equal? kind "rollback")
+         (equal? kind "canary-revert")) "rollback-evidence")
+    (else "contract-result")))
+
+(define (ingest:kind->summary kind)
+  (cond
+    ((equal? kind "task-posted") "task posted")
+    ((equal? kind "task-claimed") "task claimed")
+    ((equal? kind "task-completed") "task completed")
+    ((equal? kind "task-failed") "task failed")
+    ((equal? kind "approval-approved") "approval approved")
+    ((equal? kind "approval-denied") "approval denied")
+    ((equal? kind "approval-timeout") "approval timeout")
+    ((equal? kind "contract-created") "contract created")
+    ((equal? kind "contract-evidence") "contract evidence")
+    ((equal? kind "gate-keep") "gate keep")
+    ((equal? kind "gate-rollback") "gate rollback")
+    ((equal? kind "constraint-rejection") "constraint rejection")
+    ((equal? kind "constraint-change") "constraint change")
+    ((equal? kind "rollback") "worldline rollback")
+    ((equal? kind "canary-revert") "canary revert")
+    (else kind)))
+
+;; Returns (ok nodes-added edges-added cursor skipped).
+(define (ingest:events g events)
+  (if (not (graph:graph? g))
+    (list "error" "graph" "not an experience graph")
+    (let ((ws (graph:workspace g))
+          (cursor (hash-ref g "last_ingested_seq" 0)))
+      (let loop ((xs events)
+                 (last (hash))
+                 (nodes 0)
+                 (edges 0)
+                 (skipped 0)
+                 (maxseq cursor))
+        (cond
+          ((not (pair? xs))
+           (begin
+             (graph:set-cursor! g maxseq)
+             (list "ok" nodes edges maxseq skipped)))
+          ((not (hash? (car xs)))
+           (loop (cdr xs) last nodes edges (+ skipped 1) maxseq))
+          (else
+            (let* ((ev (car xs))
+                   (seq (ingest:event-seq ev))
+                   (kind (ingest:event-kind ev))
+                   (task (ingest:task-id ev))
+                   (wl (ingest:worldline ev)))
+              (if (or (<= seq 0) (<= seq cursor) (= wl 0) (string=? kind ""))
+                (loop (cdr xs) last nodes edges (+ skipped 1) maxseq)
+                (let* ((anchor (ingest:ensure-anchor! g ws ev))
+                       (given-summary (ingest:get ev "summary" ""))
+                       (node-id (ingest:event-node!
+                                  g ev (ingest:kind->type kind)
+                                  (if (and (string? given-summary)
+                                           (> (string-length given-summary) 0))
+                                    given-summary
+                                    (ingest:kind->summary kind))
+                                  (ingest:hash ev "facts" (hash))))
+                       (e1 (if node-id
+                             (ingest:add-edge! g ev "produced-by" node-id anchor)
+                             #f))
+                       (prev (hash-ref last task #f))
+                       (e2 (if (and node-id prev (not (equal? prev node-id)))
+                             (ingest:add-edge! g ev "precedes" prev node-id)
+                             #f)))
+                  (if node-id
+                    (hash-set! last task node-id)
+                    #f)
+                  (loop (cdr xs) last
+                        (+ nodes (if node-id 1 0))
+                        (+ edges (if e1 1 0) (if e2 1 0))
+                        skipped
+                        (max maxseq seq)))))))))))
+
+(define (ingest:journal g events)
+  (ingest:events g events))
+
+;; Optional real-bus adapter (#4): audit rows are
+;;   (kind token worldline result version timestamp-ms seq reason)
+;; The task id lives in result for the task/approval/contract/budget
+;; family. This keeps the same projection rules as the journal so a
+;; stand-in run and a real bus run produce the same node shapes.
+(define (ingest:audit-kind n)
+  (cond ((= n 31) "task-posted")
+        ((= n 32) "task-claimed")
+        ((= n 33) "task-claimed")
+        ((= n 34) "task-completed")
+        ((= n 35) "task-failed")
+        ((= n 36) "task-failed")
+        ((= n 37) "task-failed")
+        ((= n 38) "approval-request")
+        ((= n 39) "approval-approved")
+        ((= n 40) "approval-denied")
+        ((= n 41) "approval-timeout")
+        ((= n 42) "contract-created")
+        ((= n 43) "contract-evidence")
+        ((= n 44) "constraint-rejection")
+        ((= n 5) "gate-keep")
+        ((= n 6) "rollback")
+        ((= n 12) "constraint-change")
+        ((= n 13) "constraint-rejection")
+        ((= n 16) "canary-revert")
+        (else "")))
+
+(define (ingest:audit-row->event row)
+  (if (not (and (pair? row) (>= (length row) 8)))
+    #f
+    (let ((kind (ingest:audit-kind (car row))))
+      (if (string=? kind "")
+        #f
+        (hash "seq" (list-ref row 6)
+              "timestamp_ms" (list-ref row 5)
+              "kind" kind
+              "worldline" (list-ref row 2)
+              "task_id" (let ((r (list-ref row 3)))
+                          (if (and (number? r) (> r 0)) r 0))
+              "actor" (list-ref row 1)
+              "caps_mask" 0
+              "reason" (list-ref row 7)
+              "summary" kind
+              "facts" (hash "token" (list-ref row 1)
+                            "version" (list-ref row 4)))))))
+
+(define (ingest:audit-rows g rows)
+  (ingest:events g
+    (filter (lambda (e) (hash? e))
+            (map ingest:audit-row->event rows))))
+
+;; The row's result/detail field is 0 on some v0.3.3 builds. The task
+;; id is then supplied by the caller (bus:task-audit was asked for that
+;; id); stamp it on the projected event so replay stays deterministic.
+(define (ingest:audit-rows-for-task g rows task-id)
+  (let ((events
+          (filter (lambda (e) (hash? e))
+                  (map (lambda (row)
+                         (let ((e (ingest:audit-row->event row)))
+                           (if e
+                             (begin
+                               (hash-set! e "task_id" task-id)
+                               (if (= (hash-ref e "worldline" 0) 0)
+                                 (hash-set! e "worldline" task-id)
+                                 #f)
+                               e)
+                             #f)))
+                       rows))))
+    (ingest:events g events)))
+
+;; (ingest:from-bus g session [task-id ...])
+;; With task ids, read each task's own timeline (bus:task-audit); this is
+;; the path that works when the audit row does not carry the id. Without
+;; ids, read the whole audit log and project the rows that do.
+(define (ingest:from-bus g session . rest)
+  (if (pair? rest)
+    (let ((events
+            (map (lambda (tid)
+                   (let ((audit (bus:task-audit session tid)))
+                     (if (and (pair? audit) (equal? (car audit) "ok"))
+                       (filter (lambda (e) (hash? e))
+                               (map (lambda (row)
+                                      (let ((e (ingest:audit-row->event row)))
+                                        (if e
+                                          (begin
+                                            (hash-set! e "task_id" tid)
+                                            (if (= (hash-ref e "worldline" 0) 0)
+                                              (hash-set! e "worldline" tid)
+                                              #f)
+                                            e)
+                                          #f)))
+                                    (list-ref audit 3)))
+                       '())))
+                 rest)))
+      (let ((all (apply append events)))
+        (ingest:events g
+          (if (pair? all)
+            (sort all (lambda (a b) (< (hash-ref a "seq" 0) (hash-ref b "seq" 0))))
+            '()))))
+    (let ((audit (bus:audit session 0)))
+      (if (and (pair? audit) (equal? (car audit) "ok"))
+        (ingest:audit-rows g (list-ref audit 3))
+        (list "error" "bus" "audit unavailable")))))

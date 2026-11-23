@@ -1,0 +1,75 @@
+(require "lib/graph/prune")
+(require "lib/graph/query")
+(require "lib/graph/invalidate")
+
+(define ws 9140)
+(graph:reset! ws)
+(define g (graph:new ws))
+
+(define (node type seq wl summary)
+  (let ((made (graph:make-node
+                (hash "type" type "workspace_id" ws "worldline" wl
+                      "candidate_hash" (string-append "c" (number->string seq))
+                      "contract_hash" "contract"
+                      "caps_mask" 1 "budget_snapshot" (hash "tokens" 100)
+                      "seq" seq "timestamp_ms" seq
+                      "summary" summary "tags" (list type)))))
+    (graph:add-node! g (cadr made))
+    (hash-ref (cadr made) "node_id")))
+
+(let loop ((i 0))
+  (if (< i 200)
+    (begin (node "keep-evidence" (+ i 1) 1 (string-append "homogeneous " (number->string i)))
+           (loop (+ i 1)))
+    #f))
+(node "constraint-rejection" 500 2 "critical rejection p99")
+(node "constraint-rejection" 501 3 "critical rejection lease")
+
+(display "before=") (display (graph:node-count g)) (newline)
+(define r (prune:run! g (hash "max-nodes" 40 "audit-window" 10)))
+(display "prune=") (display (car r)) (newline)
+(display "after=") (display (graph:node-count g)) (newline)
+(display "within-cap=") (display (<= (graph:node-count g) 40)) (newline)
+(display "constraints=") (display (length (graph:nodes-by-type g "constraint-rejection"))) (newline)
+(display "types=") (display (length (filter (lambda (t) (> (length (graph:nodes-by-type g t)) 0))
+                                           graph:node-types)))
+(newline)
+(display "idempotent=") (display (car (prune:run! g (hash "max-nodes" 40)))) (newline)
+(display "stable=") (display (graph:node-count g)) (newline)
+
+(define empty (graph:new 9141))
+(display "empty=") (display (prune:run! empty (hash "max-nodes" 10))) (newline)
+(display "empty-query=") (display (hash-ref (graph:query-for-planner empty (list "p99") (hash)) "hint")) (newline)
+
+(graph:reset! 9142)
+(define cold (graph:new 9142))
+(display "seed=") (display (prune:seed-default! cold)) (newline)
+(display "seed-count=") (display (graph:node-count cold)) (newline)
+(display "seed-origin=")
+(display (length (filter (lambda (n) (equal? (hash-ref n "origin") "seed"))
+                         (graph:all-nodes cold))))
+(newline)
+(define cq (graph:query-for-planner cold (list "p99") (hash)))
+(display "seed-hint=") (display (if (string-contains? (hash-ref cq "hint") "AVOID p99") 1 0)) (newline)
+(display "seed-budget=") (display (<= (hash-ref cq "bytes") 600)) (newline)
+
+(graph:reset! 9143)
+(define aged (graph:new 9143))
+(define (aged-node seq summary)
+  (let ((made (graph:make-node
+                (hash "type" "keep-evidence" "workspace_id" 9143 "worldline" 1
+                      "candidate_hash" (string-append "c" (number->string seq))
+                      "caps_mask" 1 "budget_snapshot" (hash)
+                      "seq" seq "timestamp_ms" seq "summary" summary
+                      "tags" (list "aged")))))
+    (graph:add-node! aged (cadr made))
+    (hash-ref (cadr made) "node_id")))
+(define old-id (aged-node 1 "old invalid"))
+(define recent-id (aged-node 100 "recent invalid"))
+(aged-node 101 "valid elite")
+(invalidate:downstream! aged old-id 200 "old")
+(invalidate:downstream! aged recent-id 201 "recent")
+(display "aged-prune=") (display (car (prune:run! aged (hash "max-nodes" 2 "audit-window" 50)))) (newline)
+(display "recent-kept=") (display (if (graph:get-node aged recent-id) 1 0)) (newline)
+(display "old-dropped=") (display (if (graph:get-node aged old-id) 0 1)) (newline)
+(display "ok") (newline)

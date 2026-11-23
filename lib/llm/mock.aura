@@ -13,7 +13,11 @@
   (set! *mock-calls* (+ *mock-calls* 1))
   (cond
     ((equal? role "planner")
-     "CONTRACT tests=pass p99=ok\nTASK implement-zrangebyscore\nTASK check-p99\n")
+     (if (and (string? user)
+              (string-contains? user "SIMULATE-P99")
+              (not (string-contains? user "AVOID p99")))
+       "CONTRACT tests=pass p99=skip\nTASK implement-zrangebyscore\nTASK check-p99\n"
+       "CONTRACT tests=pass p99=ok\nTASK implement-zrangebyscore\nTASK check-p99\n"))
     ((equal? role "worker")
      (if (and (string? user) (string-contains? user "SIMULATE-FAIL"))
        "RESULT tests=fail p99=ok\n"

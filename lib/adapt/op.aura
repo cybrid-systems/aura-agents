@@ -14,11 +14,20 @@
        (string? (caddr record))
        (string-contains? (caddr record) "unknown bus-call op")))
 
+;; AURA_AGENTS_BUS=real probes the kernel. The default is the
+;; deterministic stand-in so aura test and CI do not depend on which
+;; v0.3.3 verbs a particular nightly happens to expose.
+(define (adapt:real-bus?)
+  (let ((v (getenv "AURA_AGENTS_BUS")))
+    (and (string? v) (equal? v "real"))))
+
 (define (adapt:classify session op)
-  (let ((r (bus-call op session)))
-    (cond
-      ((adapt:unknown-op? r) "stand-in")
-      ((and (pair? r) (equal? (car r) "error")
-            (pair? (cdr r)) (equal? (cadr r) "unregistered-id"))
-       "unchecked")
-      (else "bus"))))
+  (if (not (adapt:real-bus?))
+    "stand-in"
+    (let ((r (bus-call op session)))
+      (cond
+        ((adapt:unknown-op? r) "stand-in")
+        ((and (pair? r) (equal? (car r) "error")
+              (pair? (cdr r)) (equal? (cadr r) "unregistered-id"))
+         "unchecked")
+        (else "bus")))))

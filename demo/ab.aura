@@ -1,0 +1,4 @@
+;; Deterministic Track A A/B run (CI): graph=off vs graph=on.
+(require "lib/graph/ab")
+
+(ab:print (ab:run 5398))

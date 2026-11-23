@@ -1,0 +1,101 @@
+;; Deterministic A/B evaluation harness (#8).
+;;
+;; Track A (CI): a mock LLM scenario where round 1 records a p99
+;; constraint rejection. Without the graph the planner repeats the bad
+;; contract and the gate rolls back; with the graph the bounded hint
+;; carries the AVOID constraint and the first pass succeeds. After the
+;; seed is invalidated the hint must no longer contain it.
+;;
+;; Track B (local, real target) is scripts/ab-redis.sh. It refuses to
+;; pretend: without a real key and the aura-redis#15 fixture it reports
+;; the blocker instead of fabricating numbers.
+(require "std/string")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+(require "lib/graph/query")
+(require "lib/graph/prune")
+(require "lib/graph/invalidate")
+(require "lib/llm/mock")
+(require "lib/roles/planner")
+(require "lib/adapt/gate")
+
+(define ab:requirement "SIMULATE-P99 add ZRANGEBYSCORE, p99 must not regress")
+
+(define (ab:evidence) '(("tests" "pass") ("p99" "ok")))
+
+(define (ab:run-case g with-graph)
+  (let* ((q (if with-graph
+              (graph:query-for-planner g (query:seeds ab:requirement) (hash))
+              (hash "hint" "" "bytes" 0 "hits" '())))
+         (hint (hash-ref q "hint" ""))
+         (user (if (and (string? hint) (> (string-length hint) 0))
+                 (string-append ab:requirement "\n\n" hint)
+                 ab:requirement))
+         (reply (mock:complete "planner" user))
+         (plan (planner:parse reply)))
+    (if (not (graph:node-ok? plan))
+      (hash "first-pass" 0 "result" "parse" "hint-bytes" (hash-ref q "bytes" 0)
+            "hits" (hash-ref q "hits" '()) "hint" hint)
+      (let* ((contract (cadr plan))
+             (gate (gate:standin contract (ab:evidence)))
+             (pass (and (pair? gate) (equal? (car gate) "ok"))))
+        (hash "first-pass" (if pass 1 0)
+              "result" (if pass "keep" (if (pair? gate) (cadr gate) "gate"))
+              "contract" contract
+              "hint-bytes" (hash-ref q "bytes" 0)
+              "hits" (hash-ref q "hits" '())
+              "hint" hint)))))
+
+(define (ab:seed-graph ws)
+  (graph:reset! ws)
+  (let ((g (graph:new ws)))
+    (prune:seed-default! g)
+    g))
+
+(define (ab:invalidate-seeds! g)
+  (let ((seeds (filter (lambda (n) (equal? (hash-ref n "origin" "") "seed"))
+                       (graph:valid-nodes g))))
+    (for-each (lambda (n)
+                (invalidate:downstream! g (hash-ref n "node_id")
+                                        (+ 1000 (hash-ref n "seq" 0))
+                                        "ab-invalidation"))
+              seeds)
+    (length seeds)))
+
+;; (ab:run [workspace]) -> metrics hash
+(define (ab:run . rest)
+  (let* ((ws (if (pair? rest) (car rest) 9050))
+         (start (current-time-ms))
+         (g (ab:seed-graph ws))
+         (baseline (ab:run-case g #f))
+         (with (ab:run-case g #t))
+         (query-ms (- (current-time-ms) start))
+         (invalidated (ab:invalidate-seeds! g))
+         (after (ab:run-case g #t))
+         (invalid-hits
+           (let loop ((hs (hash-ref after "hits" '())) (n 0))
+             (cond
+               ((not (pair? hs)) n)
+               ((let ((node (graph:get-node g (car hs))))
+                  (and node (not (equal? (hash-ref node "status" "") "valid")))) (+ n 1))
+               (else (loop (cdr hs) n))))))
+    (hash "baseline-success" (hash-ref baseline "first-pass" 0)
+          "graph-success" (hash-ref with "first-pass" 0)
+          "baseline-result" (hash-ref baseline "result" "")
+          "graph-result" (hash-ref with "result" "")
+          "hint-bytes" (hash-ref with "hint-bytes" 0)
+          "query-ms" query-ms
+          "invalidated-seeds" invalidated
+          "after-invalidation-success" (hash-ref after "first-pass" 0)
+          "invalidated-hits" invalid-hits
+          "ok" (and (= (hash-ref baseline "first-pass" 0) 0)
+                    (= (hash-ref with "first-pass" 0) 1)
+                    (= invalid-hits 0)))))
+
+(define (ab:print metrics)
+  (for-each
+    (lambda (k)
+      (display k) (display "=") (display (hash-ref metrics k)) (newline))
+    '("baseline-success" "graph-success" "baseline-result" "graph-result"
+      "hint-bytes" "query-ms" "invalidated-seeds"
+      "after-invalidation-success" "invalidated-hits" "ok")))

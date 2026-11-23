@@ -1,0 +1,18 @@
+export=ok
+patterns=2
+bundle-id=#t
+import=(ok 2)
+b-count=2
+reimport=(ok 0)
+b-stable=2
+b-origin=2
+b-source-leak=0
+b-hint=1
+confidence=0.2
+dirty-node=(error privacy-violation unsafe summary)
+dirty-bundle=(error privacy-violation unsafe summary)
+env-bundle=(error privacy-violation unsafe summary)
+file-export=ok
+file-import=(ok 2)
+c-count=2
+ok

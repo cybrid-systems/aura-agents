@@ -13,11 +13,16 @@
 (require "lib/adapt/task-board")
 (require "lib/adapt/approve")
 (require "lib/adapt/gate")
+(require "lib/adapt/journal")
+(require "lib/graph/ingest")
+(require "lib/graph/invalidate")
+(require "lib/graph/prune")
 
 (define orchestrate:lines
   '("demo" "llm" "workers" "refused" "approve" "tasks" "completed"
     "gate" "result" "bus-attach"
     "task-backend" "approve-backend" "gate-backend"
+    "graph" "graph-nodes" "graph-edges"
     "bus-host" "bus-publish" "bus-subscribe" "bus-query"
     "bus-trial" "bus-keep" "bus-rollback" "bus-audit" "bus-unhost"))
 
@@ -165,8 +170,8 @@
           (hash-set! flags "gate" "fail"))
         (hash-set! flags "bus-audit" (orchestrate:audit-flag judge-s)))))))
 
-(define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now)
-  (let ((plan (planner:plan requirement mode)))
+(define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now graph)
+  (let ((plan (planner:plan-with requirement mode graph)))
     (if (not (orchestrate:ok? plan))
       (hash-set! flags "gate" "plan-fail")
       (let ((contract (cadr plan))
@@ -188,6 +193,46 @@
             (orchestrate:deliver flags judge-s worker-ss contract tasks mode now)
             (orchestrate:reject flags judge-s)))))))
 
+(define (orchestrate:graph-on? cfg)
+  (let ((v (hash-ref cfg "graph" #f))
+        (env (getenv "AURA_AGENTS_GRAPH")))
+    (if (or (equal? v #t) (equal? v "on") (equal? v "1")
+            (equal? env "on") (equal? env "1"))
+      #t
+      #f)))
+
+(define (orchestrate:latest-rollback g)
+  (let loop ((xs (graph:nodes-by-type g "rollback-evidence")) (best #f))
+    (cond
+      ((not (pair? xs)) best)
+      ((not (equal? (hash-ref (car xs) "status" "") "valid"))
+       (loop (cdr xs) best))
+      ((or (not best)
+           (> (hash-ref (car xs) "seq" 0) (hash-ref best "seq" 0)))
+       (loop (cdr xs) (car xs)))
+      (else (loop (cdr xs) best)))))
+
+(define (orchestrate:finalize-graph flags g on?)
+  (if (not on?)
+    (begin
+      (hash-set! flags "graph" "off")
+      (hash-set! flags "graph-nodes" 0)
+      (hash-set! flags "graph-edges" 0))
+    (begin
+      (ingest:journal g (journal:events))
+      (if (equal? (hash-ref flags "result") "rollback")
+        (let ((rb (orchestrate:latest-rollback g)))
+          (if rb
+            (invalidate:on-rollback! g (hash-ref rb "node_id")
+                                     (+ (hash-ref rb "seq" 0) 1))
+            #f))
+        #f)
+      (prune:run! g (hash "max-nodes" 256 "audit-window" 32))
+      (graph:save! g)
+      (hash-set! flags "graph" "on")
+      (hash-set! flags "graph-nodes" (graph:node-count g))
+      (hash-set! flags "graph-edges" (graph:edge-count g)))))
+
 (define (orchestrate:cleanup flags sessions ws)
   (for-each
     (lambda (s) (if (number? s) (bus:detach s) #f))
@@ -202,7 +247,7 @@
   (orchestrate:emit flags)
   flags)
 
-(define (orchestrate:hosted flags ws n requirement mode approve-mode now)
+(define (orchestrate:hosted flags ws n requirement mode approve-mode now graph)
   (let* ((planner-a (bus:attach "" ws 0 127 31))
          (judge-a (bus:attach "" ws 0 127 31))
          (worker-ss (orchestrate:attach-workers ws n))
@@ -214,7 +259,8 @@
       (orchestrate:cleanup flags (orchestrate:sessions planner-a judge-a worker-ss) ws)
       (begin
         (orchestrate:pipeline flags (cadr planner-a) (cadr judge-a) worker-ss
-                              requirement mode approve-mode now)
+                              requirement mode approve-mode now graph)
+        (orchestrate:finalize-graph flags graph (if graph #t #f))
         (orchestrate:cleanup flags (orchestrate:sessions planner-a judge-a worker-ss) ws)))))
 
 (define (orchestrate:fresh-flags sample mode host)
@@ -232,6 +278,9 @@
           "task-backend" "not-called"
           "approve-backend" "not-called"
           "gate-backend" "not-called"
+          "graph" "off"
+          "graph-nodes" 0
+          "graph-edges" 0
           "bus-host" (orchestrate:flag host)
           "bus-publish" "skipped"
           "bus-subscribe" "skipped"
@@ -246,6 +295,7 @@
   (task:reset!)
   (approve:reset!)
   (gate:reset!)
+  (journal:reset!)
   (let* ((mode-given (hash-ref cfg "mode" #f))
          (mode (if (string? mode-given) mode-given (chat:mode)))
          (ws (let ((n (hash-ref cfg "workspace" 5398))) (if (number? n) n 5398)))
@@ -254,10 +304,17 @@
          (approve-mode (let ((a (hash-ref cfg "approve" "approved")))
                          (if (string? a) a "approved")))
          (now (let ((n (hash-ref cfg "now" 0))) (if (number? n) n 0)))
+         (graph-on (orchestrate:graph-on? cfg))
+         (graph (if graph-on (graph:open ws) #f))
+         (base (if graph
+                 (+ 1 (max (hash-ref graph "last_ingested_seq" 0)
+                           (hash-ref graph "seq" 0)))
+                 1))
          (host (bus:host ws))
          (flags (orchestrate:fresh-flags sample mode host)))
+    (journal:start-at! base)
     (if (not (orchestrate:ok? host))
       (begin (orchestrate:emit flags) flags)
       (orchestrate:hosted flags ws (hash-ref flags "workers")
                           (orchestrate:requirement cfg)
-                          mode approve-mode now))))
+                          mode approve-mode now graph))))

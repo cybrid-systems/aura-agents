@@ -1,0 +1,12 @@
+(require "lib/graph/ab")
+
+(define m (ab:run 9160))
+(display "baseline-success=") (display (hash-ref m "baseline-success")) (newline)
+(display "graph-success=") (display (hash-ref m "graph-success")) (newline)
+(display "baseline-result=") (display (hash-ref m "baseline-result")) (newline)
+(display "graph-result=") (display (hash-ref m "graph-result")) (newline)
+(display "hint-bytes=") (display (hash-ref m "hint-bytes")) (newline)
+(display "invalidated-seeds=") (display (hash-ref m "invalidated-seeds")) (newline)
+(display "after-invalidation-success=") (display (hash-ref m "after-invalidation-success")) (newline)
+(display "invalidated-hits=") (display (hash-ref m "invalidated-hits")) (newline)
+(display "ok=") (display (hash-ref m "ok")) (newline)

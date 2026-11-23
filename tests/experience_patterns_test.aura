@@ -1,0 +1,93 @@
+(require "std/fs")
+(require "lib/graph/patterns")
+(require "lib/graph/query")
+
+(define a 9150)
+(define b 9151)
+(graph:reset! a)
+(graph:reset! b)
+(define ga (graph:new a))
+
+(define (node g ws type seq summary facts)
+  (let ((made (graph:make-node
+                (hash "type" type "workspace_id" ws "worldline" 1
+                      "candidate_hash" (string-append "c" (number->string seq))
+                      "contract_hash" "contract"
+                      "caps_mask" 1 "budget_snapshot" (hash)
+                      "seq" seq "timestamp_ms" seq
+                      "summary" summary
+                      "tags" (list (hash-ref facts "category" "generic"))
+                      "facts" facts))))
+    (graph:add-node! g (cadr made))
+    (hash-ref (cadr made) "node_id")))
+
+(node ga a "keep-evidence" 1 "AVOID p99 regression: compare baseline"
+      (hash "support" 3 "category" "p99-regression-guard"
+            "contract_keys" "p99,baseline"
+            "verification" "compare p99 against baseline"))
+(node ga a "constraint-rejection" 2 "AVOID stale lease: heartbeat before deadline"
+      (hash "support" 2 "category" "lease-timeout"
+            "contract_keys" "lease,heartbeat"
+            "verification" "expire and reclaim"))
+(node ga a "keep-evidence" 3 "low support only"
+      (hash "support" 1 "category" "low-support"
+            "contract_keys" "a"
+            "verification" "none"))
+
+(define ex (patterns:export ga (hash "min-support" 2)))
+(display "export=") (display (car ex)) (newline)
+(define bundle (cadr ex))
+(display "patterns=") (display (length (hash-ref bundle "patterns"))) (newline)
+(display "bundle-id=") (display (string-prefix? (hash-ref bundle "bundle_id") "patterns-")) (newline)
+
+(define gb (graph:new b))
+(display "import=") (display (patterns:import! gb bundle)) (newline)
+(display "b-count=") (display (graph:node-count gb)) (newline)
+(display "reimport=") (display (patterns:import! gb bundle)) (newline)
+(display "b-stable=") (display (graph:node-count gb)) (newline)
+(display "b-origin=")
+(display (length (filter (lambda (n) (equal? (hash-ref n "origin")
+                                             "cross-workspace-pattern"))
+                         (graph:all-nodes gb))))
+(newline)
+(display "b-source-leak=")
+(display (let loop ((xs (graph:all-nodes gb)) (n 0))
+           (cond ((not (pair? xs)) n)
+                 ((string-contains? (hash-ref (car xs) "summary") "homogeneous") (+ n 1))
+                 (else (loop (cdr xs) n)))))
+(newline)
+(define q (graph:query-for-planner gb (list "p99") (hash)))
+(display "b-hint=") (display (if (string-contains? (hash-ref q "hint") "p99 regression") 1 0)) (newline)
+(display "confidence=")
+(display (hash-ref (hash-ref (car (graph:all-nodes gb)) "facts") "confidence"))
+(newline)
+
+(define dirty-node
+  (hash "type" "keep-evidence" "workspace_id" a "worldline" 1
+        "candidate_hash" "x" "contract_hash" "y" "caps_mask" 1
+        "budget_snapshot" (hash) "seq" 9 "timestamp_ms" 9
+        "status" "valid" "origin" "bus"
+        "summary" "leaked source from src/main.cpp"
+        "tags" (list "dirty") "facts" (hash "support" 5)))
+(display "dirty-node=") (display (patterns:from-node dirty-node 1)) (newline)
+
+(define dirty-bundle
+  (hash "kind" "data-free-patterns" "schema" 1
+        "patterns" (list (hash "category" "x" "summary" "see /home/secret"
+                               "contract_keys" (list "a") "verification" "x"))))
+(display "dirty-bundle=") (display (patterns:validate-bundle dirty-bundle)) (newline)
+
+(define env-bundle
+  (hash "kind" "data-free-patterns" "schema" 1
+        "patterns" (list (hash "category" "x" "summary" "use LLM_API_KEY here"
+                               "contract_keys" (list "a") "verification" "x"))))
+(display "env-bundle=") (display (patterns:validate-bundle env-bundle)) (newline)
+
+(define path "out/experience/9150/patterns.json")
+(make-directory "out/experience/9150")
+(display "file-export=") (display (car (patterns:export-file ga path))) (newline)
+(graph:reset! 9152)
+(define gc (graph:new 9152))
+(display "file-import=") (display (patterns:import-file gc path)) (newline)
+(display "c-count=") (display (graph:node-count gc)) (newline)
+(display "ok") (newline)

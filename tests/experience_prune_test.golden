@@ -1,0 +1,19 @@
+before=202
+prune=ok
+after=3
+within-cap=#t
+constraints=2
+types=2
+idempotent=ok
+stable=3
+empty=(ok 0 0 0)
+empty-query=
+seed=(ok 4)
+seed-count=4
+seed-origin=4
+seed-hint=1
+seed-budget=#t
+aged-prune=ok
+recent-kept=1
+old-dropped=1
+ok

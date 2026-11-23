@@ -1,0 +1,49 @@
+;; In-process event journal for the v0.3.3 stand-in adapters (#4).
+;;
+;; The real bus already writes an audit timeline. The stand-ins do not,
+;; so they emit the same logical events here. Ingest consumes either
+;; this journal or bus:audit rows; the graph projection is identical.
+;; Deterministic: no clock, no network, monotonically increasing seq.
+(define *journal* '())
+(define *journal-next* 1)
+
+(define (journal:reset!)
+  (set! *journal* '())
+  (set! *journal-next* 1))
+
+(define (journal:event-seq) *journal-next*)
+
+;; Reserve a sequence range: the next emitted event gets seq n. Used when
+;; a persisted graph already owns lower sequence numbers.
+(define (journal:start-at! n)
+  (if (and (number? n) (> n 0))
+    (set! *journal-next* n)
+    *journal-next*))
+
+(define (journal:merge base extra)
+  (if (hash? extra)
+    (begin
+      (for-each (lambda (k) (hash-set! base k (hash-ref extra k)))
+                (hash-keys extra))
+      base)
+    base))
+
+(define (journal:emit! kind task-id worldline data)
+  (let* ((seq *journal-next*)
+         (wl (cond ((and (number? worldline) (> worldline 0)) worldline)
+                   ((and (number? task-id) (> task-id 0)) task-id)
+                   (else 1)))
+         (ev (journal:merge
+               (hash "seq" seq
+                     "timestamp_ms" 0
+                     "kind" kind
+                     "task_id" (if (number? task-id) task-id 0)
+                     "worldline" wl
+                     "caps_mask" 0)
+               data)))
+    (set! *journal* (append *journal* (list ev)))
+    (set! *journal-next* (+ seq 1))
+    seq))
+
+(define (journal:events) *journal*)
+(define (journal:count) (length *journal*))
