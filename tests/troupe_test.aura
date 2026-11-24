@@ -1,0 +1,84 @@
+;; Issue #19 — resident aura-runner season: motif -> score -> rehearsal ->
+;; Harness -> guarded PR -> canary/revert.
+(require "std/string")
+(require "std/json")
+(require "lib/troupe/troupe")
+(require "lib/pipeline/pipeline")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (with h key value)
+  (let ((c (hash)))
+    (for-each (lambda (k) (hash-set! c k (hash-ref h k))) (hash-keys h))
+    (hash-set! c key value)
+    c))
+
+(define baseline (hash "tick_p99_ms" 50 "first_wish_ms" 100 "over_budget_pct" 5))
+(define current (hash "tick_p99_ms" 80 "first_wish_ms" 250 "over_budget_pct" 10))
+(define motif (troupe:detect baseline current))
+(line "motif" (string-join (hash-ref motif "signals") ","))
+(line "motif-probe-free" (hash-ref motif "probe_free"))
+
+(define candidate
+  (hash "id" "cand-good" "delta_tick_ms" -10 "delta_wish_ms" -50 "harm" #f
+        "patch" (hash "edits" (list (hash "target" "lib/phys.aura" "kind" "replace"
+                                          "before" "(step 16)" "after" "(step 12)"))
+                      "original_lines" 100 "deleted_lines" 10)
+        "protected_edits" '()
+        "train" (hash "score" 10 "baseline" 5)
+        "heldout" (hash "score" 9 "baseline" 5)
+        "perf" (hash "ok" #t "mode" "proc-stat-only")
+        "replay" (hash "ok" #t "corpus" "heldout" "token" "tok-1")
+        "config" (hash "max-steps" 100)
+        "contract_fingerprint" "fp-1"))
+
+(define expected
+  (hash "fingerprint" "fp-1"
+        "protected" (list "guard" "budget")
+        "config" (hash "max-steps" 100)
+        "required_evidence" (list "perf" "replay")))
+
+(define checks (hash "green" #t "branch_protected" #t "required_review" #t
+                     "draft" #f "evidence_attached" #t
+                     "harness_fingerprint" "fp-1"))
+
+(define cfg
+  (hash "baseline" baseline "current" current
+        "candidates" (list candidate)
+        "expected" expected
+        "checks" checks
+        "repo" "aura-runner" "branch" "orchestra/motif-1" "issue" 19
+        "paths" (list "lib/phys.aura")
+        "pre" (hash "p99_ms" 100 "error_rate" 0.0 "functional_ok" #t)
+        "post" (hash "p99_ms" 110 "error_rate" 0.0 "functional_ok" #t)))
+
+(define run (troupe:cycle cfg))
+(line "cycle" (hash-ref run "state"))
+(line "verdict" (hash-ref (hash-ref run "judge") "verdict"))
+(line "pipeline" (hash-ref (hash-ref run "pipeline") "action"))
+(line "merge" (hash-ref (hash-ref run "merge") "action"))
+(line "canary" (hash-ref (hash-ref run "canary") "action"))
+
+(define harmful
+  (with (with candidate "id" "harmful")
+        "patch" (hash "edits" (list (hash "target" "lib/phys.aura"
+                                          "kind" "replace"
+                                          "before" "(step 16)"
+                                          "after" "(ttl 0)"))
+                      "original_lines" 100 "deleted_lines" 10)))
+(define cfg-bad (with cfg "candidates" (list harmful)))
+(line "harmful" (hash-ref (troupe:cycle cfg-bad) "state"))
+
+(define cfg-revert (with cfg "post"
+                    (hash "p99_ms" 140 "error_rate" 0.0 "functional_ok" #t)))
+(line "revert" (hash-ref (troupe:cycle cfg-revert) "state"))
+
+(define killed (pipeline:kill! (pipeline:new-state) #t))
+(define cfg-kill (with cfg "state" killed))
+(line "kill" (hash-ref (troupe:cycle cfg-kill) "state"))
+
+(line "no-motif" (hash-ref (troupe:cycle (with cfg "current" baseline)) "state"))

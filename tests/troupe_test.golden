@@ -1,0 +1,11 @@
+motif=tick-p99,first-wish
+motif-probe-free=#t
+cycle=delivered
+verdict=keep
+pipeline=open-pr
+merge=auto-merge
+canary=keep
+harmful=blocked
+revert=reverted
+kill=guarded
+no-motif=no-motif

@@ -1,0 +1,6 @@
+troupe:detect: Any Any -> Any
+troupe:score: Any -> Any
+troupe:rehearse: Any -> Any
+troupe:judge: Any Any -> Any
+troupe:cycle: Any -> Any
+troupe:help: -> Any

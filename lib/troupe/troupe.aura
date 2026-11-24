@@ -1,0 +1,139 @@
+;; Resident season (#19): the aura-runner loop from external metrics to a
+;; motif, a small Score, rehearsal, the Harness verdict and the guarded
+;; delivery/canary. Every target observation is external; this module
+;; never adds a probe to the target.
+
+(require "std/string")
+(require "std/list")
+(require "lib/score")
+(require "lib/harness/judge")
+(require "lib/pipeline/pipeline")
+
+(export troupe:detect troupe:score troupe:rehearse troupe:judge
+        troupe:cycle troupe:help)
+
+(define (troupe:help)
+  "Troupe: (troupe:detect baseline current); (troupe:score motif); (troupe:rehearse candidates); (troupe:cycle cfg)")
+
+(define (t:get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (t:num h k d) (let ((v (t:get h k d))) (if (number? v) v d)))
+
+; ── motif detector ─────────────────────────────────────────────
+
+(define (t:ratio new old)
+  (if (and (number? new) (number? old) (> old 0)) (/ (* 1.0 new) old) 1.0))
+
+(define (troupe:detect baseline current)
+  (let* ((base-p99 (t:num baseline "tick_p99_ms" 0))
+         (new-p99 (t:num current "tick_p99_ms" 0))
+         (base-wish (t:num baseline "first_wish_ms" 0))
+         (new-wish (t:num current "first_wish_ms" 0))
+         (base-over (t:num baseline "over_budget_pct" 0))
+         (new-over (t:num current "over_budget_pct" 0))
+         (p99? (or (> (t:ratio new-p99 base-p99) 1.25) (> new-p99 100)))
+         (wish? (or (> (t:ratio new-wish base-wish) 2.0) (> new-wish 200)))
+         (over? (> (- new-over base-over) 20))
+         (signals (append (if p99? (list "tick-p99") '())
+                          (if wish? (list "first-wish") '())
+                          (if over? (list "over-budget") '()))))
+    (if (not (pair? signals))
+      (hash "kind" "motif" "target" "aura-runner" "signals" '() "severity" "none" "probe_free" #t)
+      (hash "kind" "motif" "target" "aura-runner"
+            "signals" signals
+            "severity" (if (>= (length signals) 2) "high" "medium")
+            "baseline" baseline "current" current
+            "probe_free" #t))))
+
+; ── small score from a motif ─────────────────────────────────
+
+(define (troupe:score motif)
+  (let* ((signals (t:get motif "signals" '()))
+         (requirement (string-append "tune aura-runner "
+                                     (string-join signals ",")))
+         (contract (list (list "tests" "pass")
+                         (list "tick-p99" "ok")))
+         (score (score:make requirement contract
+                            (list "observe" "patch" "judge") "mock")))
+    (hash "ok" #t "motif" motif "score" score
+          "validate" (score:validate score (hash)))))
+
+; ── rehearsal prefilter ──────────────────────────────────────
+
+(define (troupe:rehearse candidates)
+  (let loop ((xs candidates) (kept '()) (rejected '()))
+    (cond
+      ((not (pair? xs)) (hash "ok" (pair? kept)
+                              "kept" (reverse kept)
+                              "rejected" (reverse rejected)))
+      (else
+       (let* ((c (car xs))
+              (harm (t:get c "harm" #f))
+              (dt (t:num c "delta_tick_ms" 0))
+              (dw (t:num c "delta_wish_ms" 0)))
+         (if (or (equal? harm #t) (and (>= dt 0) (>= dw 0)))
+           (loop (cdr xs) kept
+                 (cons (hash "id" (t:get c "id" "")
+                             "reason" (if (equal? harm #t) "harm" "no-gain"))
+                       rejected))
+           (loop (cdr xs) (cons c kept) rejected)))))))
+
+; ── judge + delivery ─────────────────────────────────────────
+
+(define (troupe:judge candidate expected)
+  (harness:judge candidate expected))
+
+(define (troupe:cycle cfg)
+  (let* ((baseline (t:get cfg "baseline" (hash)))
+         (current (t:get cfg "current" (hash)))
+         (policy (t:get cfg "policy" (pipeline:policy)))
+         (state (t:get cfg "state" (pipeline:new-state)))
+         (motif (troupe:detect baseline current)))
+    (cond
+      ((equal? (t:get motif "severity" "none") "none")
+       (hash "ok" #t "state" "no-motif" "motif" motif))
+      (else
+       (let* ((scored (troupe:score motif))
+              (reh (troupe:rehearse (t:get cfg "candidates" '()))))
+         (cond
+           ((not (t:get reh "ok" #f))
+            (hash "ok" #t "state" "no-candidate" "motif" motif
+                  "rehearsal" reh))
+           (else
+            (let* ((candidate (car (t:get reh "kept" '())))
+                   (expected (t:get cfg "expected" (hash)))
+                   (verdict (troupe:judge candidate expected)))
+              (if (not (equal? (t:get verdict "verdict" "") "keep"))
+                (hash "ok" #t "state" "blocked" "motif" motif
+                      "rehearsal" reh "judge" verdict)
+                (let* ((score-id (t:get (t:get scored "score" (hash)) "id" ""))
+                       (req (hash "repo" (t:get cfg "repo" "aura-runner")
+                                  "branch" (t:get cfg "branch" "orchestra/motif-1")
+                                  "issue" (t:get cfg "issue" 0)
+                                  "score" score-id
+                                  "perf" (t:get candidate "perf" (hash))
+                                  "harness" (hash "verdict" "keep"
+                                                  "fingerprint" (t:get (t:get verdict "package" (hash)) "fingerprint" ""))
+                                  "paths" (t:get cfg "paths" '())
+                                  "approval" (t:get cfg "approval" #f)))
+                       (plan (pipeline:plan-pr req policy state)))
+                  (if (not (t:get plan "ok" #f))
+                    (hash "ok" #t "state" "guarded" "motif" motif
+                          "judge" verdict "pipeline" plan)
+                    (let* ((checks (t:get cfg "checks" (hash)))
+                           (merge (pipeline:merge-gate req checks policy state)))
+                      (if (not (t:get merge "ok" #f))
+                        (hash "ok" #t "state" "merge-blocked" "motif" motif
+                              "judge" verdict "pipeline" plan "merge" merge)
+                        (let* ((pre (t:get cfg "pre" (hash)))
+                               (post (t:get cfg "post" (hash)))
+                               (canary (pipeline:canary pre post policy)))
+                          (if (equal? (t:get canary "action" "") "revert")
+                            (hash "ok" #t "state" "reverted" "motif" motif
+                                  "judge" verdict "pipeline" plan
+                                  "merge" merge "canary" canary
+                                  "revert" (pipeline:revert-pr req "canary")
+                                  "post_merge" (pipeline:post-merge req))
+                            (hash "ok" #t "state" "delivered" "motif" motif
+                                  "judge" verdict "pipeline" plan
+                                  "merge" merge "canary" canary
+                                  "post_merge" (pipeline:post-merge req)))))))))))))))))

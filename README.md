@@ -166,3 +166,12 @@ main, tags and releases; high-risk paths need an explicit approval.
 Canary compares p99/error/functional and returns a standard revert PR on
 regression. Rate, in-flight, cooldown, budget and kill-switch guards are
 policy state. Docs: `docs/pipeline.md`; tests: `tests/pipeline_test.aura`.
+
+## Resident season (#19)
+
+`lib/troupe/troupe.aura` is the aura-runner loop: external replay metrics
+detect a probe-free motif (tick p99, first-wish, over-budget), a small Score
+is composed, candidates are pre-filtered by rehearsal, the Harness judge
+gates them, and the pipeline delivers/merges with a canary + revert path.
+Harmful candidates stop at the judge; rate limits and kill switch stop at
+the PR plan. Docs: `docs/troupe.md`; tests: `tests/troupe_test.aura`.
