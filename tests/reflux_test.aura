@@ -1,0 +1,65 @@
+;; Issue #35 — only data-free graduation patterns enter #2; customer
+;; text, credentials, paths and URLs are refused, and promotion still
+;; requires the gate.
+(require "std/string")
+(require "std/json")
+(require "lib/project/reflux")
+(require "lib/graph/store")
+(require "lib/memory/curator")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define report
+  (hash "kind" "graduation-report"
+        "status" "graduated"
+        "seed_version" "1.0.0"
+        "rounds" 3
+        "prs" (list 101 102)
+        "risks" (list "none")
+        "notes" "customer acme private transcript"))
+(define opts
+  (hash "failure_modes" (list "canary-regression" "not-a-category")
+        "operator_credit" "swap-operator:0.8,tweak-literal:0.2"
+        "sentinel_incidents" 0
+        "recipe" "operator-recipe-v1"))
+(define payload (reflux:extract report opts))
+(line "payload-summary" (hash-ref payload "summary"))
+(line "payload-rounds" (hash-ref (hash-ref payload "facts") "rounds"))
+(line "payload-prs" (hash-ref (hash-ref payload "facts") "pr_count"))
+(line "payload-modes" (hash-ref (hash-ref payload "facts") "failure_modes"))
+(line "payload-no-notes" (hash-ref payload "notes" "absent"))
+(line "check-ok" (hash-ref (reflux:check payload) "ok"))
+
+(define bad-customer (hash "summary" "customer acme conversation" "facts" (hash)))
+(define bad-url (hash "summary" "skill" "facts" (hash "endpoint" "https://example.invalid")))
+(define bad-secret (hash "summary" "skill" "facts" (hash "key" "API_KEY=abc")))
+(line "refuse-customer" (hash-ref (reflux:check bad-customer) "ok"))
+(line "refuse-url" (hash-ref (reflux:check bad-url) "ok"))
+(line "refuse-secret" (hash-ref (reflux:check bad-secret) "ok"))
+
+(define graph (graph:new 9101))
+(define pushed (reflux:push graph report opts))
+(line "push-ok" (hash-ref pushed "ok"))
+(line "push-backend" (hash-ref pushed "backend"))
+(line "push-gate" (hash-ref pushed "requires_gate"))
+(define node (car (graph:nodes-by-type graph "pattern")))
+(line "node-type" (hash-ref node "type"))
+(line "node-no-customer" (string-contains? (json-encode node) "customer"))
+(line "node-worldline" (hash-ref node "worldline"))
+
+(define refused (reflux:push graph report
+                             (hash "failure_modes" (list "none")
+                                   "operator_credit" "swap-operator:0.8"
+                                   "recipe" "customer acme conversation")))
+(line "push-refused" (hash-ref refused "ok"))
+(line "push-refused-reason" (hash-ref refused "reason"))
+(line "nodes-after-refusal" (graph:node-count graph))
+
+(define reviewed (reflux:hint graph "graduated skill unattended rounds"))
+(line "hint-hit" (string-contains? (hash-ref reviewed "hint") "unattended"))
+(line "hint-gate" (hash-ref reviewed "gate-required"))
+(line "hint-store" (hash-ref reviewed "store"))

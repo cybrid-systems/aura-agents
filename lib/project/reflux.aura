@@ -1,0 +1,135 @@
+;; Graduation reflux (#35): export only data-free patterns to the #2
+;; experience graph through the #17 curator. No customer text, session
+;; transcript, credential, path or URL is allowed to enter the pattern;
+;; a payload that carries one is refused, not scrubbed silently.
+
+(require "std/string")
+(require "std/list")
+(require "lib/memory/curator")
+(require "lib/graph/store")
+
+(export reflux:categories reflux:extract reflux:check reflux:push
+        reflux:hint reflux:help)
+
+(define (reflux:help)
+  "Reflux (#35): (reflux:extract report opts); (reflux:check payload); (reflux:push graph report opts); (reflux:hint graph requirement)")
+
+(define (rf-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (rf-num h k d) (let ((v (rf-get h k d))) (if (number? v) v d)))
+(define (rf-str h k d) (let ((v (rf-get h k d))) (if (string? v) v d)))
+(define (rf-list h k) (let ((v (rf-get h k '()))) (if (list? v) v '())))
+
+(define (reflux:categories)
+  (list "canary-regression" "sentinel-touch" "budget-exhaustion"
+        "evidence-missing" "scope-drift" "none"))
+
+(define (rf-known? label)
+  (let loop ((xs (reflux:categories)))
+    (cond ((not (pair? xs)) #f)
+          ((equal? label (car xs)) #t)
+          (else (loop (cdr xs))))))
+
+(define (rf-known labels)
+  (filter rf-known? labels))
+
+; ── extract only whitelisted, data-free fields ───────────────
+
+(define (reflux:extract report opts)
+  (let* ((o (if (hash? opts) opts (hash)))
+         (r (if (and (hash? report)
+                     (equal? (rf-str report "kind" "") "graduation-report"))
+              report
+              (rf-get report "handoff" (hash))))
+         (rounds (rf-num r "rounds" 0))
+         (prs (rf-list r "prs"))
+         (seed (rf-str r "seed_version" "1.0.0"))
+         (modes (rf-known (rf-list o "failure_modes")))
+         (credit (rf-str o "operator_credit" ""))
+         (incidents (rf-num o "sentinel_incidents" 0))
+         (recipe (rf-str o "recipe" "")))
+    (hash "summary" (string-append "graduated skill: "
+                                   (number->string rounds)
+                                   " unattended rounds")
+          "contract" "graduation-pattern-v1"
+          "tags" (list "skill" "graduation" "data-free")
+          "facts" (hash "mode" "graduation"
+                        "rounds" rounds
+                        "pr_count" (length prs)
+                        "seed_version" seed
+                        "failure_modes" (if (pair? modes) (string-join modes ",") "none")
+                        "operator_credit" credit
+                        "sentinel_incidents" incidents
+                        "recipe" recipe
+                        "gate" "required"))))
+
+; ── privacy gate ─────────────────────────────────────────────
+
+(define (rf-forbidden? s)
+  (and (string? s)
+       (let ((lower (string-downcase s)))
+         (or (> (string-length s) 512)
+             (string-contains? s "/")
+             (string-contains? s "://")
+             (string-contains? s "API_KEY")
+             (string-contains? s "SECRET")
+             (string-contains? s "PASSWORD")
+             (string-contains? s "TOKEN=")
+             (string-contains? s "ghp_")
+             (string-contains? s "AKIA")
+             (string-contains? s "sk-")
+             (string-contains? lower "customer")
+             (string-contains? lower "client")
+             (string-contains? lower "conversation")
+             (string-contains? lower "user-text")
+             (string-contains? lower "transcript")
+             (string-contains? lower "prompt")))))
+
+(define (rf-scan value)
+  (cond
+    ((string? value) (if (rf-forbidden? value) "unsafe-text" #f))
+    ((hash? value)
+     (let loop ((ks (hash-keys value)))
+       (cond ((not (pair? ks)) #f)
+             (else
+              (let ((hit (or (rf-scan (car ks))
+                             (rf-scan (hash-ref value (car ks))))))
+                (if hit hit (loop (cdr ks))))))))
+    ((pair? value)
+     (let loop ((xs value))
+       (cond ((not (pair? xs)) #f)
+             (else
+              (let ((hit (rf-scan (car xs))))
+                (if hit hit (loop (cdr xs))))))))
+    (else #f)))
+
+(define (reflux:check payload)
+  (cond
+    ((not (hash? payload))
+     (hash "ok" #f "reason" "not-a-pattern"))
+    (else
+     (let ((why (rf-scan payload)))
+       (if why
+         (hash "ok" #f "reason" why)
+         (hash "ok" #t "reason" "data-free"))))))
+
+; ── write through the #17 curator, not a second store ───────
+
+(define (reflux:push graph report opts)
+  (let* ((payload (reflux:extract report opts))
+         (checked (reflux:check payload)))
+    (if (not (rf-get checked "ok" #f))
+      (hash "ok" #f "error" "reflux-refused"
+            "reason" (rf-get checked "reason" "")
+            "payload" payload)
+      (let ((r (memory:pattern! graph payload)))
+        (hash "ok" (rf-get r "ok" #f)
+              "id" (rf-get r "id" #f)
+              "payload" payload
+              "result" r
+              "requires_gate" #t
+              "backend" (memory:backend))))))
+
+(define (reflux:hint graph requirement)
+  (hash "hint" (memory:hint graph requirement)
+        "gate-required" #t
+        "store" (memory:backend)))
