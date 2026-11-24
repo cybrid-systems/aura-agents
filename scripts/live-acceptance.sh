@@ -55,14 +55,28 @@ raise SystemExit(f"port {port} did not listen in {deadline}s")
 PY
 }
 
+listener_pid() {
+  ss -ltnp "sport = :$1" 2>/dev/null \
+    | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
 redis_port="$(pick_port "${AURA_LIVE_REDIS_PORT:-26399}")"
 runner_port="$(pick_port "${AURA_LIVE_RUNNER_PORT:-8899}")"
 tmp="$(mktemp -d)"
 redis_pid=""
 runner_pid=""
+stop_pid() {
+  [[ -n "${1:-}" ]] || return 0
+  kill "$1" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  kill -9 "$1" 2>/dev/null || true
+}
 cleanup() {
-  [[ -n "$redis_pid" ]] && kill "$redis_pid" 2>/dev/null || true
-  [[ -n "$runner_pid" ]] && kill "$runner_pid" 2>/dev/null || true
+  stop_pid "$redis_pid"
+  stop_pid "$runner_pid"
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -73,6 +87,7 @@ echo "live-acceptance: redis=$REDIS_BIN port=$redis_port runner=$RUNNER_DIR port
 "$REDIS_BIN" --port "$redis_port" --evict lru --maxmemory 120000 >"$tmp/redis.log" 2>&1 &
 redis_pid=$!
 wait_port "$redis_port" 10
+redis_pid="$(listener_pid "$redis_port")"
 
 (
   cd "$RUNNER_DIR"
@@ -83,6 +98,7 @@ wait_port "$redis_port" 10
 ) &
 runner_pid=$!
 wait_port "$runner_port" 120
+runner_pid="$(listener_pid "$runner_port")"
 
 out="$tmp/acceptance.log"
 AURA_LIVE_REDIS_PORT="$redis_port" AURA_LIVE_RUNNER_PORT="$runner_port" \
@@ -115,4 +131,6 @@ for marker in load-ok=8 motif-probe-free=#t motif-score-ok=#t; do
     exit 1
   fi
 done
+cleanup
+trap - EXIT
 echo "live-acceptance=ok"

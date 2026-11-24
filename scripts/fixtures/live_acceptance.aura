@@ -27,9 +27,17 @@
 (define redis-port (string->number (getenv "AURA_LIVE_REDIS_PORT")))
 (define runner-port (string->number (getenv "AURA_LIVE_RUNNER_PORT")))
 
+(define (env-num name fallback)
+  (let ((raw (getenv name)))
+    (let ((n (if (string? raw) (string->number raw) #f)))
+      (if (and (number? n) (> n 0)) n fallback))))
+
+(define redis-count (env-num "AURA_LIVE_REDIS_COMMANDS" 120))
+(define redis-heldout-count (env-num "AURA_LIVE_REDIS_HELDOUT_COMMANDS" 90))
+
 ; ── real aura-redis: train and held-out corpora ─────────────────
 (define train (replay:redis-run "127.0.0.1" redis-port
-                                (replay:redis-corpus 7 120 "")))
+                                (replay:redis-corpus 7 redis-count "")))
 (line "redis-train-ok" (hash-ref train "ok" #f))
 (line "redis-train-errors" (hash-ref train "errors" -1))
 (line "redis-train-corpus" (hash-ref train "corpus" "-"))
@@ -37,7 +45,7 @@
 (line "redis-train-json" (json-encode train))
 
 (define held (replay:redis-run "127.0.0.1" redis-port
-                               (replay:redis-corpus 7 90 "live-token")))
+                               (replay:redis-corpus 7 redis-heldout-count "live-token")))
 (line "redis-heldout-ok" (hash-ref held "ok" #f))
 (line "redis-heldout-errors" (hash-ref held "errors" -1))
 (line "redis-heldout-corpus" (hash-ref held "corpus" "-"))

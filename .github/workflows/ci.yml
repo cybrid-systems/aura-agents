@@ -37,7 +37,14 @@ jobs:
         env:
           AURA_AGENTS_LLM: mock
         run: bash scripts/cow-live-check.sh
+      - name: Perf flamegraph parser self-test (#14)
+        run: |
+          python3 scripts/perf_flamegraph.py \
+            --script scripts/fixtures/perf_script.txt \
+            --folded /tmp/oncpu.folded --svg /tmp/oncpu.svg --title fixture
+          grep -qx 'main;parent;leaf 2' /tmp/oncpu.folded
+          grep -q '<svg' /tmp/oncpu.svg
       - name: Shell and Python syntax
         run: |
-          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh scripts/live-acceptance.sh scripts/scaffold-dry-run.sh scripts/cow-live-check.sh scripts/kpi_compare.sh
-          python3 -m py_compile scripts/check-baseline.py scripts/bump-baseline.py scripts/kpi_generic.py scripts/kpi_compare.py tests/fixtures/redis_fixture.py tests/fixtures/runner_fixture.py
+          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh scripts/live-acceptance.sh scripts/scaffold-dry-run.sh scripts/cow-live-check.sh scripts/kpi_compare.sh scripts/perf-live.sh
+          python3 -m py_compile scripts/check-baseline.py scripts/bump-baseline.py scripts/kpi_generic.py scripts/kpi_compare.py scripts/perf_flamegraph.py scripts/proc_schedstat.py tests/fixtures/redis_fixture.py tests/fixtures/runner_fixture.py

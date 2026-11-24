@@ -1,0 +1,14 @@
+ld.so 123 1.000000: 1000 task-clock:ppp:
+	    ffff leaf+0x10 (/tmp/aura)
+	    ffff parent+0x20 (/tmp/aura)
+	    ffff main+0x30 (/tmp/aura)
+
+ld.so 123 1.010000: 1000 task-clock:ppp:
+	    ffff leaf+0x10 (/tmp/aura)
+	    ffff parent+0x20 (/tmp/aura)
+	    ffff main+0x30 (/tmp/aura)
+
+ld.so 123 1.020000: 1000 task-clock:ppp:
+	    ffff other+0x10 (/tmp/aura)
+	    ffff parent+0x20 (/tmp/aura)
+	    ffff main+0x30 (/tmp/aura)

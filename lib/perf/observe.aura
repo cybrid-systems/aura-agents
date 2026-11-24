@@ -494,8 +494,9 @@
 (define (perf:flamegraph-plan-with tools)
   (if (hash-ref tools "perf" #f)
     (hash "ok" #t
-          "on_cpu" "perf script -i out/perf.data | stackcollapse-perf.pl | flamegraph.pl > out/oncpu.svg"
-          "off_cpu" "perf script -i out/perf.data | stackcollapse-perf.pl | flamegraph.pl > out/offcpu.svg")
+          "on_cpu" "perf script -i out/perf.data > out/oncpu.script && python3 scripts/perf_flamegraph.py --script out/oncpu.script --folded out/oncpu.folded --svg out/oncpu.svg"
+          "off_cpu" "stack-level off-CPU needs tracefs/BPF; use scripts/proc_schedstat.py for runqueue wait and context switches"
+          "off_cpu_floor" "python3 scripts/proc_schedstat.py --pid PID --seconds N")
     (hash "ok" #f "error" "perf-missing")))
 
 (define (perf:profile-plan pid seconds)

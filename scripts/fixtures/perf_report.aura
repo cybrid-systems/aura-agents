@@ -1,0 +1,48 @@
+;; #14 live artifact parser: read the real `perf report` tables produced
+;; by scripts/perf-live.sh and print structured top symbols plus the USE
+;; snapshot. No target hook.
+(require "std/string")
+(require "std/json")
+(require "std/list")
+(require "lib/perf/observe")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (read-text path)
+  (if (and (string? path) (> (string-length path) 0))
+    (let ((v (try (read-file path) (catch (e) #f))))
+      (if (string? v) v ""))
+    ""))
+
+(define runner-report (read-text (getenv "AURA_PERF_RUNNER_REPORT")))
+(define redis-report (read-text (getenv "AURA_PERF_REDIS_REPORT")))
+(define runner-top (perf:top-symbols runner-report 8))
+(define redis-top (perf:top-symbols redis-report 8))
+(define probe (perf:probe))
+(define use (perf:report (hash "window_ms" 250)))
+
+(line "perf-mode" (hash-ref probe "mode" "-"))
+(line "perf-degraded" (hash-ref probe "degraded" #t))
+(line "perf-blocked" (json-encode (hash-ref probe "blocked" '())))
+(line "perf-usable" (json-encode (hash-ref probe "usable" (hash))))
+(line "runner-top-count" (length runner-top))
+(line "runner-top" (json-encode runner-top))
+(line "redis-top-count" (length redis-top))
+(line "redis-top" (json-encode redis-top))
+(line "runner-hot" (if (pair? runner-top) (hash-ref (car runner-top) "symbol" "-") "-"))
+(line "runner-hot-pct" (if (pair? runner-top) (hash-ref (car runner-top) "overhead_pct" -1) -1))
+(line "redis-hot" (if (pair? redis-top) (hash-ref (car redis-top) "symbol" "-") "-"))
+(line "redis-hot-pct" (if (pair? redis-top) (hash-ref (car redis-top) "overhead_pct" -1) -1))
+(line "perf-hypotheses" (json-encode (hash-ref use "hypotheses" '())))
+(line "perf-use" (json-encode use))
+(line "perf-evidence-json"
+      (json-encode (hash "probe" probe
+                         "use" use
+                         "runner_top" runner-top
+                         "redis_top" redis-top
+                         "runner_report" (getenv "AURA_PERF_RUNNER_REPORT")
+                         "redis_report" (getenv "AURA_PERF_REDIS_REPORT"))))
