@@ -1,0 +1,373 @@
+;; Bootstrap seed kit (#33): the files every green-field repository gets
+;; at scaffold time. The seed is owned by the new repository: it runs an
+;; in-process fork-compete round, keeps the sentinel outside the evolvable
+;; genome, and emits a guarded PR plan without any conductor RPC.
+;;
+;; This module only builds deterministic file contents. The caller writes
+;; them; the scaffold dry-run proves `aura test` and one seed round.
+
+(require "std/string")
+(require "std/list")
+
+(export bootstrap:version bootstrap:protected bootstrap:manifest
+        bootstrap:files bootstrap:help)
+
+(define (bootstrap:help)
+  "Bootstrap (#33): (bootstrap:files repo); (bootstrap:manifest)")
+
+(define (bootstrap:version) "1.0.0")
+
+(define (bootstrap:protected)
+  (list "contract" "gate" "approval" "audit" "sandbox" "sentinel"
+        "assertions" "heldout" "held-out" "evaluate" "constraints"
+        "holdout-split" "frame-budget" "branch-protection"))
+
+(define (bs-file path content)
+  (hash "path" path "content" content))
+
+(define (bootstrap:manifest)
+  (hash "kind" "bootstrap-seed"
+        "version" (bootstrap:version)
+        "protected" (bootstrap:protected)
+        "seed_round" "bootstrap/run.aura"
+        "seed_test" "tests/seed_test.aura"
+        "ci_checks" (list "aura test" "aura run bootstrap/run.aura")
+        "tag" #f
+        "release" #f
+        "force_push" #f
+        "admin_merge" #f))
+
+; ── sentinel plane ───────────────────────────────────────────
+
+(define (bs-sentinel)
+  (string-append
+    ";; Frozen sentinel plane. It is delivered with the seed and is not\n"
+    ";; reachable from the evolvable genome.\n"
+    "(require \"std/string\")\n"
+    "(require \"std/list\")\n\n"
+    "(export sentinel:version sentinel:protected sentinel:assertions\n"
+    "        sentinel:fingerprint sentinel:check-genome sentinel:check-action\n"
+    "        sentinel:help)\n\n"
+    "(define (sentinel:version) \"1.0.0\")\n\n"
+    "(define (sentinel:assertions)\n"
+    "  (list \"state-advance\" \"score-lives\" \"frame-budget\"))\n\n"
+    "(define (sentinel:protected)\n"
+    "  (list \"evaluate\" \"gate\" \"holdout-split\" \"constraints\" \"audit\"\n"
+    "        \"assertions\" \"heldout\" \"contract\" \"approval\" \"sandbox\"\n"
+    "        \"sentinel\" \"branch-protection\"))\n\n"
+    "(define (sentinel-fnv text)\n"
+    "  (let loop ((i 0) (h 2166136261))\n"
+    "    (if (>= i (string-length text))\n"
+    "      (number->string h)\n"
+    "      (loop (+ i 1)\n"
+    "            (bitwise-and\n"
+    "              (* (bitwise-xor h (char->integer (string-ref text i))) 16777619)\n"
+    "              4294967295)))))\n\n"
+    "(define (sentinel:fingerprint)\n"
+    "  (sentinel-fnv\n"
+    "    (string-append (string-join (sentinel:assertions) \",\")\n"
+    "                   \"|\" (string-join (sentinel:protected) \",\"))))\n\n"
+    "(define (sentinel-protected? key)\n"
+    "  (let loop ((xs (sentinel:protected)))\n"
+    "    (cond ((not (pair? xs)) #f)\n"
+    "          ((equal? key (car xs)) #t)\n"
+    "          (else (loop (cdr xs))))))\n\n"
+    "(define (sentinel:check-genome genome)\n"
+    "  (cond\n"
+    "    ((not (hash? genome))\n"
+    "     (hash \"ok\" #f \"reason\" \"genome:not-a-hash\"))\n"
+    "    (else\n"
+    "     (let loop ((ks (hash-keys genome)))\n"
+    "       (cond\n"
+    "         ((not (pair? ks))\n"
+    "          (hash \"ok\" #t \"reason\" \"sentinel-untouched\"))\n"
+    "         ((sentinel-protected? (car ks))\n"
+    "          (hash \"ok\" #f\n"
+    "                \"reason\" (string-append \"protected:\" (car ks))))\n"
+    "         (else (loop (cdr ks))))))))\n\n"
+    "(define (sentinel-action? kind names)\n"
+    "  (let loop ((xs names))\n"
+    "    (cond ((not (pair? xs)) #f)\n"
+    "          ((equal? kind (car xs)) #t)\n"
+    "          (else (loop (cdr xs))))))\n\n"
+    "(define (sentinel:check-action action)\n"
+    "  (let ((kind (hash-ref action \"kind\" \"\")))\n"
+    "    (cond\n"
+    "      ((sentinel-action? kind\n"
+    "                         (list \"mutate-sentinel\" \"edit-sentinel\"))\n"
+    "       (hash \"ok\" #f \"reason\" \"sentinel-immutable\"))\n"
+    "      ((sentinel-action? kind\n"
+    "                         (list \"force-push\" \"admin-merge\" \"direct-push\"))\n"
+    "       (hash \"ok\" #f \"reason\" kind))\n"
+    "      ((equal? kind \"auto-release\")\n"
+    "       (hash \"ok\" #f \"reason\" \"no-auto-release\"))\n"
+    "      ((sentinel-action? kind (list \"tag\" \"release\"))\n"
+    "       (if (eq? (hash-ref action \"explicit_user\" #f) #t)\n"
+    "         (hash \"ok\" #t \"reason\" \"user-authorized\")\n"
+    "         (hash \"ok\" #f \"reason\" \"explicit-user-required\")))\n"
+    "      ((equal? kind \"ingest-grant\")\n"
+    "       (hash \"ok\" #f \"reason\" \"ingestion-never-grants\"))\n"
+    "      ((equal? kind \"revert-pr\")\n"
+    "       (hash \"ok\" #t \"reason\" \"revertible\"))\n"
+    "      ((equal? kind \"merge\")\n"
+    "       (let ((m (hash-ref action \"merge\" (hash))))\n"
+    "         (if (and (eq? (hash-ref m \"branch_protected\" #f) #t)\n"
+    "                  (eq? (hash-ref m \"required_checks\" #f) #t)\n"
+    "                  (not (eq? (hash-ref m \"force\" #f) #t))\n"
+    "                  (not (eq? (hash-ref m \"admin\" #f) #t)))\n"
+    "           (hash \"ok\" #t \"reason\" \"protected-merge\")\n"
+    "           (hash \"ok\" #f \"reason\" \"protected-merge-required\"))))\n"
+    "      (else (hash \"ok\" #f \"reason\" \"unknown-action\")))))\n\n"
+    "(define (sentinel:help)\n"
+    "  \"Sentinel: (sentinel:check-genome genome); (sentinel:check-action action); (sentinel:fingerprint)\")\n"))
+
+; ── in-process seed engine ───────────────────────────────────
+
+(define (bs-evolve)
+  (string-append
+    ";; Seed evolution engine: one live state, N fiber rehearsals, one\n"
+    ";; winner. It never writes a candidate file and never calls the\n"
+    ";; conductor. The PR plan is data for the repository's own CI.\n"
+    "(require \"std/string\")\n"
+    "(require \"std/list\")\n"
+    "(require \"sentinel/plane\")\n\n"
+    "(export seed:help seed:candidates seed:score seed:run seed:round\n"
+    "        seed:pr-plan seed:best)\n\n"
+    "(define (seed:help)\n"
+    "  \"Seed: (seed:round state); (seed:pr-plan winner)\")\n\n"
+    "(define (seed:candidates)\n"
+    "  (list (hash \"id\" \"c0\" \"delta\" 0)\n"
+    "        (hash \"id\" \"c1\" \"delta\" 1)\n"
+    "        (hash \"id\" \"c2\" \"delta\" 2)))\n\n"
+    "(define (seed:score state) (hash-ref state \"value\" 0))\n\n"
+    "(define (seed:run state candidate steps)\n"
+    "  (let loop ((i 0) (s state))\n"
+    "    (if (>= i steps)\n"
+    "      s\n"
+    "      (loop (+ i 1)\n"
+    "            (hash-set\n"
+    "              (hash-set s \"tick\" (+ 1 (hash-ref s \"tick\" 0)))\n"
+    "              \"value\"\n"
+    "              (+ (hash-ref s \"value\" 0) (hash-ref candidate \"delta\" 0)))))))\n\n"
+    "(define (seed:best rows)\n"
+    "  (let loop ((xs rows) (best #f))\n"
+    "    (cond\n"
+    "      ((not (pair? xs)) best)\n"
+    "      ((or (not best)\n"
+    "           (> (hash-ref (car xs) \"score\" 0)\n"
+    "              (hash-ref best \"score\" 0)))\n"
+    "       (loop (cdr xs) (car xs)))\n"
+    "      (else (loop (cdr xs) best)))))\n\n"
+    "(define (seed:round state)\n"
+    "  (let* ((cands (seed:candidates))\n"
+    "         (fids (map (lambda (c)\n"
+    "                      (fiber:spawn (lambda () (seed:run state c 3))))\n"
+    "                    cands))\n"
+    "         (states (map (lambda (f) (fiber:join f)) fids))\n"
+    "         (rows (map (lambda (c s)\n"
+    "                      (hash \"id\" (hash-ref c \"id\")\n"
+    "                            \"score\" (seed:score s)\n"
+    "                            \"state\" s\n"
+    "                            \"genome\" (hash \"mutation-ops\"\n"
+    "                                            (list (hash-ref c \"id\")))))\n"
+    "                    cands states))\n"
+    "         (winner (seed:best rows))\n"
+    "         (guarded (map (lambda (r)\n"
+    "                         (sentinel:check-genome (hash-ref r \"genome\")))\n"
+    "                       rows))\n"
+    "         (ok? (and (hash? winner)\n"
+    "                   (equal? (hash-ref\n"
+    "                             (sentinel:check-genome\n"
+    "                               (hash-ref winner \"genome\"))\n"
+    "                             \"ok\")\n"
+    "                           #t))))\n"
+    "    (hash \"ok\" ok?\n"
+    "          \"winner\" (if winner (hash-ref winner \"id\") #f)\n"
+    "          \"score\" (if winner (hash-ref winner \"score\") 0)\n"
+    "          \"state\" (if winner (hash-ref winner \"state\") state)\n"
+    "          \"root\" state\n"
+    "          \"results\" rows\n"
+    "          \"guarded\" guarded\n"
+    "          \"sentinel\" (sentinel:fingerprint)\n"
+    "          \"pr\" (seed:pr-plan winner))))\n\n"
+    "(define (seed:pr-plan winner)\n"
+    "  (hash \"branch\" \"bootstrap/seed\"\n"
+    "        \"title\" \"Bootstrap seed round\"\n"
+    "        \"body\" \"In-process rehearsal selected a winner; evidence attached.\"\n"
+    "        \"evidence\" (hash \"winner\" (hash-ref winner \"id\")\n"
+    "                         \"score\" (hash-ref winner \"score\")\n"
+    "                         \"sentinel\" (sentinel:fingerprint))\n"
+    "        \"files\" (list (hash \"path\" \"game/tuning.seed\"\n"
+    "                             \"content\"\n"
+    "                             (string-append \"(seed \"\n"
+    "                                            (hash-ref winner \"id\")\n"
+    "                                            \")\")))\n"
+    "        \"checks\" (list \"aura test\" \"bootstrap/run.aura\")\n"
+    "        \"guardrails\" (hash \"tag\" #f \"release\" #f\n"
+    "                            \"force\" #f \"admin\" #f\n"
+    "                            \"branch_protected\" #t\n"
+    "                            \"auto_merge\" #t)))\n"))
+
+; ── executable round + tests ─────────────────────────────────
+
+(define (bs-run)
+  (string-append
+    ";; One seed round without the conductor. CI runs this after aura test.\n"
+    "(require \"std/string\")\n"
+    "(require \"engine/evolve\")\n\n"
+    "(define round (seed:round (hash \"tick\" 0 \"value\" 0)))\n"
+    "(define plan (hash-ref round \"pr\"))\n"
+    "(define guard (hash-ref plan \"guardrails\"))\n\n"
+    "(display \"seed-round=\")\n"
+    "(display (hash-ref round \"ok\"))\n"
+    "(newline)\n"
+    "(display \"winner=\")\n"
+    "(display (hash-ref round \"winner\"))\n"
+    "(newline)\n"
+    "(display \"score=\")\n"
+    "(display (hash-ref round \"score\"))\n"
+    "(newline)\n"
+    "(display \"root-value=\")\n"
+    "(display (hash-ref (hash-ref round \"root\") \"value\"))\n"
+    "(newline)\n"
+    "(display \"plan-branch=\")\n"
+    "(display (hash-ref plan \"branch\"))\n"
+    "(newline)\n"
+    "(display \"plan-tag=\")\n"
+    "(display (hash-ref guard \"tag\"))\n"
+    "(newline)\n"
+    "(display \"plan-release=\")\n"
+    "(display (hash-ref guard \"release\"))\n"
+    "(newline)\n"
+    "(display \"sentinel=\")\n"
+    "(display (hash-ref round \"sentinel\"))\n"
+    "(newline)\n"))
+
+(define (bs-seed-test)
+  (string-append
+    ";; Seed self-test: one round, isolated losers, sentinel untouched,\n"
+    ";; and a PR plan that cannot tag, release, force or admin-merge.\n"
+    "(require \"std/string\")\n"
+    "(require \"std/list\")\n"
+    "(require \"sentinel/plane\")\n"
+    "(require \"engine/evolve\")\n\n"
+    "(define (line k v)\n"
+    "  (display k)\n"
+    "  (display \"=\")\n"
+    "  (display v)\n"
+    "  (newline))\n\n"
+    "(define (find-result rows id)\n"
+    "  (let loop ((xs rows))\n"
+    "    (cond ((not (pair? xs)) #f)\n"
+    "          ((equal? (hash-ref (car xs) \"id\" \"\") id) (car xs))\n"
+    "          (else (loop (cdr xs))))))\n\n"
+    "(define root (hash \"tick\" 0 \"value\" 0))\n"
+    "(define round (seed:round root))\n"
+    "(define plan (hash-ref round \"pr\"))\n"
+    "(define guard (hash-ref plan \"guardrails\"))\n"
+    "(define loser (find-result (hash-ref round \"results\") \"c0\"))\n"
+    "(define winner (find-result (hash-ref round \"results\") \"c2\"))\n\n"
+    "(line \"round-ok\" (hash-ref round \"ok\"))\n"
+    "(line \"winner\" (hash-ref round \"winner\"))\n"
+    "(line \"score\" (hash-ref round \"score\"))\n"
+    "(line \"root-value\" (hash-ref (hash-ref round \"root\") \"value\"))\n"
+    "(line \"loser-value\" (hash-ref (hash-ref loser \"state\") \"value\"))\n"
+    "(line \"winner-value\" (hash-ref (hash-ref winner \"state\") \"value\"))\n"
+    "(line \"sentinel-stable\"\n"
+    "      (string=? (hash-ref round \"sentinel\") (sentinel:fingerprint)))\n"
+    "(line \"genome-safe\"\n"
+    "      (hash-ref (sentinel:check-genome\n"
+    "                  (hash \"mutation-ops\" (list \"swap\"))) \"ok\"))\n"
+    "(line \"genome-refused\"\n"
+    "      (hash-ref (sentinel:check-genome\n"
+    "                  (hash \"assertions\" (list \"deleted\"))) \"ok\"))\n"
+    "(line \"redline-sentinel\"\n"
+    "      (hash-ref (sentinel:check-action\n"
+    "                  (hash \"kind\" \"mutate-sentinel\")) \"ok\"))\n"
+    "(line \"redline-force\"\n"
+    "      (hash-ref (sentinel:check-action\n"
+    "                  (hash \"kind\" \"force-push\")) \"ok\"))\n"
+    "(line \"redline-ingest\"\n"
+    "      (hash-ref (sentinel:check-action\n"
+    "                  (hash \"kind\" \"ingest-grant\")) \"ok\"))\n"
+    "(line \"redline-auto-release\"\n"
+    "      (hash-ref (sentinel:check-action\n"
+    "                  (hash \"kind\" \"auto-release\")) \"ok\"))\n"
+    "(line \"redline-tag\"\n"
+    "      (hash-ref (sentinel:check-action\n"
+    "                  (hash \"kind\" \"tag\")) \"ok\"))\n"
+    "(line \"redline-revert\"\n"
+    "      (hash-ref (sentinel:check-action\n"
+    "                  (hash \"kind\" \"revert-pr\")) \"ok\"))\n"
+    "(line \"plan-branch\" (hash-ref plan \"branch\"))\n"
+    "(line \"plan-tag\" (hash-ref guard \"tag\"))\n"
+    "(line \"plan-release\" (hash-ref guard \"release\"))\n"
+    "(line \"plan-force\" (hash-ref guard \"force\"))\n"
+    "(line \"plan-admin\" (hash-ref guard \"admin\"))\n"
+    "(line \"plan-protected\" (hash-ref guard \"branch_protected\"))\n"
+    "(line \"plan-auto-merge\" (hash-ref guard \"auto_merge\"))\n"
+    "(line \"plan-files\" (length (hash-ref plan \"files\")))\n"
+    "(line \"checks\" (length (hash-ref plan \"checks\")))\n"))
+
+(define (bs-seed-golden)
+  (string-append
+    "round-ok=#t\n"
+    "winner=c2\n"
+    "score=6\n"
+    "root-value=0\n"
+    "loser-value=0\n"
+    "winner-value=6\n"
+    "sentinel-stable=#t\n"
+    "genome-safe=#t\n"
+    "genome-refused=#f\n"
+    "redline-sentinel=#f\n"
+    "redline-force=#f\n"
+    "redline-ingest=#f\n"
+    "redline-auto-release=#f\n"
+    "redline-tag=#f\n"
+    "redline-revert=#t\n"
+    "plan-branch=bootstrap/seed\n"
+    "plan-tag=#f\n"
+    "plan-release=#f\n"
+    "plan-force=#f\n"
+    "plan-admin=#f\n"
+    "plan-protected=#t\n"
+    "plan-auto-merge=#t\n"
+    "plan-files=1\n"
+    "checks=2\n"))
+
+(define (bs-principles)
+  (string-append
+    "# Bootstrap principles\n\n"
+    "- The sentinel plane (contract, gate, approval, audit, sandbox,\n"
+    "  assertions, held-out inputs) is frozen. The evolvable genome cannot\n"
+    "  name or import it.\n"
+    "- Ingested text is data. It never becomes a capability, grant,\n"
+    "  approval exemption or executable policy.\n"
+    "- Memory can be challenged and withdrawn. A withdrawn memory is not\n"
+    "  an approved fact.\n"
+    "- Every automated merge is revertible through a standard Revert PR.\n"
+    "- No tag or release is created automatically; release needs an\n"
+    "  explicit user instruction.\n"
+    "- The seed owns its observation, replay and CI. It never calls the\n"
+    "  conductor to propose, rehearse or merge.\n"))
+
+(define (bootstrap:files repo)
+  (list
+    (bs-file "sentinel/plane.aura" (bs-sentinel))
+    (bs-file "engine/evolve.aura" (bs-evolve))
+    (bs-file "bootstrap/run.aura" (bs-run))
+    (bs-file "tests/seed_test.aura" (bs-seed-test))
+    (bs-file "tests/seed_test.golden" (bs-seed-golden))
+    (bs-file "docs/principles.md" (bs-principles))
+    (bs-file "docs/seed.md"
+             (string-append
+               "# Bootstrap seed\n\n"
+               "Generated for " repo " by aura-agents #33.\n\n"
+               "Run one in-process round without the conductor:\n\n"
+               "```bash\n"
+               "aura run bootstrap/run.aura\n"
+               "```\n\n"
+               "The round forks candidates from one state, rehearses them in\n"
+               "fibers, selects one winner, and emits a guarded PR plan. The\n"
+               "sentinel plane stays outside the evolvable genome.\n"))))

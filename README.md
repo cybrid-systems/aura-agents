@@ -137,7 +137,17 @@ stack: deterministic `mutate` proposals, `std/search` bandit operator
 choice and beam edit paths, `std/qd` MAP-Elites, `std/evo-core` trials
 and `std/portfolio` successive halving. It records the two real gaps
 (generic stage-aware MCTS, fiber-native early stop) instead of claiming
-them. Docs: `docs/strategy.md`.
+them. `strategy:rehearse-ops` lets a caller supply the operator set while
+still running the real `loop:rehearse-bounded`. Docs: `docs/strategy.md`.
+
+`lib/game/meta.aura` is the #32 meta layer: `std/evo-meta` (depth 1)
+evolves `propose-prompt`, `mutation-ops`, `parent-policy` and
+`budget-split` over that search surface. The evaluator, gate, held-out
+task set, assertions, contract and audit are protected; a canary drop is
+a ROLLBACK. Operators get `std/hyper-heuristic` credit, width follows
+the budget split, and a winning recipe is promoted to the #2 graph as a
+data-free pattern that still needs the #16 gate. Docs:
+`docs/game-meta.md`.
 
 `lib/project/kpi.aura` is the #30 speed ledger: candidates/minute,
 wall per inner round, first-playable, per-milestone phase time, inner/
@@ -155,6 +165,28 @@ checkout, branch protection (required `ci`, no direct `main`, no admin
 bypass) and the forbidden `tag`/`release`/`large-file` list. It never
 creates the repository; the GitHub creator still has to apply it. Docs:
 `docs/scaffold.md`.
+
+## Delivery-time bootstrap (#33-#36)
+
+Every scaffold now carries a repository-owned seed:
+
+- `lib/project/bootstrap.aura` (#33) adds `sentinel/plane.aura`, an
+  in-process `engine/evolve.aura`, `bootstrap/run.aura`, a seed
+  self-test, frozen principles and the CI step. The dry-run writes the
+  seed into a temporary repo, runs `aura test` there and executes one
+  round; no conductor RPC is involved. Docs: `docs/bootstrap.md`.
+- `lib/project/graduation.aura` (#34) requires N unattended,
+  evidence-backed rounds with an untouched sentinel, emits the handoff
+  report (locked Aura/CI digests, fingerprint, PRs, risks), refuses daily
+  dispatch after graduation, and permits only a bounded escalation
+  takeover. Docs: `docs/graduation.md`.
+- `lib/project/reflux.aura` (#35) exports only whitelisted, data-free
+  graduation patterns through the #17 curator into #2. Customer text,
+  transcripts, paths, URLs and credentials are refused. Docs:
+  `docs/reflux.md`.
+- `lib/project/redline.aura` (#36) refuses sentinel mutation,
+  ingestion-to-grant, force/admin/direct pushes and automatic release;
+  protected merges and reverts stay allowed. Docs: `docs/redline.md`.
 
 ## Game frame assertions (#23)
 

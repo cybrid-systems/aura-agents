@@ -44,6 +44,18 @@ PY
 (
   cd "$DEST"
   AURA_SANDBOX=off "$AURA_BIN" test
+  seed_out="$(mktemp)"
+  AURA_SANDBOX=off "$AURA_BIN" run bootstrap/run.aura >"$seed_out" 2>&1
+  for marker in 'seed-round=#t' 'winner=c2' 'root-value=0' \
+    'plan-tag=#f' 'plan-release=#f' 'plan-branch=bootstrap/seed'; do
+    if ! grep -qx "$marker" "$seed_out"; then
+      echo "scaffold-dry-run: missing seed marker $marker" >&2
+      cat "$seed_out" >&2
+      rm -f "$seed_out"
+      exit 1
+    fi
+  done
+  rm -f "$seed_out"
 )
 
 if [[ "$CLEAN" == 1 ]]; then

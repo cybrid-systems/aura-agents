@@ -14,8 +14,12 @@ repository, tag or release.
 
 - `repo`: `aura-tank-battle` for the tank-battle spec, `aura-game` otherwise.
 - `files`: `aura.toml`, `.github/workflows/ci.yml`, `README.md`,
-  `.gitignore`, a placeholder `game/main.aura`, and a passing
-  `tests/smoke_test.aura` + golden.
+  `.gitignore`, a placeholder `game/main.aura`, a passing
+  `tests/smoke_test.aura` + golden, and the #33 bootstrap seed
+  (`sentinel/plane.aura`, `engine/evolve.aura`, `bootstrap/run.aura`,
+  `tests/seed_test.aura` + golden, `docs/principles.md`, `docs/seed.md`).
+- `bootstrap`: seed version, protected list, seed round/test paths, CI
+  checks and explicit `tag/release/force/admin = #f`.
 - `copies`: `baseline/aura-baseline.json`, `scripts/install-aura.sh` and
   `scripts/check-baseline.py`, so the new repo starts from the same #13
   single source of truth.
@@ -29,6 +33,10 @@ repository, tag or release.
 future writer. A real creator still has to call the GitHub API, set the
 branch protection and push the first scaffold commit; this module only
 owns the deterministic payload.
+
+`scripts/scaffold-dry-run.sh` also runs `bootstrap/run.aura` in the
+materialised repository and requires a passing seed round, an unchanged
+root and a guarded PR plan. This is the #33 no-conductor path.
 
 The #22 acceptance still needs an organisation dry-run repository (or a
 production-shaped dry-run API assertion) for the actual create + protect

@@ -9,6 +9,7 @@
 (require "std/io")
 (require "std/json")
 (require "lib/project/spec")
+(require "lib/project/bootstrap")
 
 (export project:scaffold project:scaffold-file project:scaffold-help)
 
@@ -72,7 +73,9 @@
     "      - name: Install pinned Aura\n"
     "        run: ./scripts/install-aura.sh\n"
     "      - name: Test\n"
-    "        run: aura test\n"))
+    "        run: aura test\n"
+    "      - name: Bootstrap seed round\n"
+    "        run: aura run bootstrap/run.aura\n"))
 
 (define (sc-readme repo)
   (string-append
@@ -85,7 +88,14 @@
     "## Test\n\n"
     "```bash\n"
     "aura test\n"
-    "```\n"))
+    "```\n\n"
+    "## Bootstrap seed\n\n"
+    "The repository owns a frozen sentinel plane and one in-process\n"
+    "fork-compete round. Run it without any conductor:\n\n"
+    "```bash\n"
+    "aura run bootstrap/run.aura\n"
+    "```\n\n"
+    "See `docs/principles.md` and `docs/seed.md`.\n"))
 
 (define (project:scaffold spec)
   (let* ((baseline (sc-baseline))
@@ -94,14 +104,16 @@
          (arm (sc-asset-sha baseline "linux-arm64"))
          (digest (sc-ci-digest baseline))
          (repo (sc-repo-name spec))
-         (files (list
-                  (sc-file "aura.toml" (sc-aura-toml repo sha x86 arm digest))
-                  (sc-file ".github/workflows/ci.yml" (sc-ci-yml digest))
-                  (sc-file "README.md" (sc-readme repo))
-                  (sc-file ".gitignore" "out/\n.deps/\n")
-                  (sc-file "game/main.aura" ";; M4 scaffold: replace with the first milestone.\n(display \"aura game scaffold\\n\")\n")
-                  (sc-file "tests/smoke_test.aura" "(display \"ok\")\n(newline)\n")
-                  (sc-file "tests/smoke_test.golden" "ok\n"))))
+         (files (append
+                  (list
+                    (sc-file "aura.toml" (sc-aura-toml repo sha x86 arm digest))
+                    (sc-file ".github/workflows/ci.yml" (sc-ci-yml digest))
+                    (sc-file "README.md" (sc-readme repo))
+                    (sc-file ".gitignore" "out/\n.deps/\n")
+                    (sc-file "game/main.aura" ";; M4 scaffold: replace with the first milestone.\n(display \"aura game scaffold\\n\")\n")
+                    (sc-file "tests/smoke_test.aura" "(display \"ok\")\n(newline)\n")
+                    (sc-file "tests/smoke_test.golden" "ok\n"))
+                  (bootstrap:files repo))))
     (hash "kind" "repo-scaffold"
           "repo" repo
           "visibility" "private"
@@ -117,4 +129,5 @@
           "branch_protection" (hash "required_checks" (list "ci")
                                     "direct_push" #f
                                     "admin_bypass" #f)
+          "bootstrap" (bootstrap:manifest)
           "forbidden" (list "tag" "release" "large-file"))))
