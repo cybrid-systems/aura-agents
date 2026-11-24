@@ -1,0 +1,245 @@
+;; Issue #24 — milestone state machine over the live inner loop and the
+;; evidence-gated outer loop. No candidate file is written per round.
+(require "std/string")
+(require "std/list")
+(require "lib/project/spec")
+(require "lib/project/milestone")
+(require "lib/game/arena")
+(require "lib/game/assert")
+(require "lib/game/loop")
+(require "lib/harness/judge")
+(require "lib/pipeline/pipeline")
+(require "lib/graph/store")
+(require "lib/memory/curator")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (with h key value)
+  (let ((c (hash)))
+    (for-each (lambda (k) (hash-set! c k (hash-ref h k))) (hash-keys h))
+    (hash-set! c key value)
+    c))
+
+; ── spec and initial state ─────────────────────────────────────
+
+(define spec (cadr (project:compile "用aura写一个坦克大战游戏")))
+(define newr (milestone:new spec (hash "workspace" 7 "issue" 24
+                                       "repo" "cybrid-systems/tank-battle")))
+(define ms (hash-ref newr "state"))
+(line "new-ok" (hash-ref newr "ok"))
+(line "initial-stage" (hash-ref (milestone:status ms) "stage"))
+(line "initial-stages" (length (milestone:stages ms)))
+(line "initial-done" (hash-ref (milestone:status ms) "done"))
+(line "initial-verify" (hash-ref (milestone:verify ms) "ok"))
+
+; ── one real in-process rehearsal round for "move" ─────────────
+
+(define root (arena:new (hash "seed" 42 "players" 1)))
+(define frozen-step (lambda (state input) (arena:step state (hash))))
+(define candidates
+  (list (hash "id" "normal" "step" arena:step)
+        (hash "id" "frozen" "step" frozen-step)))
+(define move-ids (list "move-right" "move-collision" "state-advance"))
+(define run1 (loop:rehearse-bounded root candidates (list (hash "move" "right"))
+                                    (list "move-right" "state-advance") 2))
+(define block1 (loop:rehearse-bounded root candidates (list (hash "move" "down"))
+                                      (list "move-collision") 2))
+(line "loop-winner" (hash-ref run1 "winner"))
+(line "loop-batches" (hash-ref run1 "batches"))
+(line "block-ok" (hash-ref block1 "ok"))
+
+(define expected
+  (hash "fingerprint" "fp-move"
+        "protected" '()
+        "config" (hash)
+        "required_evidence" '()))
+(define hcand
+  (hash "id" "cand-move"
+        "patch" (hash "edits" (list (hash "target" "tuning"
+                                          "kind" "replace"
+                                          "before" "(tuning (player-speed 1))"
+                                          "after" "(tuning (player-speed 2))"))
+                      "original_lines" 100
+                      "deleted_lines" 10)
+        "protected_edits" '()
+        "train" (hash "score" 10 "baseline" 5)
+        "heldout" (hash "score" 8 "baseline" 5)
+        "perf" (hash "ok" #t "degraded" #t)
+        "replay" (hash "ok" #t "corpus" "heldout" "token" "tok-move")
+        "config" (hash)
+        "contract_fingerprint" "fp-move"))
+(define judged (harness:judge hcand expected))
+(line "harness-verdict" (hash-ref judged "verdict"))
+
+(define r1 (milestone:round-from-runs "move" (list run1 block1) judged
+             (hash "id" "r1" "worldline" 11
+                   "root_in" "root-0" "root_out" "root-1"
+                   "assertions" move-ids
+                   "source" "(tuning (player-speed 2))"
+                   "assertions_ok" (and (hash-ref run1 "ok") (hash-ref block1 "ok"))
+                   "early_stop" 0 "duration_ms" 2)))
+(line "round1-ok" (hash-ref r1 "ok"))
+(line "round1-candidates" (hash-ref r1 "candidates"))
+(line "round1-files" (hash-ref r1 "files_written"))
+(define rec1 (milestone:record-round! ms r1))
+(line "record1" (hash-ref rec1 "ok"))
+(line "record1-rounds" (hash-ref rec1 "rounds"))
+
+(define run2 (loop:rehearse-bounded root candidates (list (hash "move" "right"))
+                                    (list "move-right" "state-advance") 2))
+(define block2 (loop:rehearse-bounded root candidates (list (hash "move" "down"))
+                                      (list "move-collision") 2))
+(define r2 (milestone:round-from-runs "move" (list run2 block2) judged
+             (hash "id" "r2" "worldline" 12
+                   "root_in" "root-1" "root_out" "root-2"
+                   "assertions" move-ids
+                   "source" "(tuning (player-speed 2))"
+                   "assertions_ok" (and (hash-ref run2 "ok") (hash-ref block2 "ok"))
+                   "early_stop" 1 "duration_ms" 2)))
+(line "wrong-stage" (hash-ref (milestone:record-round! ms (with r2 "stage" "fight")) "error"))
+(line "discontinuity" (hash-ref (milestone:record-round! ms (with r2 "root_in" "wrong")) "error"))
+(line "wrote-files" (hash-ref (milestone:record-round! ms (with r2 "files_written" 1)) "error"))
+(line "per-candidate-ci" (hash-ref (milestone:record-round! ms (with r2 "per_candidate_ci" 1)) "error"))
+(line "rollback" (hash-ref (milestone:record-round! ms (with r2 "harness" (hash "verdict" "rollback" "fingerprint" "fp-move"))) "error"))
+(line "duplicate" (hash-ref (milestone:record-round! ms r1) "error"))
+(line "bad-package" (hash-ref (milestone:record-round! ms
+                                  (with r2 "harness" (hash "verdict" "keep"
+                                                           "fingerprint" "fp-move"
+                                                           "package_valid" #f))) "error"))
+(line "record2" (hash-ref (milestone:record-round! ms r2) "ok"))
+
+; ── outer evidence and PR ──────────────────────────────────────
+
+(define outer (milestone:outer-request ms))
+(line "outer-ok" (hash-ref outer "ok"))
+(line "outer-stage" (hash-ref outer "stage"))
+(line "outer-round" (hash-ref outer "round"))
+(line "outer-inner-rounds" (hash-ref (hash-ref outer "evidence") "inner_rounds"))
+(line "outer-files" (hash-ref (hash-ref outer "evidence") "files_written"))
+(line "outer-ci" (hash-ref (hash-ref outer "evidence") "per_candidate_ci"))
+(define plan (pipeline:plan-pr (hash-ref outer "request")
+                               (pipeline:policy) (pipeline:new-state)))
+(line "plan" (hash-ref plan "action"))
+(line "plan-ok" (hash-ref plan "ok"))
+(define pr1 (milestone:record-pr! ms 101 "https://example.invalid/pr/101" plan))
+(line "pr1" (hash-ref pr1 "ok"))
+(line "inflight-round" (hash-ref (milestone:record-round! ms r2) "error"))
+
+(define good-merge
+  (hash "pr" 101 "merged" #t "commit" "commit-1"
+        "branch_protected" #t "force" #f "admin" #f
+        "post_merge" (hash "ok" #t "assertions_ok" #t "perf_ok" #t)
+        "evidence_digest" (hash-ref pr1 "evidence_digest")))
+(line "bad-post-merge"
+      (hash-ref (milestone:land! ms
+                  (with good-merge "post_merge" (hash "ok" #f "assertions_ok" #t "perf_ok" #t)))
+                "error"))
+(line "force-push"
+      (hash-ref (milestone:land! ms (with good-merge "force" #t)) "error"))
+(line "admin-merge"
+      (hash-ref (milestone:land! ms (with good-merge "admin" #t)) "error"))
+(line "evidence-mismatch"
+      (hash-ref (milestone:land! ms (with good-merge "evidence_digest" "bad")) "error"))
+(define land1 (milestone:land! ms good-merge))
+(line "land1" (hash-ref land1 "ok"))
+(line "land1-stage" (hash-ref land1 "stage"))
+(line "land1-next" (hash-ref land1 "next"))
+(line "land1-done" (hash-ref land1 "done"))
+(line "land1-status" (hash-ref (milestone:status ms) "stage"))
+(line "land1-outcome" (hash-ref (hash-ref land1 "outcome") "verdict"))
+(line "land1-outcome-wl" (hash-ref (hash-ref land1 "outcome") "worldline"))
+(line "land1-outcome-text" (string-contains? (hash-ref (hash-ref land1 "outcome") "summary") "move"))
+
+; ── experience graph feedback ──────────────────────────────────
+
+(define g (graph:new 7))
+(define mem (memory:record! g (hash-ref land1 "outcome")))
+(line "memory" (hash-ref mem "ok"))
+(line "memory-provenance" (hash-ref mem "provenance"))
+(line "memory-nodes" (> (graph:node-count g) 0))
+
+; ── advance the remaining ladder ──────────────────────────────
+
+(define (round-for stage id wl)
+  (hash "id" id
+        "stage" stage
+        "worldline" wl
+        "winner" "cand-fast"
+        "candidates" 2
+        "batches" 2
+        "early_stop" 1
+        "score" 1000
+        "ok" #t
+        "assertions" (hash-ref (project:milestone spec stage) "assertions" '())
+        "source" (string-append "(tuning (" stage " 1))")
+        "assertions_ok" #t
+        "harness" (hash "verdict" "keep"
+                        "fingerprint" (string-append "fp-" stage))
+        "root_in" (string-append "root-" stage "-in")
+        "root_out" (string-append "root-" stage "-out")
+        "files_written" 0
+        "per_candidate_ci" 0
+        "perf" (hash "ok" #t "degraded" #t)
+        "fork_tree" (list (hash "id" "cand-fast" "ok" #t "score" 1000)
+                          (hash "id" "cand-slow" "ok" #f "score" 900))))
+
+(define (pass-stage stage prn commit wl)
+  (let* ((r (round-for stage (string-append stage "-r1") wl))
+         (rec (milestone:record-round! ms r))
+         (o (milestone:outer-request ms))
+         (pl (pipeline:plan-pr (hash-ref o "request")
+                               (pipeline:policy) (pipeline:new-state)))
+         (p (milestone:record-pr! ms prn
+                                  (string-append "https://example.invalid/pr/"
+                                                 (number->string prn))
+                                  pl))
+         (m (hash "pr" prn "merged" #t "commit" commit
+                  "branch_protected" #t "force" #f "admin" #f
+                  "post_merge" (hash "ok" #t "assertions_ok" #t "perf_ok" #t)
+                  "evidence_digest" (hash-ref p "evidence_digest"))))
+    (milestone:land! ms m)))
+
+(define land2 (pass-stage "fight" 102 "commit-2" 21))
+(line "land2" (hash-ref land2 "ok"))
+(line "land2-next" (hash-ref land2 "next"))
+(define land3 (pass-stage "levels" 103 "commit-3" 31))
+(line "land3" (hash-ref land3 "ok"))
+(line "land3-next" (hash-ref land3 "next"))
+(define land4 (pass-stage "fun" 104 "commit-4" 41))
+(line "land4" (hash-ref land4 "ok"))
+(line "land4-next" (hash-ref land4 "next"))
+(line "land4-done" (hash-ref land4 "done"))
+
+(define final (milestone:verify ms))
+(line "final-stage" (hash-ref (milestone:status ms) "stage"))
+(line "final-done" (hash-ref (milestone:status ms) "done"))
+(line "final-passed" (hash-ref (milestone:status ms) "passed"))
+(line "final-verify" (hash-ref final "ok"))
+(line "final-events" (hash-ref final "events"))
+(line "final-rounds" (hash-ref final "rounds"))
+(line "final-inner-events" (hash-ref final "inner_events"))
+(line "final-stage-events" (hash-ref final "stage_events"))
+(line "final-rounds-match" (hash-ref final "rounds_match"))
+(line "final-rounds-check" (hash-ref (hash-ref final "rounds_check") "ok"))
+(line "final-landed-match" (hash-ref final "landed_match"))
+(line "audit-first" (hash-ref (car (milestone:audit ms)) "kind"))
+(line "audit-last" (hash-ref (car (reverse (milestone:audit ms))) "kind"))
+
+; ── tamper and skip guards ─────────────────────────────────────
+
+(define new2 (milestone:new spec (hash "workspace" 8 "issue" 24)))
+(define ms2 (hash-ref new2 "state"))
+(milestone:record-round! ms2 r1)
+(line "skip-stage" (hash-ref (milestone:record-round! ms2
+                                  (with (with r1 "id" "skip-1") "stage" "fight")) "error"))
+(hash-set! (car (hash-ref ms2 "rounds")) "evidence" "tampered-round")
+(line "round-tamper" (hash-ref (milestone:verify ms2) "ok"))
+(line "round-tamper-error" (hash-ref (hash-ref (milestone:verify ms2) "rounds_check") "error"))
+(hash-set! (car (hash-ref ms2 "chain")) "digest" "tampered")
+(define bad (milestone:verify ms2))
+(line "tamper" (hash-ref bad "ok"))
+(line "tamper-error" (hash-ref (hash-ref bad "chain") "error"))

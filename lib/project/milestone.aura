@@ -1,0 +1,790 @@
+;; Milestone state machine (#24): the ladder is advanced only by a winner
+;; produced in the live inner loop and landed through the outer loop. The
+;; machine keeps an append-only, digest-chained audit trail that can
+;; reconstruct: inner round -> winner worldline -> outer PR -> stage state.
+;;
+;; Pure data. Recording an inner round never writes a candidate file and
+;; never triggers per-candidate CI; the only persistence is the caller's
+;; decision to ship the winner through #18.
+
+(require "std/string")
+(require "std/list")
+(require "lib/score")
+
+(export milestone:new milestone:stages milestone:current milestone:status
+        milestone:record-round! milestone:round-from-loop milestone:round-from-runs
+        milestone:outer-request milestone:record-pr! milestone:land!
+        milestone:outcome milestone:verify milestone:audit milestone:help)
+
+(define (milestone:help)
+  "Milestone: (milestone:new spec opts); (milestone:record-round! state round); (milestone:outer-request state); (milestone:record-pr! state number url plan); (milestone:land! state merge)")
+
+; ── small helpers ──────────────────────────────────────────────
+
+(define (ms-get h k d) (if (hash? h) (hash-ref h k d) d))
+
+(define (ms-text v)
+  (cond ((string? v) v)
+        ((number? v) (number->string v))
+        ((equal? v #t) "#t")
+        ((equal? v #f) "#f")
+        (else "")))
+
+(define (ms-text? v) (and (string? v) (> (string-length v) 0)))
+
+(define (ms-num h k d)
+  (let ((v (ms-get h k d))) (if (number? v) v d)))
+
+(define (ms-pos? v) (and (number? v) (> v 0)))
+
+(define (ms-copy h)
+  (let ((out (hash)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
+    out))
+
+(define (ms-count-kind chain kind)
+  (let loop ((xs chain) (n 0))
+    (cond ((not (pair? xs)) n)
+          ((equal? (ms-get (car xs) "kind" "") kind) (loop (cdr xs) (+ n 1)))
+          (else (loop (cdr xs) n)))))
+
+(define (ms-find-round rounds id)
+  (let loop ((xs rounds))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (ms-get (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (ms-stage-by-id stages id)
+  (let loop ((xs stages))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (ms-get (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (ms-last-round-for rounds stage)
+  (let loop ((xs rounds))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (ms-get (car xs) "stage" "") stage) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (ms-rounds-for rounds stage)
+  (filter (lambda (r) (equal? (ms-get r "stage" "") stage)) rounds))
+
+(define (ms-next-id stages id)
+  (let loop ((xs stages))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (ms-get (car xs) "id" "") id)
+           (if (pair? (cdr xs)) (ms-get (cadr xs) "id" #f) #f))
+          (else (loop (cdr xs))))))
+
+; ── construction ───────────────────────────────────────────────
+
+(define (ms-reqs-met? reqs seen)
+  (let loop ((xs reqs))
+    (cond ((not (pair? xs)) #t)
+          ((member? (car xs) seen) (loop (cdr xs)))
+          (else #f))))
+
+(define (ms-build-stages ms-list)
+  (let loop ((xs ms-list) (seen '()) (out '()))
+    (cond
+      ((not (pair? xs))
+       (if (pair? out)
+         (hash "ok" #t "stages" (reverse out))
+         (hash "ok" #f "error" "no-milestones")))
+      (else
+       (let* ((m (car xs))
+              (id (ms-get m "id" #f))
+              (name (ms-get m "name" #f))
+              (reqs (ms-get m "requires" '()))
+              (asserts (ms-get m "assertions" '())))
+         (cond
+           ((not (and (hash? m) (ms-text? id)))
+            (hash "ok" #f "error" "bad-stage-id"))
+           ((member? id seen)
+            (hash "ok" #f "error" (string-append "duplicate-stage:" id)))
+           ((not (ms-text? name))
+            (hash "ok" #f "error" (string-append "bad-stage-name:" id)))
+           ((not (ms-reqs-met? reqs seen))
+            (hash "ok" #f "error" (string-append "stage-out-of-order:" id)))
+           ((not (pair? asserts))
+            (hash "ok" #f "error" (string-append "empty-assertions:" id)))
+           (else
+            (loop (cdr xs)
+                  (append seen (list id))
+                  (cons (hash "id" id
+                              "name" name
+                              "requires" reqs
+                              "assertions" asserts
+                              "goal" (ms-get m "goal" "")
+                              "status" (if (pair? out) "pending" "active")
+                              "passed_round" #f
+                              "passed_worldline" #f
+                              "passed_pr" #f
+                              "passed_commit" #f)
+                        out)))))))))
+
+(define (milestone:new spec opts)
+  (if (not (and (hash? spec) (equal? (ms-get spec "kind" "") "game-spec")))
+    (hash "ok" #f "error" "not-a-game-spec")
+    (let ((built (ms-build-stages (ms-get spec "milestones" '()))))
+      (if (not (ms-get built "ok" #f))
+        built
+        (let ((stages (ms-get built "stages" '())))
+          (hash "ok" #t
+                "state"
+                (hash "kind" "milestone-state"
+                      "spec_fingerprint" (ms-get spec "fingerprint" "")
+                      "workspace" (if (ms-pos? (ms-get opts "workspace" #f))
+                                    (ms-get opts "workspace" 1) 1)
+                      "issue" (ms-num opts "issue" 0)
+                      "repo" (ms-get opts "repo" "cybrid-systems/game")
+                      "stages" stages
+                      "current" (ms-get (car stages) "id" #f)
+                      "done" #f
+                      "rounds" '()
+                      "history" '()
+                      "inflight" #f
+                      "seq" 0
+                      "chain" '()
+                      "last_outcome" #f)))))))
+
+(define (milestone:stages state) (ms-get state "stages" '()))
+
+(define (milestone:current state)
+  (ms-stage-by-id (ms-get state "stages" '()) (ms-get state "current" #f)))
+
+; ── digest chain ───────────────────────────────────────────────
+
+(define (ms-event-digest e)
+  (score:contract-fingerprint
+    "milestone-chain"
+    (list (list "seq" (ms-text (ms-get e "seq" 0)))
+          (list "kind" (ms-text (ms-get e "kind" "")))
+          (list "stage" (ms-text (ms-get e "stage" "")))
+          (list "round" (ms-text (ms-get e "round" "")))
+          (list "worldline" (ms-text (ms-get e "worldline" 0)))
+          (list "pr" (ms-text (ms-get e "pr" 0)))
+          (list "commit" (ms-text (ms-get e "commit" "")))
+          (list "evidence" (ms-text (ms-get e "evidence" "")))
+          (list "prev" (ms-text (ms-get e "prev" ""))))))
+
+(define (ms-round-digest r)
+  (score:contract-fingerprint
+    "milestone-round"
+    (list (list "stage" (ms-text (ms-get r "stage" "")))
+          (list "id" (ms-text (ms-get r "id" "")))
+          (list "worldline" (ms-text (ms-get r "worldline" 0)))
+          (list "winner" (ms-text (ms-get r "winner" "")))
+          (list "candidates" (ms-text (ms-get r "candidates" 0)))
+          (list "batches" (ms-text (ms-get r "batches" 0)))
+          (list "score" (ms-text (ms-get r "score" 0)))
+          (list "root_in" (ms-text (ms-get r "root_in" "")))
+          (list "root_out" (ms-text (ms-get r "root_out" "")))
+          (list "assertions" (string-join (map ms-text (ms-get r "assertions" '())) ","))
+          (list "source" (ms-text (ms-get r "source" "")))
+          (list "harness" (ms-text (ms-get (ms-get r "harness" (hash)) "fingerprint" ""))))))
+
+(define (ms-forks-text forks)
+  (if (not (pair? forks))
+    ""
+    (string-join
+      (map (lambda (f)
+             (string-append (ms-text (ms-get f "id" "")) ":"
+                            (ms-text (ms-get f "ok" #f)) ":"
+                            (ms-text (ms-get f "score" 0))))
+           forks)
+      ",")))
+
+(define (ms-evidence-digest ev)
+  (score:contract-fingerprint
+    "milestone-evidence"
+    (list (list "stage" (ms-text (ms-get ev "stage" "")))
+          (list "round" (ms-text (ms-get ev "round" "")))
+          (list "worldline" (ms-text (ms-get ev "worldline" 0)))
+          (list "winner" (ms-text (ms-get ev "winner" "")))
+          (list "candidates" (ms-text (ms-get ev "candidates" 0)))
+          (list "batches" (ms-text (ms-get ev "batches" 0)))
+          (list "early_stop" (ms-text (ms-get ev "early_stop" 0)))
+          (list "score" (ms-text (ms-get ev "score" 0)))
+          (list "root_in" (ms-text (ms-get ev "root_in" "")))
+          (list "root_out" (ms-text (ms-get ev "root_out" "")))
+          (list "harness" (ms-text (ms-get (ms-get ev "harness" (hash)) "fingerprint" "")))
+          (list "forks" (ms-forks-text (ms-get ev "fork_tree" '())))
+          (list "source" (ms-text (ms-get ev "source" "")))
+          (list "inner_rounds" (ms-text (ms-get ev "inner_rounds" 0)))
+          (list "contract" (string-join (map ms-text (ms-get ev "contract" '())) ","))
+          (list "chain" (ms-text (ms-get ev "chain" "genesis"))))))
+
+(define (ms-append! state kind stage round wl pr commit evidence)
+  (let* ((seq (+ 1 (ms-num state "seq" 0)))
+         (chain (ms-get state "chain" '()))
+         (prev (if (pair? chain) (ms-get (car chain) "digest" "genesis") "genesis"))
+         (e (hash "seq" seq
+                  "kind" kind
+                  "stage" stage
+                  "round" round
+                  "worldline" wl
+                  "pr" pr
+                  "commit" commit
+                  "evidence" evidence
+                  "prev" prev
+                  "at_ms" (current-time-ms)))
+         (digest (ms-event-digest e)))
+    (hash-set! e "digest" digest)
+    (hash-set! state "seq" seq)
+    (hash-set! state "chain" (cons e chain))
+    e))
+
+(define (ms-verify-chain chain)
+  (let loop ((xs (reverse chain)) (prev "genesis") (n 0))
+    (cond
+      ((not (pair? xs)) (hash "ok" #t "events" n "head" prev))
+      ((not (hash? (car xs)))
+       (hash "ok" #f "error" "bad-event" "events" n))
+      ((not (equal? (ms-get (car xs) "prev" #f) prev))
+       (hash "ok" #f "error" "prev-mismatch" "events" n
+             "seq" (ms-get (car xs) "seq" 0)))
+      ((not (equal? (ms-get (car xs) "digest" #f) (ms-event-digest (car xs))))
+       (hash "ok" #f "error" "digest-mismatch" "events" n
+             "seq" (ms-get (car xs) "seq" 0)))
+      (else
+       (loop (cdr xs) (ms-get (car xs) "digest" "") (+ n 1))))))
+
+; ── inner rounds ───────────────────────────────────────────────
+
+(define (ms-find-winner run)
+  (let ((winner-id (ms-get run "winner" #f)))
+    (let loop ((xs (ms-get run "results" '())))
+      (cond ((not (pair? xs)) #f)
+            ((equal? (ms-get (car xs) "id" "") winner-id) (car xs))
+            (else (loop (cdr xs)))))))
+
+(define (ms-run-ok? run)
+  (let ((w (ms-find-winner run)))
+    (and (hash? run)
+         (equal? (ms-get run "ok" #f) #t)
+         w
+         (equal? (ms-get w "ok" #f) #t))))
+
+(define (ms-forks-of runs)
+  (let loop ((xs runs) (i 0) (out '()))
+    (if (not (pair? xs))
+      out
+      (loop (cdr xs) (+ i 1)
+            (append out
+                    (map (lambda (r)
+                           (hash "script" i
+                                 "id" (ms-get r "id" "")
+                                 "ok" (ms-get r "ok" #f)
+                                 "score" (ms-get r "score" 0)))
+                         (ms-get (car xs) "results" '())))))))
+
+(define (ms-sum-results runs)
+  (let loop ((xs runs) (n 0))
+    (cond ((not (pair? xs)) n)
+          (else (loop (cdr xs) (+ n (length (ms-get (car xs) "results" '()))))))))
+
+(define (ms-sum-batches runs)
+  (let loop ((xs runs) (n 0))
+    (cond ((not (pair? xs)) n)
+          (else (loop (cdr xs) (+ n (ms-get (car xs) "batches" 1)))))))
+
+(define (ms-sum-winner-score runs)
+  (let loop ((xs runs) (n 0))
+    (if (not (pair? xs))
+      n
+      (let ((w (ms-find-winner (car xs))))
+        (loop (cdr xs) (+ n (if w (ms-get w "score" 0) 0)))))))
+
+(define (ms-harness-normal harness)
+  (let ((pkg (ms-get harness "package" #f)))
+    (if (and (hash? pkg)
+             (not (ms-text? (ms-get harness "fingerprint" #f)))
+             (ms-text? (ms-get pkg "fingerprint" #f)))
+      pkg
+      harness)))
+
+(define (milestone:round-from-runs stage runs harness meta)
+  (let* ((runs (if (pair? runs) runs '()))
+         (all-ok (and (pair? runs)
+                      (let loop ((xs runs))
+                        (cond ((not (pair? xs)) #t)
+                              ((ms-run-ok? (car xs)) (loop (cdr xs)))
+                              (else #f)))))
+         (assertions (ms-get meta "assertions" '()))
+         (perf (ms-get meta "perf"
+                       (hash "ok" all-ok
+                             "degraded" #t
+                             "source" "inner-assertions")))
+         (winner (ms-get meta "winner"
+                         (let ((w (if (pair? runs) (ms-find-winner (car runs)) #f)))
+                           (if w (ms-get w "id" "") "")))))
+    (hash "id" (ms-get meta "id" (string-append "round-" (ms-text (ms-get meta "worldline" 1))))
+          "stage" stage
+          "worldline" (ms-get meta "worldline" 1)
+          "winner" winner
+          "candidates" (ms-sum-results runs)
+          "batches" (ms-sum-batches runs)
+          "early_stop" (ms-get meta "early_stop" 0)
+          "score" (ms-sum-winner-score runs)
+          "ok" all-ok
+          "assertions" assertions
+          "assertions_ok" (ms-get meta "assertions_ok" all-ok)
+          "harness" (ms-harness-normal harness)
+          "source" (ms-get meta "source" "")
+          "root_in" (ms-get meta "root_in" "")
+          "root_out" (ms-get meta "root_out" "")
+          "duration_ms" (ms-get meta "duration_ms" 0)
+          "perf" perf
+          "files_written" 0
+          "per_candidate_ci" 0
+          "fork_tree" (ms-forks-of runs))))
+
+(define (milestone:round-from-loop stage run harness meta)
+  (milestone:round-from-runs stage (list run) harness meta))
+
+(define (ms-assertions-covered? round stage-obj)
+  (let ((have (ms-get round "assertions" '()))
+        (want (ms-get stage-obj "assertions" '())))
+    (and (pair? have)
+         (let loop ((xs want))
+           (cond ((not (pair? xs)) #t)
+                 ((member? (car xs) have) (loop (cdr xs)))
+                 (else #f))))))
+
+(define (ms-round-error state round)
+  (let* ((stage (ms-get round "stage" #f))
+         (current (ms-get state "current" #f))
+         (rounds (ms-get state "rounds" '()))
+         (prev (ms-last-round-for rounds current))
+         (harness (ms-get round "harness" (hash))))
+    (cond
+      ((not (hash? round)) "bad-round")
+      ((not (ms-text? (ms-get round "id" #f))) "bad-round-id")
+      ((not (ms-pos? (ms-get round "worldline" #f))) "bad-worldline")
+      ((not (ms-pos? (ms-get round "candidates" #f))) "no-candidates")
+      ((not (ms-pos? (ms-get round "batches" #f))) "bad-batches")
+      ((not (ms-text? (ms-get round "winner" #f))) "no-winner")
+      ((not (equal? (ms-get round "ok" #f) #t)) "round-not-ok")
+      ((not (equal? (ms-get round "assertions_ok" #f) #t)) "assertions-failed")
+      ((not (equal? (ms-get harness "verdict" "") "keep")) "harness-not-keep")
+      ((not (ms-text? (ms-get harness "fingerprint" #f))) "missing-harness-fingerprint")
+      ((not (equal? (ms-get harness "package_valid" #t) #t)) "invalid-harness-package")
+      ((not (number? (ms-get round "score" #f))) "bad-score")
+      ((not (ms-text? (ms-get round "root_in" #f))) "missing-root-in")
+      ((not (ms-text? (ms-get round "root_out" #f))) "missing-root-out")
+      ((not (equal? (ms-get round "files_written" 0) 0)) "candidate-wrote-files")
+      ((not (equal? (ms-get round "per_candidate_ci" 0) 0)) "per-candidate-ci")
+      ((ms-find-round rounds (ms-get round "id" "")) "duplicate-round")
+      ((not (ms-text? stage)) "missing-stage")
+      ((not (equal? stage current)) "stage-not-current")
+      ((not (ms-stage-by-id (ms-get state "stages" '()) stage)) "unknown-stage")
+      ((not (ms-assertions-covered?
+              round (ms-stage-by-id (ms-get state "stages" '()) stage)))
+       "assertions-uncovered")
+      ((and prev (not (equal? (ms-get prev "root_out" #f)
+                              (ms-get round "root_in" #f))))
+       "state-discontinuity")
+      (else #t))))
+
+(define (milestone:record-round! state round)
+  (cond
+    ((not (hash? state)) (hash "ok" #f "error" "not-a-state"))
+    ((equal? (ms-get state "done" #f) #t) (hash "ok" #f "error" "already-done"))
+    ((hash? (ms-get state "inflight" #f)) (hash "ok" #f "error" "inflight-pr"))
+    (else
+     (let ((err (ms-round-error state round)))
+       (cond
+         ((not (equal? err #t))
+          (hash "ok" #f "error" err "round" (ms-get round "id" #f)))
+         (else
+          (let* ((current (ms-get state "current" #f))
+                 (r (ms-copy round))
+                 (r (begin (hash-set! r "stage" current)
+                           (hash-set! r "perf"
+                                      (let ((p (ms-get r "perf" #f)))
+                                        (if (hash? p) p
+                                          (hash "ok" #t "degraded" #t
+                                                "source" "inner-assertions"))))
+                           (hash-set! r "evidence" (ms-round-digest r))
+                           (hash-set! r "at_ms" (current-time-ms))
+                           r))
+                 (n (length (ms-rounds-for (ms-get state "rounds" '()) current))))
+            (hash-set! state "rounds" (cons r (ms-get state "rounds" '())))
+            (ms-append! state "inner-round" current (ms-get r "id" "")
+                        (ms-get r "worldline" 0) 0 "" (ms-get r "evidence" ""))
+            (hash "ok" #t
+                  "round" (ms-get r "id" "")
+                  "stage" current
+                  "rounds" (+ n 1)
+                  "evidence" (ms-get r "evidence" "")
+                  "chain" (ms-get state "seq" 0)))))))))
+
+; ── outer loop ─────────────────────────────────────────────────
+
+(define (ms-eligible-round state)
+  (let* ((current (ms-get state "current" #f))
+         (round (ms-last-round-for (ms-get state "rounds" '()) current)))
+    (if (not round)
+      #f
+      (let ((harness (ms-get round "harness" (hash))))
+        (if (and (equal? (ms-get round "ok" #f) #t)
+                 (equal? (ms-get round "assertions_ok" #f) #t)
+                 (equal? (ms-get harness "verdict" "") "keep")
+                 (ms-text? (ms-get harness "fingerprint" #f)))
+          round
+          #f)))))
+
+(define (ms-evidence state stage round)
+  (let* ((chain (ms-get state "chain" '()))
+         (chain-digest (if (pair? chain) (ms-get (car chain) "digest" "genesis") "genesis"))
+         (harness (ms-get round "harness" (hash)))
+         (ev (hash "kind" "outer-evidence"
+                   "stage" stage
+                   "milestone" (ms-get (ms-stage-by-id (ms-get state "stages" '()) stage) "name" "")
+                   "round" (ms-get round "id" "")
+                   "worldline" (ms-get round "worldline" 0)
+                   "winner" (ms-get round "winner" "")
+                   "candidates" (ms-get round "candidates" 0)
+                   "batches" (ms-get round "batches" 0)
+                   "early_stop" (ms-get round "early_stop" 0)
+                   "score" (ms-get round "score" 0)
+                   "root_in" (ms-get round "root_in" "")
+                   "root_out" (ms-get round "root_out" "")
+                   "fork_tree" (ms-get round "fork_tree" '())
+                   "contract" (ms-get (ms-stage-by-id (ms-get state "stages" '()) stage)
+                                      "assertions" '())
+                   "harness" harness
+                   "source" (ms-get round "source" "")
+                   "inner_rounds" (length (ms-rounds-for (ms-get state "rounds" '()) stage))
+                   "files_written" 0
+                   "per_candidate_ci" 0
+                   "chain" chain-digest)))
+    (hash-set! ev "digest" (ms-evidence-digest ev))
+    ev))
+
+(define (milestone:outer-request state)
+  (cond
+    ((not (hash? state)) (hash "ok" #f "error" "not-a-state"))
+    ((equal? (ms-get state "done" #f) #t) (hash "ok" #f "error" "already-done"))
+    ((hash? (ms-get state "inflight" #f)) (hash "ok" #f "error" "inflight-pr"))
+    (else
+     (let* ((current (ms-get state "current" #f))
+            (stage (ms-stage-by-id (ms-get state "stages" '()) current))
+            (round (ms-eligible-round state)))
+       (if (not stage)
+         (hash "ok" #f "error" "no-current-stage")
+         (if (not round)
+           (hash "ok" #f "error" "no-eligible-round")
+           (let* ((ev (ms-evidence state current round))
+                  (branch (string-append "orchestra/" current "-"
+                                         (ms-get round "id" "")))
+                  (harness (ms-get round "harness" (hash)))
+                  (perf (ms-get round "perf" (hash "ok" #t "degraded" #t)))
+                  (request
+                    (hash "repo" (ms-get state "repo" "")
+                          "branch" branch
+                          "issue" (ms-get state "issue" 0)
+                          "title" (string-append "feat(game): " (ms-get stage "name" current)
+                                                 " from inner round " (ms-get round "id" ""))
+                          "score" (string-append "milestone-" current "-"
+                                                 (ms-get round "id" ""))
+                          "perf" perf
+                          "harness" (hash "verdict" "keep"
+                                          "fingerprint" (ms-get harness "fingerprint" ""))
+                          "paths" '()
+                          "approval" #f
+                          "evidence" ev
+                          "evidence_digest" (ms-get ev "digest" ""))))
+             (hash "ok" #t
+                   "action" "plan-pr"
+                   "request" request
+                   "evidence" ev
+                   "round" (ms-get round "id" "")
+                   "stage" current))))))))
+
+(define (milestone:record-pr! state number url plan)
+  (cond
+    ((not (hash? state)) (hash "ok" #f "error" "not-a-state"))
+    ((hash? (ms-get state "inflight" #f)) (hash "ok" #f "error" "inflight-pr"))
+    ((not (and (equal? (ms-get plan "ok" #f) #t)
+               (equal? (ms-get plan "action" "") "open-pr")))
+     (hash "ok" #f "error" "plan-not-open-pr"))
+    ((not (ms-pos? number)) (hash "ok" #f "error" "bad-pr-number"))
+    ((not (ms-text? url)) (hash "ok" #f "error" "bad-pr-url"))
+    (else
+     (let* ((payload (ms-get plan "payload" (hash)))
+            (head (ms-get payload "head" ""))
+            (round (ms-eligible-round state)))
+       (if (not round)
+         (hash "ok" #f "error" "no-eligible-round")
+         (let* ((current (ms-get state "current" #f))
+                (ev (ms-evidence state current round))
+                (expected (string-append "orchestra/" current "-"
+                                         (ms-get round "id" ""))))
+           (cond
+             ((not (equal? head expected)) (hash "ok" #f "error" "branch-mismatch"))
+             ((not (equal? (ms-get payload "repo" "") (ms-get state "repo" "")))
+              (hash "ok" #f "error" "repo-mismatch"))
+             ((not (equal? (ms-get payload "issue" -1) (ms-get state "issue" -2)))
+              (hash "ok" #f "error" "issue-mismatch"))
+             ((not (equal? (ms-get (ms-get payload "harness" (hash)) "fingerprint" "")
+                           (ms-get (ms-get round "harness" (hash)) "fingerprint" "")))
+              (hash "ok" #f "error" "harness-mismatch"))
+             (else
+              (let ((pr (hash "number" number
+                              "url" url
+                              "branch" expected
+                              "stage" current
+                              "round" (ms-get round "id" "")
+                              "worldline" (ms-get round "worldline" 0)
+                              "evidence_digest" (ms-get ev "digest" ""))))
+                (hash-set! state "inflight" pr)
+                (ms-append! state "outer-pr" current (ms-get round "id" "")
+                            (ms-get round "worldline" 0) number "" (ms-get ev "digest" ""))
+                (hash "ok" #t
+                      "pr" number
+                      "branch" expected
+                      "evidence_digest" (ms-get ev "digest" "")
+                      "chain" (ms-get state "seq" 0)))))))))))
+
+; ── landing and stage advance ──────────────────────────────────
+
+(define (ms-map-stage stages id fn)
+  (map (lambda (st) (if (equal? (ms-get st "id" "") id) (fn st) st)) stages))
+
+(define (ms-stage-passed st info)
+  (let ((c (ms-copy st)))
+    (hash-set! c "status" "passed")
+    (hash-set! c "passed_round" (ms-get info "round" #f))
+    (hash-set! c "passed_worldline" (ms-get info "worldline" #f))
+    (hash-set! c "passed_pr" (ms-get info "pr" #f))
+    (hash-set! c "passed_commit" (ms-get info "commit" #f))
+    c))
+
+(define (ms-activate stages id)
+  (if id
+    (ms-map-stage stages id
+                  (lambda (st)
+                    (let ((c (ms-copy st)))
+                      (hash-set! c "status" "active")
+                      c)))
+    stages))
+
+(define (ms-land-error state merge)
+  (let ((inflight (ms-get state "inflight" #f))
+        (post (ms-get merge "post_merge" (hash))))
+    (cond
+      ((not (hash? inflight)) "no-inflight-pr")
+      ((not (equal? (ms-get merge "pr" 0) (ms-get inflight "number" 0)))
+       "pr-mismatch")
+      ((not (equal? (ms-get merge "merged" #f) #t)) "not-merged")
+      ((not (ms-text? (ms-get merge "commit" #f))) "missing-commit")
+      ((not (equal? (ms-get merge "branch_protected" #f) #t))
+       "branch-protection")
+      ((equal? (ms-get merge "force" #f) #t) "force-push-forbidden")
+      ((equal? (ms-get merge "admin" #f) #t) "admin-merge-forbidden")
+      ((not (equal? (ms-get post "ok" #f) #t)) "post-merge-regression")
+      ((not (equal? (ms-get post "assertions_ok" #f) #t))
+       "post-merge-assertions")
+      ((and (hash? post) (equal? (ms-get post "perf_ok" #t) #f))
+       "post-merge-perf-regression")
+      ((not (equal? (ms-get merge "evidence_digest" #f)
+                    (ms-get inflight "evidence_digest" #f)))
+       "evidence-mismatch")
+      (else #t))))
+
+(define (ms-outcome state info)
+  (let* ((stage (ms-get info "stage" ""))
+         (st (ms-stage-by-id (ms-get state "stages" '()) stage))
+         (name (ms-get st "name" stage))
+         (round (ms-get info "round" ""))
+         (winner (ms-get info "winner" "")))
+    (hash "task" (ms-get state "workspace" 1)
+          "worldline" (ms-get info "worldline" 1)
+          "verdict" "keep"
+          "kind" "gate-keep"
+          "candidate_hash" winner
+          "contract_hash" (string-append (ms-get state "spec_fingerprint" "")
+                                         ":" stage)
+          "reason" "milestone-passed"
+          "summary" (string-append "stage " stage " (" name ") passed: inner round "
+                                   round " -> PR #" (ms-text (ms-get info "pr" 0)))
+          "pr" (ms-get info "pr" 0)
+          "commit" (ms-get info "commit" ""))))
+
+(define (milestone:land! state merge)
+  (let ((err (ms-land-error state merge)))
+    (cond
+      ((not (equal? err #t)) (hash "ok" #f "error" err))
+      (else
+       (let* ((inflight (ms-get state "inflight" #f))
+              (stage (ms-get inflight "stage" ""))
+              (round-id (ms-get inflight "round" ""))
+              (wl (ms-get inflight "worldline" 0))
+              (pr (ms-get inflight "number" 0))
+              (commit (ms-get merge "commit" ""))
+              (round (ms-find-round (ms-get state "rounds" '()) round-id))
+              (winner (if round (ms-get round "winner" "") ""))
+              (stages (ms-get state "stages" '()))
+              (next (ms-next-id stages stage))
+              (info (hash "stage" stage "round" round-id "worldline" wl
+                          "pr" pr "commit" commit "winner" winner
+                          "evidence" (ms-get inflight "evidence_digest" "")))
+              (stages (ms-map-stage stages stage
+                                    (lambda (st) (ms-stage-passed st info))))
+              (stages (ms-activate stages next))
+              (done (not next))
+              (record (hash "stage" stage
+                            "round" round-id
+                            "worldline" wl
+                            "pr" pr
+                            "commit" commit
+                            "evidence" (ms-get inflight "evidence_digest" ""))))
+         (hash-set! state "stages" stages)
+         (hash-set! state "history" (cons record (ms-get state "history" '())))
+         (hash-set! state "current" next)
+         (hash-set! state "done" done)
+         (hash-set! state "inflight" #f)
+         (let ((outcome (ms-outcome state info)))
+           (hash-set! state "last_outcome" outcome)
+           (ms-append! state "stage-passed" stage round-id wl pr commit
+                       (ms-get info "evidence" ""))
+           (hash "ok" #t
+                 "stage" stage
+                 "next" next
+                 "done" done
+                 "outcome" outcome
+                 "status" (hash-ref (milestone:status state) "stage" stage)
+                 "chain" (ms-get state "seq" 0))))))))
+
+(define (milestone:outcome state) (ms-get state "last_outcome" #f))
+
+; ── verification and status ────────────────────────────────────
+
+(define (ms-index-of stages id)
+  (let loop ((xs stages) (i 0))
+    (cond ((not (pair? xs)) -1)
+          ((equal? (ms-get (car xs) "id" "") id) i)
+          (else (loop (cdr xs) (+ i 1))))))
+
+(define (ms-verify-stages state)
+  (let* ((stages (ms-get state "stages" '()))
+         (current (ms-get state "current" #f))
+         (done (equal? (ms-get state "done" #f) #t))
+         (idx (if done -1 (ms-index-of stages current)))
+         (passed (filter (lambda (st) (equal? (ms-get st "status" "") "passed")) stages))
+         (active (filter (lambda (st) (equal? (ms-get st "status" "") "active")) stages))
+         (history (ms-get state "history" '()))
+         (rounds (ms-get state "rounds" '())))
+    (cond
+      ((not (pair? stages)) (hash "ok" #f "error" "no-stages"))
+      (done
+       (if (and (equal? current #f)
+                (equal? (length passed) (length stages))
+                (not (pair? active))
+                (= (length history) (length passed)))
+         (hash "ok" #t "passed" (length passed))
+         (hash "ok" #f "error" "done-state-inconsistent")))
+      ((< idx 0) (hash "ok" #f "error" "no-current-stage"))
+      ((not (= (length active) 1))
+       (hash "ok" #f "error" "active-count"))
+      ((not (equal? (ms-get (car active) "id" "") current))
+       (hash "ok" #f "error" "active-stage-mismatch"))
+      (else
+       (let loop ((xs stages) (i 0) (err #f))
+         (cond
+           (err (hash "ok" #f "error" err))
+           ((not (pair? xs))
+            (if (equal? (length history) (length passed))
+              (hash "ok" #t "passed" (length passed))
+              (hash "ok" #f "error" "history-mismatch")))
+           (else
+            (let* ((st (car xs))
+                   (status (ms-get st "status" ""))
+                   (want (cond ((< i idx) "passed")
+                               ((= i idx) "active")
+                               (else "pending"))))
+              (cond
+                ((not (equal? status want))
+                 (loop (cdr xs) (+ i 1)
+                       (string-append "stage-status:" (ms-get st "id" ""))))
+                ((and (equal? status "passed")
+                      (not (ms-find-round rounds (ms-get st "passed_round" ""))))
+                 (loop (cdr xs) (+ i 1)
+                       (string-append "missing-round:" (ms-get st "id" ""))))
+                (else (loop (cdr xs) (+ i 1) #f)))))))))))
+
+(define (ms-verify-rounds state)
+  (let* ((rounds (ms-get state "rounds" '()))
+         (chain (ms-get state "chain" '())))
+    (let loop ((xs rounds) (err #f))
+      (cond
+        (err (hash "ok" #f "error" err))
+        ((not (pair? xs))
+         (let loop2 ((es chain) (n 0) (err2 #f))
+           (cond
+             (err2 (hash "ok" #f "error" err2 "checked" n))
+             ((not (pair? es)) (hash "ok" #t "checked" n))
+             ((equal? (ms-get (car es) "kind" "") "inner-round")
+              (let ((r (ms-find-round rounds (ms-get (car es) "round" ""))))
+                (cond
+                  ((not r)
+                   (loop2 (cdr es) n
+                          (string-append "missing-round-event:"
+                                         (ms-text (ms-get (car es) "round" "")))))
+                  ((not (equal? (ms-get (car es) "evidence" "")
+                                (ms-get r "evidence" "")))
+                   (loop2 (cdr es) n "round-evidence-mismatch"))
+                  (else (loop2 (cdr es) (+ n 1) #f)))))
+             (else (loop2 (cdr es) n #f)))))
+        (else
+         (let ((r (car xs)))
+           (if (not (equal? (ms-get r "evidence" "") (ms-round-digest r)))
+             (hash "ok" #f "error" "round-digest-mismatch"
+                   "round" (ms-get r "id" ""))
+             (loop (cdr xs) #f))))))))
+
+(define (milestone:verify state)
+  (if (not (hash? state))
+    (hash "ok" #f "error" "not-a-state")
+    (let* ((chain (ms-get state "chain" '()))
+           (chain-verify (ms-verify-chain chain))
+           (stages (ms-verify-stages state))
+           (round-check (ms-verify-rounds state))
+           (rounds (length (ms-get state "rounds" '())))
+           (inner (ms-count-kind chain "inner-round"))
+           (landed (ms-count-kind chain "stage-passed")))
+      (hash "ok" (and (ms-get chain-verify "ok" #f)
+                      (ms-get stages "ok" #f)
+                      (ms-get round-check "ok" #f))
+            "chain" chain-verify
+            "stages" stages
+            "rounds_check" round-check
+            "events" (length chain)
+            "rounds" rounds
+            "inner_events" inner
+            "stage_events" landed
+            "rounds_match" (equal? inner rounds)
+            "landed_match" (equal? landed
+                                  (length (ms-get state "history" '())))))))
+
+(define (milestone:status state)
+  (if (not (hash? state))
+    (hash "ok" #f "error" "not-a-state")
+    (let* ((current (milestone:current state))
+           (stages (ms-get state "stages" '()))
+           (passed (filter (lambda (st) (equal? (ms-get st "status" "") "passed"))
+                           stages)))
+      (hash "ok" #t
+            "stage" (if current (ms-get current "id" "") "done")
+            "name" (if current (ms-get current "name" "") "完成")
+            "done" (equal? (ms-get state "done" #f) #t)
+            "passed" (length passed)
+            "stages" (length stages)
+            "rounds" (length (ms-get state "rounds" '()))
+            "inflight" (if (hash? (ms-get state "inflight" #f)) #t #f)
+            "chain" (length (ms-get state "chain" '()))
+            "chain_ok" (ms-get (ms-verify-chain (ms-get state "chain" '())) "ok" #f)))))
+
+(define (milestone:audit state) (reverse (ms-get state "chain" '())))

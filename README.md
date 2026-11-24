@@ -164,9 +164,15 @@ CPU, 256 MiB each, never above candidate count); `loop:rehearse-bounded`
 runs candidates in capped batches and selects the best winner. Docs:
 `docs/game-resources.md`.
 
+`lib/project/milestone.aura` is the #24 state machine: only a live-round
+winner whose #16 verdict is `keep` can become a #18 PR request, and a
+stage advances only after a protected merge with a green post-merge
+rerun. It rejects stage skips, state discontinuity, candidate file writes,
+per-candidate CI and tampered round/audit digests, and writes a
+#2-compatible KEEP outcome on every pass. Docs: `docs/milestone.md`.
+
 The pure game loop still deep-copies game state; the live adapter covers
-the workspace COW/hot-replace half. The external PR loop remains open in
-#29.
+the workspace COW/hot-replace half.
 
 ## Experience graph (#2-#9)
 
