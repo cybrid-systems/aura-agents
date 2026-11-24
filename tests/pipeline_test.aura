@@ -1,0 +1,68 @@
+;; Issue #18 — unattended PR pipeline guardrails.
+(require "std/string")
+(require "std/json")
+(require "lib/pipeline/pipeline")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (with h key value)
+  (let ((c (hash)))
+    (for-each (lambda (k) (hash-set! c k (hash-ref h k))) (hash-keys h))
+    (hash-set! c key value)
+    c))
+
+(define policy (pipeline:policy))
+(define state (pipeline:new-state))
+(define req (hash "repo" "aura-redis" "branch" "orchestra/t1" "issue" 15
+                  "score" "score-abc"
+                  "perf" (hash "ok" #t "degraded" #t)
+                  "harness" (hash "verdict" "keep" "fingerprint" "fp-1")
+                  "paths" (list "src/zset.aura")
+                  "approval" #f))
+
+(define plan (pipeline:plan-pr req policy state))
+(line "plan" (hash-ref plan "action"))
+(line "plan-ok" (hash-ref plan "ok"))
+
+(define checks (hash "green" #t "branch_protected" #t "required_review" #t
+                     "draft" #f "evidence_attached" #t
+                     "harness_fingerprint" "fp-1"))
+(line "merge" (hash-ref (pipeline:merge-gate req checks policy state) "action"))
+(define red (with checks "green" #f))
+(line "not-green" (hash-ref (pipeline:merge-gate req red policy state) "error" "none"))
+
+(line "force-push" (hash-ref (pipeline:plan-pr (with req "force_push" #t) policy state) "error" "none"))
+(line "admin-merge" (hash-ref (pipeline:plan-pr (with req "admin_merge" #t) policy state) "error" "none"))
+(line "direct-main" (hash-ref (pipeline:plan-pr (with req "direct_main" #t) policy state) "error" "none"))
+(line "tag" (hash-ref (pipeline:plan-pr (with req "tag" #t) policy state) "error" "none"))
+(line "release" (hash-ref (pipeline:plan-pr (with req "release" #t) policy state) "error" "none"))
+
+(define high (with req "paths" (list ".github/workflows/ci.yml")))
+(line "high-risk" (hash-ref (pipeline:plan-pr high policy state) "error" "none"))
+(hash-set! high "approval" #t)
+(line "high-approved" (hash-ref (pipeline:plan-pr high policy state) "action" "none"))
+
+(define no-evidence (with req "perf" (hash "ok" #f)))
+(line "missing-evidence" (hash-ref (pipeline:plan-pr no-evidence policy state) "error" "none"))
+
+(define busy (with state "prs_today" 3))
+(line "rate-limit" (hash-ref (pipeline:plan-pr req policy busy) "error" "none"))
+(pipeline:kill! state #t)
+(line "kill-switch" (hash-ref (pipeline:plan-pr req policy state) "error" "none"))
+(line "kill-merge" (hash-ref (pipeline:merge-gate req checks policy state) "error" "none"))
+(pipeline:kill! state #f)
+
+(define pre (hash "p99_ms" 100 "error_rate" 0.0 "functional_ok" #t))
+(define post (hash "p99_ms" 140 "error_rate" 0.0 "functional_ok" #t))
+(define canary (pipeline:canary pre post policy))
+(line "canary" (hash-ref canary "action"))
+(line "canary-reason" (hash-ref canary "reason"))
+(line "revert" (hash-ref (pipeline:revert-pr req "p99") "action"))
+(define good (hash "p99_ms" 110 "error_rate" 0.0 "functional_ok" #t))
+(line "canary-keep" (hash-ref (pipeline:canary pre good policy) "action"))
+(line "post-merge" (hash-ref (pipeline:post-merge req) "action"))
+(line "audit" (> (length (pipeline:audit state)) 0))

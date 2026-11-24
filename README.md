@@ -155,3 +155,14 @@ worldline invalidation. Each workspace stays in its own
 `out/experience/<id>/`; `memory:use-backend! "cxx"` is refused until the
 stage-2 runtime exposes an Aura binding and concurrency.
 Docs: `docs/memory.md`; tests: `tests/memory_test.aura`.
+
+## Unattended PR pipeline (#18)
+
+`lib/pipeline/pipeline.aura` is the policy half of the delivery pipeline:
+standard `orchestra/<task>` PR with Score/Perf/Harness evidence, a merge
+gate that only returns `auto-merge` for protected/green/reviewed PRs, and
+post-merge cleanup. It hard-refuses `force-push`, `--admin`, direct
+main, tags and releases; high-risk paths need an explicit approval.
+Canary compares p99/error/functional and returns a standard revert PR on
+regression. Rate, in-flight, cooldown, budget and kill-switch guards are
+policy state. Docs: `docs/pipeline.md`; tests: `tests/pipeline_test.aura`.

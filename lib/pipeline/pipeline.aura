@@ -1,0 +1,185 @@
+;; Unattended PR pipeline (#18): evidence-gated PR -> branch-protected
+;; auto-merge -> post-merge canary -> revert PR, with hard red lines,
+;; per-repo rate/budget limits and a global kill switch.
+;;
+;; This module is pure policy. It never calls the GitHub API and never
+;; creates a tag or release; a thin adapter can execute the returned
+;; actions against a mock or a real repository.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+
+(export pipeline:policy pipeline:new-state pipeline:plan-pr pipeline:merge-gate
+        pipeline:post-merge pipeline:canary pipeline:revert-pr pipeline:kill!
+        pipeline:audit pipeline:help)
+
+(define (pipeline:help)
+  "Pipeline: (pipeline:plan-pr request policy state); (pipeline:merge-gate request checks policy state); (pipeline:canary pre post policy)")
+
+(define (pipeline:policy)
+  (hash "max_per_repo_day" 3
+        "max_inflight" 1
+        "cooldown_after_failure_min" 30
+        "budget_per_repo" 20
+        "p99_regression_ratio" 1.25
+        "error_regression_delta" 0.02
+        "high_risk_paths" (list "auth/" "security/" "protocol/" "wal/" ".github/")))
+
+(define (p:get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (p:flag req k) (equal? (p:get req k #f) #t))
+(define (p:list h k) (let ((v (p:get h k '()))) (if (pair? v) v '())))
+
+(define (p:fail reason) (hash "ok" #f "error" reason "action" "none"))
+(define (p:ok action payload) (hash "ok" #t "action" action "payload" payload))
+
+(define (p:high-risk? req policy)
+  (let ((paths (p:list req "paths"))
+        (prefixes (p:list policy "high_risk_paths")))
+    (let loop ((ps paths))
+      (cond ((not (pair? ps)) #f)
+            ((let loop2 ((xs prefixes))
+               (cond ((not (pair? xs)) #f)
+                     ((string-prefix? (car ps) (car xs)) #t)
+                     (else (loop2 (cdr xs)))))
+             #t)
+            (else (loop (cdr ps)))))))
+
+(define (p:evidence-complete? req)
+  (let ((perf (p:get req "perf" #f))
+        (harness (p:get req "harness" #f)))
+    (and (string? (p:get req "score" #f))
+         (> (string-length (p:get req "score" "")) 0)
+         (number? (p:get req "issue" #f))
+         (hash? perf)
+         (equal? (p:get perf "ok" #f) #t)
+         (hash? harness)
+         (equal? (p:get harness "verdict" "") "keep")
+         (string? (p:get harness "fingerprint" #f))
+         (> (string-length (p:get harness "fingerprint" "")) 0))))
+
+(define (p:red-line req)
+  (cond
+    ((p:flag req "force_push") "force-push-forbidden")
+    ((p:flag req "admin_merge") "admin-merge-forbidden")
+    ((p:flag req "direct_main") "direct-main-forbidden")
+    ((p:flag req "tag") "tag-forbidden")
+    ((p:flag req "release") "release-forbidden")
+    (else #f)))
+
+(define (pipeline:new-state)
+  (hash "prs_today" 0 "inflight" 0 "last_failure_ms" 0
+        "budget_used" 0 "kill" #f "audit" '()))
+
+(define (p:audit! state event)
+  (hash-set! state "audit" (cons event (p:get state "audit" '())))
+  state)
+
+(define (pipeline:kill! state on?)
+  (hash-set! state "kill" (equal? on? #t))
+  (p:audit! state (hash "event" (if on? "kill-on" "kill-off"))))
+
+(define (pipeline:audit state) (p:get state "audit" '()))
+
+; ── plan a PR ──────────────────────────────────────────────────
+
+(define (pipeline:plan-pr req policy state)
+  (let ((red (p:red-line req))
+        (branch (p:get req "branch" ""))
+        (today (p:get state "prs_today" 0))
+        (inflight (p:get state "inflight" 0))
+        (now (p:get state "now_ms" 0))
+        (lastfail (p:get state "last_failure_ms" 0))
+        (used (p:get state "budget_used" 0))
+        (high (p:high-risk? req policy)))
+    (cond
+      ((p:flag state "kill") (p:fail "kill-switch"))
+      (red (p:fail red))
+      ((not (string-prefix? branch "orchestra/")) (p:fail "branch-not-orchestra"))
+      ((not (p:evidence-complete? req)) (p:fail "missing-evidence"))
+      ((and high (not (p:flag req "approval"))) (p:fail "approval-required"))
+      ((>= today (p:get policy "max_per_repo_day" 3)) (p:fail "rate-limit"))
+      ((>= inflight (p:get policy "max_inflight" 1)) (p:fail "inflight-limit"))
+      ((and (> lastfail 0)
+            (< (- now lastfail) (* 60000 (p:get policy "cooldown_after_failure_min" 30))))
+       (p:fail "cooldown"))
+      ((>= used (p:get policy "budget_per_repo" 20)) (p:fail "budget"))
+      (else
+       (p:ok "open-pr"
+             (hash "repo" (p:get req "repo" "")
+                   "head" branch
+                   "base" "main"
+                   "issue" (p:get req "issue" 0)
+                   "title" (p:get req "title" "orchestra candidate")
+                   "score" (p:get req "score" "")
+                   "perf" (p:get req "perf" (hash))
+                   "harness" (p:get req "harness" (hash))
+                   "labels" (list "orchestra" "evidence-attached")))))))
+
+; ── merge gate ─────────────────────────────────────────────────
+
+(define (pipeline:merge-gate req checks policy state)
+  (let ((red (p:red-line req)))
+    (cond
+      ((p:flag state "kill") (p:fail "kill-switch"))
+      (red (p:fail red))
+      ((p:flag checks "draft") (p:fail "draft"))
+      ((not (p:flag checks "branch_protected")) (p:fail "branch-protection"))
+      ((not (p:flag checks "green")) (p:fail "checks-not-green"))
+      ((not (p:flag checks "required_review")) (p:fail "review-required"))
+      ((not (p:flag checks "evidence_attached")) (p:fail "missing-evidence"))
+      ((not (equal? (p:get checks "harness_fingerprint" "")
+                    (p:get (p:get req "harness" (hash)) "fingerprint" "")))
+       (p:fail "evidence-mismatch"))
+      (else
+       (p:ok "auto-merge"
+             (hash "repo" (p:get req "repo" "")
+                   "pr" (p:get req "pr" 0)
+                   "method" "merge"
+                   "delete_branch" (p:get req "branch" "")
+                   "admin" #f
+                   "force" #f)))))) 
+
+; ── post-merge ─────────────────────────────────────────────────
+
+(define (pipeline:post-merge req)
+  (p:ok "post-merge"
+        (hash "steps" (list "delete-remote-branch" "verify-main-commit" "update-issue")
+              "repo" (p:get req "repo" "")
+              "branch" (p:get req "branch" "")
+              "issue" (p:get req "issue" 0)
+              "tag" #f
+              "release" #f)))
+
+; ── canary + revert ────────────────────────────────────────────
+
+(define (p:ratio new old)
+  (if (and (number? new) (number? old) (> old 0)) (/ (* 1.0 new) old) 1.0))
+
+(define (pipeline:canary pre post policy)
+  (let* ((base-p99 (p:get pre "p99_ms" 0))
+         (new-p99 (p:get post "p99_ms" 0))
+         (base-err (p:get pre "error_rate" 0.0))
+         (new-err (p:get post "error_rate" 0.0))
+         (functional (p:get post "functional_ok" #t))
+         (ratio (p:ratio new-p99 base-p99))
+         (regressed (or (not (equal? functional #t))
+                        (> ratio (p:get policy "p99_regression_ratio" 1.25))
+                        (> (- new-err base-err)
+                           (p:get policy "error_regression_delta" 0.02)))))
+    (if regressed
+      (hash "ok" #f "action" "revert" "ratio" ratio
+            "reason" (if (not (equal? functional #t)) "functional"
+                       (if (> ratio (p:get policy "p99_regression_ratio" 1.25))
+                         "p99" "errors")))
+      (hash "ok" #t "action" "keep" "ratio" ratio "reason" "within-threshold"))))
+
+(define (pipeline:revert-pr req reason)
+  (p:ok "open-revert-pr"
+        (hash "repo" (p:get req "repo" "")
+              "head" (string-append "orchestra/revert-" (number->string (p:get req "pr" 0)))
+              "base" "main"
+              "title" (string-append "Revert orchestra PR #" (number->string (p:get req "pr" 0)))
+              "reason" reason
+              "evidence" "canary-regression"
+              "labels" (list "orchestra" "revert"))))

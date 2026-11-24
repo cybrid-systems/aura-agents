@@ -1,0 +1,10 @@
+pipeline:policy: -> Any
+pipeline:new-state: -> Any
+pipeline:plan-pr: Any Any Any -> Any
+pipeline:merge-gate: Any Any Any Any -> Any
+pipeline:post-merge: Any -> Any
+pipeline:canary: Any Any Any -> Any
+pipeline:revert-pr: Any Any -> Any
+pipeline:kill!: Any Any -> Any
+pipeline:audit: Any -> Any
+pipeline:help: -> Any
