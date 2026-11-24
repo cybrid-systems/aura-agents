@@ -37,6 +37,17 @@ candidate early in the real loop; this module exposes the same result so
 #24 can consume it.
 
 `tests/game_assert_test.aura` covers every assertion, a passing move and
-fire rehearsal, and a failing fire contract. The actual tank-battle
-state machine and COW worldlines are #24/#28/#29; this module is only the
-per-frame contract evaluator.
+fire rehearsal, and a failing fire contract.
+
+## Headless state machine
+
+`lib/game/arena.aura` is the deterministic 13×13 tank state machine the
+contract drives: player movement and blocking, fire/cooldown, bullet
+flight, destructible brick vs steel, impassable water, enemy hits and
+score, base destruction, two levels and clear-win. It has no renderer
+and no external IO. `tests/game_arena_test.aura` runs the real
+`arena:step` through `game:run` for move, fire, brick, steel, water,
+base loss, enemy destroy, win, level advance and repeatability.
+
+COW worldlines and N-fiber parallel rehearsal are #24/#28/#29; this is
+the per-frame contract and single-worldline state machine they call.

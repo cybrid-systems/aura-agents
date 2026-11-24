@@ -1,0 +1,3 @@
+arena:new: Any -> Any
+arena:step: Any Any -> Any
+arena:help: -> Any

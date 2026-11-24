@@ -133,8 +133,14 @@ or filesystem is involved. `game:run` drives a pure `step` function over
 an input script and evaluates only the contract ids, returning
 `ok/frames/failures` for early stopping. Docs: `docs/game-assert.md`.
 
-The actual tank-battle state machine and COW worldlines are #24/#28/#29;
-this is the per-frame contract layer they will call.
+`lib/game/arena.aura` is the deterministic 13×13 state machine behind
+it: move/block, fire/cooldown, bullet flight, brick vs steel, water,
+enemy score, base loss, two levels and clear-win, with no renderer or
+external IO. `tests/game_arena_test.aura` runs the real `arena:step`
+through the contract for every core rule.
+
+COW worldlines and N-fiber parallel rehearsal are #24/#28/#29; this is
+the per-frame contract and single-worldline state machine they call.
 
 ## Experience graph (#2-#9)
 
