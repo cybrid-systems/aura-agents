@@ -29,10 +29,14 @@ CI runs it before installing Aura.
   payloads, the `aura.toml` replacement, workflow patch, rollback pointer
   and the forbidden-action list.
 
-Each payload contains the target repo, `orchestra/baseline-<sha9>` branch,
-`aura.toml` and baseline files, a workflow digest patch, a rollback
-pointer, and `force-push/admin-merge/tag/release` in
-`forbidden_actions`.
+Each payload names the target repo, `orchestra/baseline-<sha9>` branch,
+and a profile: `aura-project` (patch the `[dependencies]` keys in the
+repo's own `aura.toml`, never replace the file), `aura-source` (write
+`AURA_REF`), `submodule` (move the `third_party/aura` pointer), or
+`baseline-gate` (baseline + gate only). Every payload also carries the
+baseline file, the `install-aura.sh` / `check-baseline.py` assets, a
+workflow digest patch, a rollback pointer, and
+`force-push/admin-merge/tag/release` in `forbidden_actions`.
 
 ## Rollout
 
