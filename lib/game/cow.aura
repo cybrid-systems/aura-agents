@@ -1,0 +1,37 @@
+;; Live COW/hot-replace adapter (#29): thin wrappers over Aura's
+;; mutate :snapshot / :restore, :overlay-* and :rebind primitives. The
+;; caller must have an evaluated workspace (set-code + eval-current).
+
+(require "std/string")
+
+(export cow:snapshot cow:restore cow:overlay-begin cow:overlay-set!
+        cow:overlay-get cow:overlay-commit cow:overlay-rollback
+        cow:rebind cow:help)
+
+(define (cow:help)
+  "COW: (cow:snapshot tag); (cow:restore id); (cow:overlay-begin/set!/get/commit/rollback); (cow:rebind name body reason)")
+
+(define (cow:snapshot tag)
+  (try (mutate :snapshot (if (string? tag) tag "cow")) (catch (e) -1)))
+
+(define (cow:restore id)
+  (try (mutate :restore id) (catch (e) #f)))
+
+(define (cow:overlay-begin)
+  (try (mutate :overlay-begin) (catch (e) #f)))
+
+(define (cow:overlay-set! name value)
+  (try (mutate :overlay-set! name value) (catch (e) #f)))
+
+(define (cow:overlay-get name)
+  (try (mutate :overlay-get name) (catch (e) #f)))
+
+(define (cow:overlay-commit)
+  (try (mutate :overlay-commit) (catch (e) #f)))
+
+(define (cow:overlay-rollback)
+  (try (mutate :overlay-rollback) (catch (e) #f)))
+
+(define (cow:rebind name body reason)
+  (try (mutate :rebind name body (if (string? reason) reason "cow"))
+       (catch (e) #f)))

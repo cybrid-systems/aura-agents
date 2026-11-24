@@ -1,0 +1,52 @@
+;; #29 live check: workspace snapshot, overlay isolation, hot rebind with
+;; state continuity, and two fibers with rollback-only overlays.
+(require "std/string")
+(require "lib/game/cow")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(set-code "(define overlay-root 0)\n(define game-tick 0)\n(define (game-step) (set! game-tick (+ game-tick 1)) game-tick)")
+(eval-current)
+(line "init-tick" game-tick)
+
+(define snap (cow:snapshot "cow-live"))
+(line "snapshot" (if (and (number? snap) (>= snap 0)) #t #f))
+
+(cow:overlay-begin)
+(cow:overlay-set! "overlay-root" 11)
+(line "overlay-value" (cow:overlay-get "overlay-root"))
+(cow:overlay-rollback)
+(line "overlay-root" overlay-root)
+
+(game-step)
+(game-step)
+(line "ticks-before" game-tick)
+(line "rebind" (cow:rebind "game-step"
+                             "(lambda () (set! game-tick (+ game-tick 10)) game-tick)"
+                             "hot"))
+(game-step)
+(line "ticks-after" game-tick)
+
+(define f1
+  (fiber:spawn
+    (lambda ()
+      (cow:overlay-begin)
+      (cow:overlay-set! "overlay-root" 21)
+      (define v (cow:overlay-get "overlay-root"))
+      (cow:overlay-rollback)
+      v)))
+(define f2
+  (fiber:spawn
+    (lambda ()
+      (cow:overlay-begin)
+      (cow:overlay-set! "overlay-root" 22)
+      (define v (cow:overlay-get "overlay-root"))
+      (cow:overlay-rollback)
+      v)))
+(line "fiber-1" (fiber:join f1))
+(line "fiber-2" (fiber:join f2))
+(line "root-after-fibers" overlay-root)

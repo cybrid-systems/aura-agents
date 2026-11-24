@@ -33,7 +33,11 @@ jobs:
         env:
           AURA_AGENTS_LLM: mock
         run: bash scripts/scaffold-dry-run.sh
+      - name: COW live check (#29)
+        env:
+          AURA_AGENTS_LLM: mock
+        run: bash scripts/cow-live-check.sh
       - name: Shell and Python syntax
         run: |
-          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh scripts/live-acceptance.sh scripts/scaffold-dry-run.sh
+          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh scripts/live-acceptance.sh scripts/scaffold-dry-run.sh scripts/cow-live-check.sh
           python3 -m py_compile scripts/check-baseline.py scripts/bump-baseline.py tests/fixtures/redis_fixture.py tests/fixtures/runner_fixture.py

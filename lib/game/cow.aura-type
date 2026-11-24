@@ -1,0 +1,9 @@
+cow:snapshot: Any -> Any
+cow:restore: Any -> Any
+cow:overlay-begin: -> Any
+cow:overlay-set!: Any Any -> Any
+cow:overlay-get: Any -> Any
+cow:overlay-commit: -> Any
+cow:overlay-rollback: -> Any
+cow:rebind: Any Any Any -> Any
+cow:help: -> Any

@@ -152,10 +152,16 @@ score); `tests/game_tuning_loop_test.aura` rehearses two ASTs in parallel
 and picks the higher-scoring one. No arbitrary source is evaluated.
 Docs: `docs/game-mutate.md`.
 
-COW snapshot/restore and the live hot swap itself are #24/#28/#29 work;
-this is the per-frame contract, single-worldline state machine, the
-in-memory rehearsal/selection and the structured mutation source they
-call.
+`lib/game/cow.aura` is the live-workspace adapter: `mutate :snapshot`/
+`:restore`, one COW overlay per fiber (`overlay-begin/set!/get/commit`/
+`rollback`) and `mutate :rebind` without `eval-current`. The
+`scripts/cow-live-check.sh` fixture proves overlay isolation (root stays
+0), hot rebind continuity (counter 2 → 12, no reset) and two fibers
+seeing 21/22 privately. Docs: `docs/game-cow.md`.
+
+The pure game loop still deep-copies game state; the live adapter covers
+the workspace COW/hot-replace half. Resource-adaptive N and the external
+PR loop remain open in #29.
 
 ## Experience graph (#2-#9)
 
