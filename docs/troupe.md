@@ -57,6 +57,25 @@ On the current nightly the target stayed healthy under that load
 result was `severity:none`. A loaded target that crosses a threshold
 emits the same motif shape; the harness does not manufacture one.
 
+## Runtime canary (#5433 / PR #5434)
+
+The live runner's hotspot was in Aura's file-mode reclaim, not in
+`aura-runner`; the fix is [aura#5434](https://github.com/cybrid-systems/aura/pull/5434).
+The target canary compares the old nightly with that build under the
+same 8-client external load:
+
+| run | old p99 | new p99 | old run_ms | new run_ms |
+|---|---:|---:|---:|---:|
+| 1 | 14 | 8 | 6650 | 4363 |
+| 2 | 13 | 8 | 6209 | 4433 |
+| 3 | 16 | 10 | 6842 | 5258 |
+
+`first_wish` fell from 7/6/5 ms to 4/5/4 ms; over-budget stayed 0; the
+runner's own 32 tests pass on the new binary. `scripts/fixtures/troupe_canary_5433.aura`
+runs the existing `troupe:cycle` over these measured values and returns
+`delivered` with `pipeline=open-pr`, `merge=auto-merge`, `canary=keep`.
+The real merge is the Aura PR, not a fake target patch.
+
 ## Tests
 
 `tests/troupe_test.aura` covers the full delivered path, a harmful

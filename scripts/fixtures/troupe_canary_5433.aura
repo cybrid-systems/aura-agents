@@ -1,0 +1,71 @@
+;; #19 test-target canary for the Aura runtime reclaim fix (#5433 / PR #5434).
+;; The metrics are the measured old/new runtime runs from 2026-11-24:
+;;   old nightly: p99 14/13/16 ms, first_wish 7/6/5 ms, over_budget 0
+;;   PR build:    p99  8/8/10 ms, first_wish 4/5/4 ms, over_budget 0
+;; This fixture runs the existing troupe cycle over those real numbers; the
+;; actual code change is the Aura PR, not an aura-runner target patch.
+(require "std/string")
+(require "lib/troupe/troupe")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define baseline (hash "tick_p99_ms" 8 "first_wish_ms" 4 "over_budget_pct" 0))
+(define current (hash "tick_p99_ms" 14 "first_wish_ms" 7 "over_budget_pct" 0))
+
+(define candidate
+  (hash "id" "aura-5434-reclaim-context"
+        "delta_tick_ms" -6
+        "delta_wish_ms" -3
+        "harm" #f
+        "patch" (hash "edits"
+                      (list (hash "target" "src/compiler/evaluator_gc.cpp"
+                                  "kind" "replace"
+                                  "before" "(mark value with 20 arguments)"
+                                  "after" "(mark value with one context)"))
+                      "original_lines" 100
+                      "deleted_lines" 10)
+        "protected_edits" '()
+        "train" (hash "score" 8 "baseline" 14)
+        "heldout" (hash "score" 9 "baseline" 14)
+        "perf" (hash "ok" #t "mode" "perf-only" "samples" 647
+                     "reclaim_before_pct" 36.9 "reclaim_after_pct" 23.7)
+        "replay" (hash "ok" #t "corpus" "heldout" "token" "runner-load-8")
+        "config" (hash "max-steps" 100 "workers" 8)
+        "contract_fingerprint" "fp-5433"))
+
+(define expected
+  (hash "fingerprint" "fp-5433"
+        "protected" (list "guard" "budget")
+        "config" (hash "max-steps" 100 "workers" 8)
+        "required_evidence" (list "perf" "replay")))
+
+(define checks
+  (hash "green" #t "branch_protected" #t "required_review" #t
+        "draft" #f "evidence_attached" #t
+        "harness_fingerprint" "fp-5433"))
+
+(define run
+  (troupe:cycle
+    (hash "baseline" baseline
+          "current" current
+          "candidates" (list candidate)
+          "expected" expected
+          "checks" checks
+          "repo" "cybrid-systems/aura"
+          "branch" "orchestra/aura-5434-reclaim"
+          "issue" 5433
+          "approval" #t
+          "paths" (list "src/compiler/evaluator_gc.cpp")
+          "pre" (hash "p99_ms" 14 "error_rate" 0.0 "functional_ok" #t)
+          "post" (hash "p99_ms" 8 "error_rate" 0.0 "functional_ok" #t))))
+
+(line "state" (hash-ref run "state"))
+(line "motif" (string-join (hash-ref (hash-ref run "motif") "signals" '()) ","))
+(line "verdict" (hash-ref (hash-ref run "judge") "verdict"))
+(line "pipeline" (hash-ref (hash-ref run "pipeline") "action"))
+(line "merge" (hash-ref (hash-ref run "merge") "action"))
+(line "canary" (hash-ref (hash-ref run "canary") "action"))
