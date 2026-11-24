@@ -1,0 +1,7 @@
+game:check: Any Any Any Any Any -> Any
+game:check-all: Any Any Any Any -> Any
+game:run: Any Any Any Any -> Any
+game:assertion-ids: -> Any
+game:failures: Any -> Any
+game:all-ok?: Any -> Any
+game:help: -> Any

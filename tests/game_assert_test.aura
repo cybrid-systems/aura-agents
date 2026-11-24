@@ -1,0 +1,116 @@
+;; Issue #23 — frame-level game assertions and an in-memory rehearsal loop.
+;; Pure state transitions; no filesystem, network or renderer.
+(require "std/string")
+(require "std/list")
+(require "lib/game/assert")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (hash-copy h)
+  (let ((out (hash)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
+    out))
+
+(define (with h k v)
+  (let ((c (hash-copy h)))
+    (hash-set! c k v)
+    c))
+
+(define (st x y tick bullets bricks steel water enemies score lives level status)
+  (hash "player" (hash "x" x "y" y)
+        "tick" tick
+        "bullets" bullets
+        "bricks" bricks
+        "steel" steel
+        "water" water
+        "enemies" enemies
+        "score" score
+        "lives" lives
+        "level" level
+        "status" status
+        "frame_ms" 5
+        "visual_diff_ok" #t
+        "players" 1))
+
+(define base (st 4 12 0 '() (list "b1" "b2") (list "s1") (list "w1") (list "e1" "e2") 0 3 1 "playing"))
+
+(line "move-right"
+      (game:check base (with base "player" (hash "x" 5 "y" 12)) '()
+                  (hash "move" "right") "move-right"))
+(line "move-right-neg"
+      (game:check base base '() (hash "move" "right") "move-right"))
+(line "move-collision"
+      (game:check base base (list "blocked") (hash "move" "left") "move-collision"))
+(line "state-advance"
+      (game:check base (with base "tick" 1) '() (hash) "state-advance"))
+(line "fire-bullet"
+      (game:check base (with base "bullets" (list "b")) '()
+                  (hash "fire" #t) "fire-bullet"))
+(line "bullet-brick"
+      (game:check base (with base "bricks" (list "b1")) (list "bullet-hit-brick")
+                  (hash) "bullet-brick"))
+(line "bullet-steel"
+      (game:check base (with base "steel" (list "s1")) (list "bullet-hit-steel")
+                  (hash) "bullet-steel"))
+(line "player-water"
+      (game:check base base (list "blocked-water") (hash "move" "down") "player-water"))
+(line "enemy-spawn"
+      (game:check base (with base "enemies" (list "e1" "e2" "e3")) (list "enemy-spawn")
+                  (hash) "enemy-spawn"))
+(line "enemy-destroy"
+      (game:check base (with (with base "enemies" (list "e2")) "score" 100)
+                  (list "enemy-destroy") (hash) "enemy-destroy"))
+(line "base-lost"
+      (game:check base (with base "status" "lost") (list "base-destroyed")
+                  (hash) "base-destroyed-lose"))
+(line "clear-win"
+      (game:check base (with (with base "status" "won") "enemies" '())
+                  (list "enemies-cleared") (hash) "clear-enemies-win"))
+(line "two-levels"
+      (game:check base (with base "level" 2) '() (hash) "two-levels"))
+(line "score-lives"
+      (game:check base (with (with base "score" 100) "lives" 2) '() (hash) "score-lives"))
+(line "frame-budget"
+      (game:check base base '() (hash) "frame-budget"))
+(line "frame-budget-neg"
+      (game:check base (with base "frame_ms" 60) '() (hash) "frame-budget"))
+(line "visual"
+      (game:check base base '() (hash) "visual-keyframe"))
+(line "player-two"
+      (game:check base (with base "players" 2) '() (hash) "player-two-controls"))
+
+(define (mock-step state input)
+  (let* ((after (with state "tick" (+ 1 (hash-ref state "tick"))))
+         (moved (if (equal? (hash-ref input "move" #f) "right")
+                  (with after "player" (hash "x" (+ 1 (hash-ref (hash-ref after "player") "x"))
+                                                  "y" (hash-ref (hash-ref after "player") "y")))
+                  after))
+         (fired (if (equal? (hash-ref input "fire" #f) #t)
+                  (with moved "bullets" (cons "b" (hash-ref moved "bullets")))
+                  moved)))
+    (hash "state" fired "events" '())))
+
+(define invariants (list "state-advance" "score-lives" "frame-budget" "visual-keyframe"))
+(define run (game:run base mock-step
+                      (list (hash "move" "right") (hash "fire" #t))
+                      invariants))
+(line "run-ok" (hash-ref run "ok"))
+(line "run-frames" (hash-ref run "frames"))
+(line "run-failures" (length (hash-ref run "failures" '())))
+
+(define move-run (game:run base mock-step (list (hash "move" "right"))
+                           (append invariants (list "move-right"))))
+(line "run-move-ok" (hash-ref move-run "ok"))
+
+(define fire-run (game:run base mock-step (list (hash "fire" #t))
+                           (append invariants (list "fire-bullet"))))
+(line "run-fire-ok" (hash-ref fire-run "ok"))
+
+(define bad-run (game:run base mock-step (list (hash "move" "right"))
+                          (list "fire-bullet")))
+(line "run-bad-ok" (hash-ref bad-run "ok"))
+(line "run-bad-failures" (length (hash-ref bad-run "failures" '())))

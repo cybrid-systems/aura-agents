@@ -122,6 +122,20 @@ bypass) and the forbidden `tag`/`release`/`large-file` list. It never
 creates the repository; the GitHub creator still has to apply it. Docs:
 `docs/scaffold.md`.
 
+## Game frame assertions (#23)
+
+`lib/game/assert.aura` evaluates the #21 assertion ids on every frame
+inside the rehearsal: movement, collision, fire, brick/steel, water,
+enemy spawn/destroy, base loss, clear win, two levels, score/lives,
+frame budget, visual keyframe and two-player controls. It takes the
+`before -> after` state plus that frame's events and input; no renderer
+or filesystem is involved. `game:run` drives a pure `step` function over
+an input script and evaluates only the contract ids, returning
+`ok/frames/failures` for early stopping. Docs: `docs/game-assert.md`.
+
+The actual tank-battle state machine and COW worldlines are #24/#28/#29;
+this is the per-frame contract layer they will call.
+
 ## Experience graph (#2-#9)
 
 `lib/graph/` is a structured, auditable experience graph built in Aura-native code. It never stores model weights, embeddings or source text.
