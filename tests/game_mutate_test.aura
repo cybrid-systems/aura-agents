@@ -1,0 +1,45 @@
+;; Issue #28 — structured tuning AST, canonical source and candidate
+;; generation. No arbitrary evaluation, no file writes.
+(require "std/string")
+(require "lib/game/mutate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define base (mutate:new))
+(line "source" (mutate:to-source base))
+(line "params" (length (mutate:params base)))
+
+(define set (mutate:apply base (hash "op" "set" "key" "player-speed" "value" 2)))
+(line "set-source" (mutate:to-source set))
+(line "set-fp-differs"
+      (not (equal? (mutate:fingerprint base) (mutate:fingerprint set))))
+
+(define inc (mutate:apply set (hash "op" "inc" "key" "fire-cooldown" "delta" 1)))
+(line "inc-source" (mutate:to-source inc))
+
+(define removed (mutate:apply inc (hash "op" "remove" "key" "enemy-score")))
+(line "removed-source" (mutate:to-source removed))
+(line "removed-count" (length (mutate:params removed)))
+
+(define added (mutate:apply removed (hash "op" "add" "key" "enemy-score" "value" 150)))
+(line "added-source" (mutate:to-source added))
+
+(define roundtrip (mutate:from-source (mutate:to-source added)))
+(line "roundtrip-source" (mutate:to-source roundtrip))
+(line "roundtrip-fp" (equal? (mutate:fingerprint added) (mutate:fingerprint roundtrip)))
+
+(define candidates
+  (mutate:candidates base
+                     (list (hash "op" "set" "key" "player-speed" "value" 2)
+                           (hash "op" "inc" "key" "fire-cooldown" "delta" 2)
+                           (hash "op" "remove" "key" "enemy-score"))))
+(line "candidate-count" (length candidates))
+(line "candidate-original" (mutate:to-source base))
+(line "candidate-0" (hash-ref (car candidates) "source"))
+(line "candidate-2" (hash-ref (car (cddr candidates)) "source"))
+
+(line "bad-source" (car (mutate:from-source "(not-tuning 1)")))

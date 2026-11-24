@@ -1,0 +1,8 @@
+mutate:new: -> Any
+mutate:apply: Any Any -> Any
+mutate:candidates: Any Any -> Any
+mutate:to-source: Any -> Any
+mutate:from-source: Any -> Any
+mutate:fingerprint: Any -> Any
+mutate:params: Any -> Any
+mutate:help: -> Any

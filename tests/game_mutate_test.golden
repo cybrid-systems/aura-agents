@@ -1,0 +1,15 @@
+source=(tuning (bullet-speed 1) (enemy-score 100) (fire-cooldown 3) (player-speed 1))
+params=4
+set-source=(tuning (bullet-speed 1) (enemy-score 100) (fire-cooldown 3) (player-speed 2))
+set-fp-differs=#t
+inc-source=(tuning (bullet-speed 1) (enemy-score 100) (fire-cooldown 4) (player-speed 2))
+removed-source=(tuning (bullet-speed 1) (fire-cooldown 4) (player-speed 2))
+removed-count=3
+added-source=(tuning (bullet-speed 1) (enemy-score 150) (fire-cooldown 4) (player-speed 2))
+roundtrip-source=(tuning (bullet-speed 1) (enemy-score 150) (fire-cooldown 4) (player-speed 2))
+roundtrip-fp=#t
+candidate-count=3
+candidate-original=(tuning (bullet-speed 1) (enemy-score 100) (fire-cooldown 3) (player-speed 1))
+candidate-0=(tuning (bullet-speed 1) (enemy-score 100) (fire-cooldown 3) (player-speed 2))
+candidate-2=(tuning (bullet-speed 1) (fire-cooldown 3) (player-speed 1))
+bad-source=error

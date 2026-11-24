@@ -144,9 +144,15 @@ deep-copied root, runs its pure `step` through `game:run`, and the loop
 returns per-candidate results plus one winner. `loop:commit` is the hook
 for `mutate :rebind`; no candidate writes a file. Docs: `docs/game-loop.md`.
 
+`lib/game/mutate.aura` is the structured candidate generator: a typed
+`(tuning ...)` AST with `set`/`add`/`inc`/`remove` ops, canonical source
+rendering, read-back round trip and fingerprints. `mutate:candidates`
+feeds the loop; no arbitrary source is evaluated. Docs: `docs/game-mutate.md`.
+
 COW snapshot/restore and the live hot swap itself are #24/#28/#29 work;
-this is the per-frame contract, single-worldline state machine and the
-in-memory rehearsal/selection they call.
+this is the per-frame contract, single-worldline state machine, the
+in-memory rehearsal/selection and the structured mutation source they
+call.
 
 ## Experience graph (#2-#9)
 

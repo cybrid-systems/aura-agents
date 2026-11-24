@@ -1,0 +1,116 @@
+;; Structured tuning AST (#28): a small typed parameter tree, structured
+;; mutations, canonical source rendering and a read-back round trip. This
+;; is the candidate generator the rehearsal loop consumes; it never writes
+;; a file or evaluates arbitrary source.
+
+(require "std/string")
+(require "std/list")
+(require "lib/score")
+
+(export mutate:new mutate:apply mutate:candidates mutate:to-source
+        mutate:from-source mutate:fingerprint mutate:params mutate:help)
+
+(define (mutate:help)
+  "Mutate: (mutate:new); (mutate:candidates ast ops); (mutate:to-source ast); (mutate:from-source text)")
+
+(define (m-get h k d) (if (hash? h) (hash-ref h k d) d))
+
+(define (mutate:params ast) (m-get ast "params" '()))
+
+(define (m-param params key)
+  (let loop ((xs params))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (m-get (car xs) "key" "") key) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (m-sort params)
+  (sort params (lambda (a b) (string<? (m-get a "key" "") (m-get b "key" "")))))
+
+(define (m-new-param key value) (hash "key" key "value" value))
+
+(define (mutate:new)
+  (hash "kind" "tuning"
+        "params" (m-sort
+                   (list (m-new-param "player-speed" 1)
+                         (m-new-param "bullet-speed" 1)
+                         (m-new-param "fire-cooldown" 3)
+                         (m-new-param "enemy-score" 100)))))
+
+(define (m-value->source v)
+  (cond ((number? v) (number->string v))
+        ((string? v) (string-append "\"" v "\""))
+        ((equal? v #t) "#t")
+        ((equal? v #f) "#f")
+        (else "#f")))
+
+(define (mutate:to-source ast)
+  (let ((params (m-sort (mutate:params ast))))
+    (string-append
+      "(tuning"
+      (apply string-append
+             (map (lambda (p)
+                    (string-append " (" (m-get p "key" "") " "
+                                   (m-value->source (m-get p "value" #f)) ")"))
+                  params))
+      ")")))
+
+(define (m-parse-entry e)
+  (if (and (pair? e) (symbol? (car e)) (pair? (cdr e)))
+    (m-new-param (symbol->string (car e)) (cadr e))
+    #f))
+
+(define (mutate:from-source text)
+  (let ((x (try (read-from-string text) (catch (e) #f))))
+    (if (and (pair? x) (symbol? (car x))
+             (equal? (symbol->string (car x)) "tuning"))
+      (let ((params (filter (lambda (p) (hash? p)) (map m-parse-entry (cdr x)))))
+        (hash "kind" "tuning" "params" (m-sort params)))
+      (list "error" "bad-tuning"))))
+
+(define (mutate:apply ast op)
+  (let* ((kind (m-get op "op" ""))
+         (key (m-get op "key" ""))
+         (value (m-get op "value" #f))
+         (delta (m-get op "delta" 0))
+         (params (mutate:params ast))
+         (existing (m-param params key)))
+    (cond
+      ((not (string? key)) ast)
+      ((equal? kind "set")
+       (hash "kind" "tuning"
+             "params" (m-sort
+                        (if existing
+                          (map (lambda (p) (if (equal? (m-get p "key" "") key)
+                                             (m-new-param key value) p)) params)
+                          (append params (list (m-new-param key value)))))))
+      ((equal? kind "add")
+       (if existing ast
+         (hash "kind" "tuning"
+               "params" (m-sort (append params (list (m-new-param key value)))))))
+      ((equal? kind "inc")
+       (if (and existing (number? (m-get existing "value" #f)) (number? delta))
+         (hash "kind" "tuning"
+               "params" (m-sort
+                          (map (lambda (p) (if (equal? (m-get p "key" "") key)
+                                             (m-new-param key (+ (m-get p "value" 0) delta)) p))
+                               params)))
+         ast))
+      ((equal? kind "remove")
+       (hash "kind" "tuning"
+             "params" (m-sort (filter (lambda (p) (not (equal? (m-get p "key" "") key))) params))))
+      (else ast))))
+
+(define (mutate:fingerprint ast)
+  (score:contract-fingerprint "tuning" (list (list "source" (mutate:to-source ast)))))
+
+(define (mutate:candidates ast ops)
+  (let loop ((xs ops) (i 0) (out '()))
+    (if (not (pair? xs))
+      (reverse out)
+      (let* ((next (mutate:apply ast (car xs)))
+             (row (hash "id" (string-append "cand-" (number->string i))
+                        "op" (car xs)
+                        "ast" next
+                        "source" (mutate:to-source next)
+                        "fingerprint" (mutate:fingerprint next))))
+        (loop (cdr xs) (+ i 1) (cons row out))))))
