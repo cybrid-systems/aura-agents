@@ -131,3 +131,15 @@ a headless newline-JSON session for aura-runner (`hello` -> ticks ->
 `read`+`network` only. `aura test` covers corpus/framing/metrics;
 `bash scripts/replay-smoke.sh` drives both real TCP fixtures. Docs:
 `docs/replay.md`.
+
+## Harness chief judge (#16)
+
+`lib/harness/judge.aura` runs the four gates as one verdict:
+structure (protected symbols, taxonomy, compression floor), solution/harm
+(shortcut TTL/retry, hardcoded answer, train-up/held-out-down, dual-thin),
+anti-cheat (forbidden prefixes, protected config, contract fingerprint) and
+held-out evidence (ok Perf, heldout replay token, numeric heldout score).
+The positive candidate returns a complete `keep` package; every negative
+case returns `rollback` with reasons. Only the judge's keep verdict asks
+for `keep,rollback`; normal permissions are `read,publish`.
+Docs: `docs/harness.md`; tests: `tests/harness_test.aura`.

@@ -1,0 +1,67 @@
+;; Issue #16 — Harness chief judge: structure + harm + guard + held-out.
+(require "std/string")
+(require "std/json")
+(require "lib/harness/judge")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define expected
+  (hash "fingerprint" "fp-1"
+        "protected" (list "guard" "budget")
+        "config" (hash "max-steps" 100 "retry" 3)
+        "required_evidence" (list "perf" "replay")))
+
+(define (candidate-with key value)
+  (let ((c (hash "id" "cand-1"
+                 "patch" (hash "edits" (list (hash "target" "choose-fn"
+                                                   "kind" "replace"
+                                                   "before" "(define (choose-fn x) (* x 2))"
+                                                   "after" "(define (choose-fn x) (* x 3))"))
+                               "original_lines" 100
+                               "deleted_lines" 10)
+                 "protected_edits" '()
+                 "train" (hash "score" 10 "baseline" 5)
+                 "heldout" (hash "score" 8 "baseline" 5)
+                 "perf" (hash "ok" #t "mode" "proc-stat-only")
+                 "replay" (hash "ok" #t "corpus" "heldout" "token" "tok-abc")
+                 "config" (hash "max-steps" 100 "retry" 3)
+                 "contract_fingerprint" "fp-1")))
+    (hash-set! c key value)
+    c))
+
+(define pos (harness:judge (candidate-with "id" "cand-1") expected))
+(line "positive" (hash-ref pos "verdict"))
+(line "positive-valid" (hash-ref pos "package_valid"))
+(line "positive-caps" (string-join (hash-ref pos "caps") ","))
+
+(define prot (candidate-with "protected_edits" (list (hash "target" "guard"))))
+(line "protected" (hash-ref (harness:judge prot expected) "verdict"))
+(line "protected-reason" (car (hash-ref (harness:judge prot expected) "reasons")))
+
+(define shortcut (candidate-with "patch" (hash "edits" (list (hash "target" "choose-fn" "kind" "replace" "before" "(x)" "after" "(ttl 0)")) "original_lines" 100 "deleted_lines" 10)))
+(line "shortcut" (hash-ref (harness:judge shortcut expected) "verdict"))
+
+(define hardcoded (candidate-with "patch" (hash "edits" (list (hash "target" "choose-fn" "kind" "replace" "before" "(x)" "after" "(return 42)")) "original_lines" 100 "deleted_lines" 10)))
+(line "hardcoded" (hash-ref (harness:judge hardcoded expected) "verdict"))
+
+(define train-up (candidate-with "heldout" (hash "score" 5 "baseline" 5)))
+(line "train-up" (car (hash-ref (harness:judge train-up expected) "reasons")))
+
+(define no-perf (candidate-with "perf" (hash "ok" #f)))
+(line "missing-perf" (car (hash-ref (harness:judge no-perf expected) "reasons")))
+
+(define no-replay (candidate-with "replay" #f))
+(line "missing-replay" (car (hash-ref (harness:judge no-replay expected) "reasons")))
+
+(define bad-fp (candidate-with "contract_fingerprint" "fp-evil"))
+(line "bad-fp" (car (hash-ref (harness:judge bad-fp expected) "reasons")))
+
+(define forbidden (candidate-with "patch" (hash "edits" (list (hash "target" "choose-fn" "kind" "replace" "before" "(x)" "after" "(set! x 1)")) "original_lines" 100 "deleted_lines" 10)))
+(line "forbidden" (car (hash-ref (harness:judge forbidden expected) "reasons")))
+
+(line "worker-keep" (if (member? "keep" (harness:permissions)) #t #f))
+(line "judge-keep" (if (member? "keep" (harness:verdict-permissions)) #t #f))

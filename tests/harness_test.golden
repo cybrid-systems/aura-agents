@@ -1,0 +1,14 @@
+positive=keep
+positive-valid=#t
+positive-caps=keep,rollback
+protected=rollback
+protected-reason=protected-symbol
+shortcut=rollback
+hardcoded=rollback
+train-up=train-up-heldout-down
+missing-perf=missing-perf-evidence
+missing-replay=missing-replay-evidence
+bad-fp=contract-fingerprint
+forbidden=forbidden-prefix
+worker-keep=#f
+judge-keep=#t

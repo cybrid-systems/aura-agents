@@ -1,0 +1,9 @@
+harness:judge: Any Any -> Any
+harness:structure-gate: Any Any -> Any
+harness:harm-gate: Any -> Any
+harness:guard: Any Any -> Any
+harness:evidence-gate: Any Any -> Any
+harness:package-valid?: Any -> Any
+harness:permissions: -> Any
+harness:verdict-permissions: -> Any
+harness:help: -> Any

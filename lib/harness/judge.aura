@@ -1,0 +1,174 @@
+;; Harness chief judge (#16): structural gate, solution/harm gate,
+;; anti-cheat guard, held-out evidence and the verdict package.
+;;
+;; Pure Aura. The judge is the only section that may ask for keep/rollback;
+;; normal operation is read+publish until the gates are all green.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+
+(export harness:judge harness:structure-gate harness:harm-gate
+        harness:guard harness:evidence-gate harness:package-valid?
+        harness:permissions harness:verdict-permissions harness:help)
+
+(define (harness:help)
+  "Harness: (harness:judge candidate expected) -> keep/rollback package; (harness:permissions) -> read,publish")
+
+(define (harness:permissions) '("read" "publish"))
+(define (harness:verdict-permissions) '("keep" "rollback"))
+
+; ── helpers ────────────────────────────────────────────────────
+
+(define (h:get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (h:list h k) (let ((v (h:get h k '()))) (if (pair? v) v '())))
+
+(define (h:num h k d)
+  (let ((v (h:get h k d))) (if (number? v) v d)))
+
+(define (h:text-of candidate)
+  (let ((patch (h:get candidate "patch" (hash))))
+    (let loop ((edits (h:list patch "edits")) (acc ""))
+      (if (not (pair? edits))
+        acc
+        (let ((e (car edits)))
+          (loop (cdr edits)
+                (string-append acc " "
+                               (let ((a (h:get e "after" ""))) (if (string? a) a ""))
+                               " "
+                               (let ((b (h:get e "before" ""))) (if (string? b) b "")))))))))
+
+(define (h:contains-any? text needles)
+  (let loop ((xs needles))
+    (cond ((not (pair? xs)) #f)
+          ((string-contains? text (car xs)) #t)
+          (else (loop (cdr xs))))))
+
+; ── structure gate ─────────────────────────────────────────────
+
+(define (harness:structure-gate candidate expected)
+  (let* ((patch (h:get candidate "patch" (hash)))
+         (edits (h:list patch "edits"))
+         (protected (h:list candidate "protected_edits"))
+         (declared (h:list expected "protected"))
+         (original (h:num patch "original_lines" 0))
+         (deleted (h:num patch "deleted_lines" 0)))
+    (cond
+      ((pair? protected) "protected-symbol")
+      ((not (pair? edits)) "no-patch")
+      ((let loop ((xs edits))
+         (cond ((not (pair? xs)) #f)
+               ((let ((t (h:get (car xs) "target" "")))
+                  (and (string? t) (member? t declared)))
+                #t)
+               (else (loop (cdr xs)))))
+       "protected-symbol")
+      ((let loop ((xs edits))
+         (cond ((not (pair? xs)) #f)
+               ((not (member? (h:get (car xs) "kind" "") '("replace" "insert" "delete")))
+                #t)
+               (else (loop (cdr xs)))))
+       "taxonomy")
+      ((and (> original 0) (> (/ (* 1.0 deleted) original) 0.3))
+       "compression-floor")
+      (else #t))))
+
+; ── solution / harm gate ───────────────────────────────────────
+
+(define (harness:harm-gate candidate)
+  (let* ((text (string-downcase (h:text-of candidate)))
+         (train (h:get candidate "train" (hash)))
+         (held (h:get candidate "heldout" (hash)))
+         (train-score (h:num train "score" 0))
+         (train-base (h:num train "baseline" 0))
+         (held-score (h:num held "score" 0))
+         (held-base (h:num held "baseline" 0))
+         (train-gain (- train-score train-base))
+         (held-gain (- held-score held-base))
+         (shortcuts '("ttl 0" "ttl=0" "retry 0" "retry=0" "max-steps 0"
+                      "sleep 0" "timeout 0" "skip-check" "disable-check"
+                      "hardcode" "return 42" "force true")))
+    (cond
+      ((h:contains-any? text shortcuts) "shortcut-patch")
+      ((and (> train-gain 0) (<= held-gain 0)) "train-up-heldout-down")
+      ((and (> train-gain 0) (> held-gain 0) (> train-gain (* 3 held-gain)))
+       "dual-thin")
+      (else #t))))
+
+; ── anti-cheat guard ───────────────────────────────────────────
+
+(define (harness:guard candidate expected)
+  (let* ((text (h:text-of candidate))
+         (forbidden '("bus:" "hbus:" "eval-current" "set!" "mutate:rebind"
+                      "current-source" "workspace" "crypto" "shell"))
+         (cand-config (h:get candidate "config" #f))
+         (want-config (h:get expected "config" #f))
+         (cand-fp (h:get candidate "contract_fingerprint" ""))
+         (want-fp (h:get expected "fingerprint" "")))
+    (cond
+      ((h:contains-any? text forbidden) "forbidden-prefix")
+      ((and (hash? want-config)
+            (not (equal? (json-encode cand-config) (json-encode want-config))))
+       "protected-config")
+      ((not (equal? cand-fp want-fp)) "contract-fingerprint")
+      (else #t))))
+
+; ── held-out evidence ──────────────────────────────────────────
+
+(define (harness:evidence-gate candidate expected)
+  (let* ((required (h:list expected "required_evidence"))
+         (perf (h:get candidate "perf" #f))
+         (replay (h:get candidate "replay" #f))
+         (held (h:get candidate "heldout" #f)))
+    (cond
+      ((and (member? "perf" required)
+            (not (and (hash? perf) (h:get perf "ok" #f))))
+       "missing-perf-evidence")
+      ((and (member? "replay" required)
+            (not (and (hash? replay) (h:get replay "ok" #f))))
+       "missing-replay-evidence")
+      ((and (member? "replay" required)
+            (or (not (equal? (h:get replay "corpus" "") "heldout"))
+                (not (string? (h:get replay "token" #f)))
+                (= (string-length (h:get replay "token" "")) 0)))
+       "replay-not-heldout")
+      ((not (and (hash? held) (number? (h:get held "score" #f))))
+       "missing-heldout")
+      (else #t))))
+
+; ── package and verdict ────────────────────────────────────────
+
+(define (harness:package-valid? p)
+  (and (hash? p)
+       (string? (h:get p "candidate" #f))
+       (string? (h:get p "fingerprint" #f))
+       (hash? (h:get p "gates" #f))
+       (hash? (h:get p "heldout" #f))
+       (member? (h:get p "verdict" "") '("keep" "rollback"))))
+
+(define (harness:judge candidate expected)
+  (let* ((structure (harness:structure-gate candidate expected))
+         (harm (harness:harm-gate candidate))
+         (guard (harness:guard candidate expected))
+         (evidence (harness:evidence-gate candidate expected))
+         (reasons (filter (lambda (x) (not (equal? x #t)))
+                          (list structure harm guard evidence)))
+         (verdict (if (pair? reasons) "rollback" "keep"))
+         (package (hash "candidate" (h:get candidate "id" "")
+                        "fingerprint" (h:get expected "fingerprint" "")
+                        "gates" (hash "structure" structure
+                                      "harm" harm
+                                      "guard" guard
+                                      "evidence" evidence)
+                        "heldout" (h:get candidate "heldout" (hash))
+                        "perf" (h:get candidate "perf" (hash))
+                        "replay" (h:get candidate "replay" (hash))
+                        "verdict" verdict)))
+    (hash "ok" (equal? verdict "keep")
+          "verdict" verdict
+          "reasons" reasons
+          "package" package
+          "package_valid" (harness:package-valid? package)
+          "caps" (if (equal? verdict "keep")
+                   (harness:verdict-permissions)
+                   (harness:permissions)))))
