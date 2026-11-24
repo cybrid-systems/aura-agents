@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end demo: a natural-language requirement, an approved contract,
-# four real bus worker processes, a task-board audit, and one aura-redis PR.
+# four real bus worker processes, a task-board audit, and one main push.
 #
 # The worker actions are deterministic fixtures (mock-LLM discipline): the
-# demo proves the bus workflow, not code synthesis. Set GH_TOKEN to open the
-# PR; local verification and evidence collection do not need it.
+# demo proves the bus workflow, not code synthesis.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -87,7 +86,7 @@ AURA_DEMO_TASK_IDS="$TASK_IDS" "$AURA_BIN" "$ROOT/demo/agents/verify.aura" | tee
 grep -q "verify=PASS" "$OUT/verify.log" || { echo "verify failed" >&2; exit 1; }
 grep -q "replay-findings=0" "$OUT/verify.log" || { echo "audit replay not clean" >&2; exit 1; }
 
-echo "demo: final gate + PR"
+echo "demo: final gate + ff main push"
 AURA_DEMO_TASK_IDS="$TASK_IDS" bash "$ROOT/scripts/finalize-redis.sh" | tee "$OUT/finalize.log"
 
 echo quit >&4

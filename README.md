@@ -17,11 +17,10 @@ aura --version
 
 scripts/demo-redis.sh runs the target fixture from aura#5398 end to end:
 one requirement, an approved executable contract, four real bus worker
-processes, a task-board audit, and one aura-redis PR.
+processes, a task-board audit, and one fast-forward main push.
 
     export AURA_BIN=/home/dev/aura/build/aura
     export AURA_DEMO_TARGET=/home/dev/aura-redis
-    export GH_TOKEN=...                 # only needed to open the PR
     export AURA_DEMO_BASELINE_BIN=/tmp/aura-baseline/aura_redis_server
     export AURA_DEMO_BASELINE_LIB=/tmp/aura-baseline
     bash scripts/demo-redis.sh
@@ -30,7 +29,8 @@ The driver starts demo/agents/host.aura, posts four contract-gated tasks
 with planner.aura, records the human approval with approver.aura, runs four
 worker.aura processes (each claims, executes its task fixture, heartbeats,
 reports contract evidence and completes), verifies the board and audit replay
-with verify.aura, then builds, tests, compares p99 and opens the PR. The
+with verify.aura, then builds, tests, compares p99, fast-forwards main and
+pushes. The
 worker actions are deterministic fixtures (the mock-LLM discipline): the
 demo proves the bus workflow, not code synthesis. The shipped fixture uses four tasks; AURA_DEMO_WORKERS may be 4-6
 (extra workers drain and exit).
