@@ -13,6 +13,7 @@
 
 (export milestone:new milestone:stages milestone:current milestone:status
         milestone:record-round! milestone:round-from-loop milestone:round-from-runs
+        milestone:extend
         milestone:outer-request milestone:record-pr! milestone:land!
         milestone:outcome milestone:verify milestone:audit milestone:help)
 
@@ -420,6 +421,172 @@
                   "evidence" (ms-get r "evidence" "")
                   "chain" (ms-get state "seq" 0)))))))))
 
+; ── requirement evolution (#25) ─────────────────────────────────
+
+(define (ms-active-id stages)
+  (let loop ((xs stages))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (ms-get (car xs) "status" "") "active") (ms-get (car xs) "id" #f))
+          (else (loop (cdr xs))))))
+
+(define (ms-passed-fields c old)
+  (for-each (lambda (k) (hash-set! c k (ms-get old k #f)))
+            '("passed_round" "passed_worldline" "passed_pr" "passed_commit"))
+  c)
+
+(define (ms-merge-stages old-stages new-stages)
+  (map (lambda (new)
+         (let* ((id (ms-get new "id" ""))
+                (old (ms-stage-by-id old-stages id))
+                (c (ms-copy new)))
+           (cond
+             ((and old (equal? (ms-get old "status" "") "passed"))
+              (hash-set! c "status" "passed")
+              (ms-passed-fields c old))
+             (else
+              (hash-set! c "status" "pending")
+              c))))
+       new-stages))
+
+(define (ms-reactivate stages)
+  (let loop ((xs stages) (out '()) (activated #f))
+    (cond
+      ((not (pair? xs)) (reverse out))
+      (else
+       (let* ((st (ms-copy (car xs)))
+              (status (ms-get st "status" "")))
+         (cond
+           ((equal? status "passed")
+            (loop (cdr xs) (cons st out) activated))
+           (activated
+            (hash-set! st "status" "pending")
+            (loop (cdr xs) (cons st out) #t))
+           (else
+            (hash-set! st "status" "active")
+            (loop (cdr xs) (cons st out) #t))))))))
+
+(define (ms-removed-stage old-stages new-stages)
+  (let loop ((xs old-stages))
+    (cond ((not (pair? xs)) #f)
+          ((not (ms-stage-by-id new-stages (ms-get (car xs) "id" "")))
+           (ms-get (car xs) "id" ""))
+          (else (loop (cdr xs))))))
+
+(define (ms-frozen-changed old-stages new-stages)
+  (let loop ((xs old-stages))
+    (cond ((not (pair? xs)) #f)
+          (else
+           (let* ((o (car xs))
+                  (id (ms-get o "id" ""))
+                  (n (ms-stage-by-id new-stages id)))
+             (if (and n
+                      (not (equal? (ms-get o "assertions" '())
+                                   (ms-get n "assertions" '()))))
+               id
+               (loop (cdr xs))))))))
+
+(define (ms-added-ids old-stages new-stages)
+  (let loop ((xs new-stages) (out '()))
+    (cond ((not (pair? xs)) (reverse out))
+          ((ms-stage-by-id old-stages (ms-get (car xs) "id" ""))
+           (loop (cdr xs) out))
+          (else (loop (cdr xs) (cons (ms-get (car xs) "id" "") out))))))
+
+(define (ms-tail-has-passed? old-stages tail)
+  (let loop ((xs tail))
+    (cond ((not (pair? xs)) #f)
+          ((let ((o (ms-stage-by-id old-stages (ms-get (car xs) "id" ""))))
+             (and o (equal? (ms-get o "status" "") "passed")))
+           #t)
+          (else (loop (cdr xs))))))
+
+(define (ms-new-before-passed old-stages new-stages)
+  (let loop ((xs new-stages))
+    (cond ((not (pair? xs)) #f)
+          ((and (not (ms-stage-by-id old-stages (ms-get (car xs) "id" "")))
+                (ms-tail-has-passed? old-stages (cdr xs)))
+           (ms-get (car xs) "id" ""))
+          (else (loop (cdr xs))))))
+
+(define (ms-regression-covered? old-stages spec)
+  (let ((reg (ms-get spec "regression" '())))
+    (let loop ((xs old-stages))
+      (cond
+        ((not (pair? xs)) #t)
+        ((let loop2 ((ys (ms-get (car xs) "assertions" '())))
+           (cond ((not (pair? ys)) #t)
+                 ((member? (car ys) reg) (loop2 (cdr ys)))
+                 (else #f)))
+         (loop (cdr xs)))
+        (else #f)))))
+
+(define (ms-move-added-to-end old-stages new-stages)
+  (let ((added (ms-added-ids old-stages new-stages)))
+    (append
+      (filter (lambda (st) (not (member? (ms-get st "id" "") added))) new-stages)
+      (filter (lambda (st) (member? (ms-get st "id" "") added)) new-stages))))
+
+(define (milestone:extend state spec)
+  (cond
+    ((not (hash? state)) (hash "ok" #f "error" "not-a-state"))
+    ((hash? (ms-get state "inflight" #f)) (hash "ok" #f "error" "inflight-pr"))
+    ((not (equal? (ms-get spec "base_fingerprint" "")
+                  (ms-get state "spec_fingerprint" "")))
+     (hash "ok" #f "error" "not-a-revision"))
+    (else
+     (let ((built (ms-build-stages (ms-get spec "milestones" '()))))
+       (if (not (ms-get built "ok" #f))
+         built
+         (let* ((old-fp (ms-get state "spec_fingerprint" ""))
+                (old-stages (ms-get state "stages" '()))
+                (new-stages-0 (ms-get built "stages" '()))
+                (removed (ms-removed-stage old-stages new-stages-0))
+                (changed (ms-frozen-changed old-stages new-stages-0))
+                (before (ms-new-before-passed old-stages new-stages-0))
+                (regression-ok (ms-regression-covered? old-stages spec))
+                (added (ms-added-ids old-stages new-stages-0))
+                (new-stages (if before
+                              (ms-move-added-to-end old-stages new-stages-0)
+                              new-stages-0)))
+           (cond
+             (removed
+              (hash "ok" #f "error" (string-append "stage-removed:" removed)))
+             (changed
+              (hash "ok" #f "error" (string-append "frozen-contract-changed:" changed)))
+             ((not (equal? regression-ok #t))
+              (hash "ok" #f "error" "regression-incomplete"))
+             ((not (pair? added)) (hash "ok" #f "error" "no-new-stage"))
+             (else
+              (let* ((merged (ms-reactivate (ms-merge-stages old-stages new-stages)))
+                     (current (ms-active-id merged))
+                     (done (not current))
+                     (new-fp (ms-get spec "fingerprint" "")))
+                (hash-set! state "stages" merged)
+                (hash-set! state "current" current)
+                (hash-set! state "done" done)
+                (hash-set! state "spec_fingerprint" new-fp)
+                (hash-set! state "regression" (ms-get spec "regression" '()))
+                (hash-set! state "revision" (ms-get spec "revision" 1))
+                (hash-set! state "contract_audit" (ms-get spec "contract_revision" (hash)))
+                (hash-set! state "last_outcome" #f)
+                (ms-append! state "contract-revised" (car added) "" 0 0 ""
+                            (string-append old-fp "->" new-fp ":"
+                                           (string-join added ",")))
+                (hash "ok" #t
+                      "added" added
+                      "current" current
+                      "done" done
+                      "from" old-fp
+                      "to" new-fp
+                      "regression" (length (ms-get spec "regression" '()))
+                      "reordered" (if before #t #f)
+                      "passed" (length (filter
+                                         (lambda (st)
+                                           (equal? (ms-get st "status" "") "passed"))
+                                         merged))
+                      "status" (hash-ref (milestone:status state) "stage"
+                                         (if current current "done"))))))))))))
+
 ; ── outer loop ─────────────────────────────────────────────────
 
 (define (ms-eligible-round state)
@@ -783,6 +950,8 @@
             "passed" (length passed)
             "stages" (length stages)
             "rounds" (length (ms-get state "rounds" '()))
+            "revision" (ms-get state "revision" 0)
+            "regression" (length (ms-get state "regression" '()))
             "inflight" (if (hash? (ms-get state "inflight" #f)) #t #f)
             "chain" (length (ms-get state "chain" '()))
             "chain_ok" (ms-get (ms-verify-chain (ms-get state "chain" '())) "ok" #f)))))

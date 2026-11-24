@@ -1,0 +1,225 @@
+;; Requirement evolution (#25): add a new milestone to a live game spec
+;; without rewriting the ladder that already passed. Old assertions are
+;; frozen into a regression suite; the new milestone gets its own contract
+;; fingerprint and audit trail. Pure data: no gameplay code, no network.
+
+(require "std/string")
+(require "std/list")
+(require "lib/score")
+
+(export requirements:extend requirements:regression requirements:audit
+        requirements:frozen requirements:assertions requirements:help)
+
+(define (requirements:help)
+  "Requirements: (requirements:extend spec \"加上双人模式\") -> (ok spec') | (error reason); (requirements:regression spec)")
+
+(define (rq-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (rq-list h k) (let ((v (rq-get h k '()))) (if (pair? v) v '())))
+(define (rq-text? v) (and (string? v) (> (string-length v) 0)))
+
+(define (rq-copy h)
+  (let ((out (hash)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
+    out))
+
+(define (rq-id x) (rq-get x "id" ""))
+
+(define (rq-find xs id)
+  (let loop ((rest xs))
+    (cond ((not (pair? rest)) #f)
+          ((equal? (rq-id (car rest)) id) (car rest))
+          (else (loop (cdr rest))))))
+
+(define (rq-unique xs)
+  (let loop ((rest xs) (out '()))
+    (cond ((not (pair? rest)) (reverse out))
+          ((member? (car rest) out) (loop (cdr rest) out))
+          (else (loop (cdr rest) (cons (car rest) out))))))
+
+(define (rq-flatten-assertions milestones)
+  (let loop ((rest milestones) (out '()))
+    (cond ((not (pair? rest)) out)
+          (else (loop (cdr rest)
+                      (append out (rq-list (car rest) "assertions")))))))
+
+(define (requirements:assertions)
+  (list
+    (hash "id" "player-two-independent-input"
+          "milestone" "duo" "kind" "state"
+          "description" "二号玩家输入独立映射且不阻塞一号玩家"
+          "placeholder" #t)
+    (hash "id" "two-player-shared-level"
+          "milestone" "duo" "kind" "state"
+          "description" "双人共享关卡加载与胜负结算"
+          "placeholder" #t)
+    (hash "id" "solo-regression"
+          "milestone" "duo" "kind" "state"
+          "description" "既有单人脚本与基地判定保持全绿"
+          "placeholder" #t)))
+
+(define (rq-new-assertions base)
+  (let loop ((xs (requirements:assertions)) (out base))
+    (cond ((not (pair? xs)) out)
+          ((rq-find out (rq-id (car xs))) (loop (cdr xs) out))
+          (else (loop (cdr xs) (append out (list (car xs))))))))
+
+(define (rq-mark-frozen m revision)
+  (let ((c (rq-copy m)))
+    (hash-set! c "frozen" #t)
+    (hash-set! c "frozen_at_revision" revision)
+    c))
+
+(define (rq-update-defaults defaults)
+  (let* ((updated
+           (map (lambda (d)
+                  (if (equal? (rq-get d "key" "") "players")
+                    (let ((c (rq-copy d)))
+                      (hash-set! c "value" 2)
+                      (hash-set! c "applied" #f)
+                      (hash-set! c "note" "追加需求显式双人；未说明仍保留单人模式")
+                      c)
+                    d))
+                defaults))
+         (single (hash "key" "single_player_regression"
+                       "value" #t "default" #t "applied" #t
+                       "note" "未说明则保留单人模式")))
+    (if (rq-find updated "single_player_regression")
+      updated
+      (append updated (list single)))))
+
+(define (rq-update-controls controls)
+  (let ((has-two
+          (let loop ((xs controls))
+            (cond ((not (pair? xs)) #f)
+                  ((= (rq-get (car xs) "player" 0) 2) #t)
+                  (else (loop (cdr xs)))))))
+    (if has-two
+      controls
+      (append controls
+              (list (hash "player" 2 "keys" (list "ArrowKeys" "Enter")))))))
+
+(define (rq-update-entities entities)
+  (map (lambda (e)
+         (if (equal? (rq-get e "kind" "") "player")
+           (let ((c (rq-copy e))) (hash-set! c "count" 2) c)
+           e))
+       entities))
+
+(define (rq-last-id xs)
+  (let loop ((rest xs) (last #f))
+    (cond ((not (pair? rest)) last)
+          (else (loop (cdr rest) (rq-id (car rest)))))))
+
+(define (rq-insert-after xs id item)
+  (let loop ((rest xs) (out '()))
+    (cond ((not (pair? rest)) (reverse (cons item out)))
+          ((equal? (rq-id (car rest)) id)
+           (append (reverse (cons (car rest) out)) (list item) (cdr rest)))
+          (else (loop (cdr rest) (cons (car rest) out))))))
+
+(define (requirements:extend spec requirement)
+  (cond
+    ((not (hash? spec)) (list "error" "not-a-spec"))
+    ((not (rq-text? requirement)) (list "error" "bad-requirement"))
+    ((>= (rq-get spec "players" 1) 2) (list "error" "already-multiplayer"))
+    ((rq-find (rq-list spec "milestones") "duo") (list "error" "already-extended"))
+    ((not (string-contains? requirement "双人"))
+     (list "error" "unsupported-requirement"))
+    (else
+     (let* ((old-fp (rq-get spec "fingerprint" ""))
+            (old-rev (let ((n (rq-get spec "revision" 0))) (if (number? n) n 0)))
+            (old-ms (rq-list spec "milestones"))
+            (last-id (rq-last-id old-ms))
+            (level (rq-find old-ms "levels"))
+            (anchor (if level "levels" last-id)))
+       (if (not last-id)
+         (list "error" "no-milestones")
+         (let* ((new-rev (+ old-rev 1))
+                (regression (rq-unique (rq-flatten-assertions old-ms)))
+                (new-asserts (requirements:assertions))
+                (duo-assertions (list "player-two-controls"
+                                      "player-two-independent-input"
+                                      "two-player-shared-level"
+                                      "solo-regression"))
+                (duo (hash "id" "duo"
+                           "name" "双人可玩"
+                           "requires" (list anchor)
+                           "assertions" duo-assertions
+                           "goal" "同屏双人、独立输入、共享关卡与胜负；单人回归全绿"
+                           "frozen" #f
+                           "added_by" requirement
+                           "revision" new-rev))
+                (frozen-ms (map (lambda (m) (rq-mark-frozen m old-rev)) old-ms))
+                (ms-new (if level
+                          (rq-insert-after frozen-ms "levels" duo)
+                          (append frozen-ms (list duo))))
+                (rule (hash "id" "two-player"
+                            "text" "同屏双人，独立输入，共享关卡与胜负，保留单人模式"
+                            "milestone" "duo"
+                            "assertions" duo-assertions
+                            "automatable" #t))
+                (rules-new (append (rq-list spec "rules") (list rule)))
+                (defaults-new (rq-update-defaults (rq-list spec "defaults")))
+                (ms-ids (map rq-id ms-new))
+                (rule-ids (map rq-id rules-new))
+                (assert-ids (map rq-id new-asserts))
+                (fp (score:contract-fingerprint
+                      (string-append (rq-get spec "source" "") " + " requirement)
+                      (list (list "base" old-fp)
+                            (list "revision" (number->string new-rev))
+                            (list "players" "2")
+                            (list "rules" (string-join rule-ids ","))
+                            (list "milestones" (string-join ms-ids ","))
+                            (list "regression" (string-join regression ","))
+                            (list "new-assertions" (string-join assert-ids ",")))))
+                (audit-new
+                  (append (rq-list spec "audit")
+                          (list
+                            (hash "event" "requirement-added"
+                                  "key" "duo" "value" requirement
+                                  "default" "" "reason" "新里程碑")
+                            (hash "event" "default-overridden"
+                                  "key" "players" "value" 2 "default" 1
+                                  "reason" "追加需求：双人模式")
+                            (hash "event" "default-applied"
+                                  "key" "single_player_regression"
+                                  "value" #t "default" #t
+                                  "reason" "未说明则保留单人模式")
+                            (hash "event" "contract-revised"
+                                  "key" "fingerprint"
+                                  "value" fp "default" old-fp
+                                  "reason" "追加需求生成新契约指纹"))))
+                (out (rq-copy spec)))
+           (hash-set! out "id" (string-append "game-" (substring fp 0 (min 8 (string-length fp)))))
+           (hash-set! out "source" (string-append (rq-get spec "source" "") " + " requirement))
+           (hash-set! out "revision" new-rev)
+           (hash-set! out "base_fingerprint" old-fp)
+           (hash-set! out "fingerprint" fp)
+           (hash-set! out "players" 2)
+           (hash-set! out "controls" (rq-update-controls (rq-list spec "controls")))
+           (hash-set! out "entities" (rq-update-entities (rq-list spec "entities")))
+           (hash-set! out "rules" rules-new)
+           (hash-set! out "milestones" ms-new)
+           (hash-set! out "assertions" (rq-new-assertions (rq-list spec "assertions")))
+           (hash-set! out "defaults" defaults-new)
+           (hash-set! out "audit" audit-new)
+           (hash-set! out "regression" regression)
+           (hash-set! out "contract_revision"
+                      (hash "from" old-fp "to" fp
+                            "requirement" requirement
+                            "revision" new-rev
+                            "added_milestone" "duo"))
+           (list "ok" out)))))))
+
+(define (requirements:regression spec)
+  (rq-list spec "regression"))
+
+(define (requirements:audit spec)
+  (rq-list spec "audit"))
+
+(define (requirements:frozen spec)
+  (let loop ((xs (rq-list spec "milestones")) (out '()))
+    (cond ((not (pair? xs)) (reverse out))
+          ((equal? (rq-get (car xs) "frozen" #f) #t)
+           (loop (cdr xs) (cons (rq-id (car xs)) out)))
+          (else (loop (cdr xs) out)))))

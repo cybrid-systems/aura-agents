@@ -114,6 +114,15 @@ constraints such as `要双人` without overturning unrelated defaults.
 `project:score` emits the #12 Score for one milestone with the spec
 fingerprint and a #5403-style budget. Docs: `docs/project-spec.md`.
 
+`lib/project/requirements.aura` is the #25 additive path: it inserts a
+new `duo` milestone after `levels`, freezes the existing four stages and
+their 14 assertions as `spec.regression`, records defaults/audit, and
+computes a new contract fingerprint while keeping the old one as
+`base_fingerprint`. `milestone:extend` reattaches that revision to the
+running ladder without losing passed rounds, rejects removed or altered
+frozen stages, and re-queues the new stage (after a finished project it
+moves the new stage to the end). Docs: `docs/requirements.md`.
+
 `lib/project/scaffold.aura` is the #22 dry-run half: from the spec it
 returns the repo name, the pinned-baseline `aura.toml` and `aura-ci` CI
 workflow, README/.gitignore/game skeleton, the files to copy from this

@@ -43,6 +43,18 @@ blocked move for `move-collision`. `meta` supplies `id`, `worldline`,
 - a `root_in` that does not equal the previous same-stage `root_out`
   (hot-replace state continuity).
 
+## Requirement revision (#25)
+
+`milestone:extend state spec'` attaches an additive spec revision (see
+`docs/requirements.md`). It requires `spec'.base_fingerprint` to match
+the state's current `spec_fingerprint`, preserves every passed stage's
+round/worldline/PR/commit, rejects removed stages, changed old
+assertions and an incomplete regression list, and appends a
+`contract-revised` event to the digest chain. The active stage becomes
+the first non-passed stage; if a new stage would precede an
+already-passed stage, the new stages are moved to the end and
+`reordered=#t` is reported.
+
 ## Outer loop
 
 `milestone:outer-request state` returns a #18-shaped request plus a

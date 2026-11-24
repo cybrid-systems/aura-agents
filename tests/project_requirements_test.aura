@@ -1,0 +1,216 @@
+;; Issue #25 — additive requirement: new milestone, frozen regression,
+;; new contract fingerprint, and the same #24 state machine.
+(require "std/string")
+(require "std/list")
+(require "lib/project/spec")
+(require "lib/project/requirements")
+(require "lib/project/milestone")
+(require "lib/pipeline/pipeline")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (copy h)
+  (let ((out (hash)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
+    out))
+
+(define (with h key value)
+  (let ((c (copy h)))
+    (hash-set! c key value)
+    c))
+
+(define (entry xs key)
+  (let loop ((rest xs))
+    (cond ((not (pair? rest)) #f)
+          ((equal? (hash-ref (car rest) "key" "") key) (car rest))
+          (else (loop (cdr rest))))))
+
+(define (audit-event? audit event)
+  (let loop ((xs audit))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "event" "") event) #t)
+          (else (loop (cdr xs))))))
+
+(define (milestone-ids spec)
+  (string-join (map (lambda (m) (hash-ref m "id" ""))
+                    (hash-ref spec "milestones" '()))
+               ","))
+
+(define (stage-assertions spec stage)
+  (hash-ref (project:milestone spec stage) "assertions" '()))
+
+(define (round-for spec stage id wl)
+  (hash "id" id
+        "stage" stage
+        "worldline" wl
+        "winner" "cand-fast"
+        "candidates" 2
+        "batches" 2
+        "early_stop" 1
+        "score" 1000
+        "ok" #t
+        "assertions" (stage-assertions spec stage)
+        "assertions_ok" #t
+        "harness" (hash "verdict" "keep"
+                        "fingerprint" (string-append "fp-" stage)
+                        "package_valid" #t)
+        "root_in" (string-append "root-" stage "-in")
+        "root_out" (string-append "root-" stage "-out")
+        "files_written" 0
+        "per_candidate_ci" 0
+        "perf" (hash "ok" #t "degraded" #t)
+        "source" (string-append "(tuning (" stage " 1))")
+        "fork_tree" (list (hash "id" "cand-fast" "ok" #t "score" 1000)
+                          (hash "id" "cand-slow" "ok" #f "score" 900))))
+
+(define (pass-stage-on state spec stage prn commit wl)
+  (let* ((r (round-for spec stage (string-append stage "-r1") wl))
+         (rec (milestone:record-round! state r))
+         (o (milestone:outer-request state))
+         (pl (pipeline:plan-pr (hash-ref o "request")
+                               (pipeline:policy) (pipeline:new-state)))
+         (p (milestone:record-pr! state prn
+                                  (string-append "https://example.invalid/pr/"
+                                                 (number->string prn))
+                                  pl))
+         (m (hash "pr" prn "merged" #t "commit" commit
+                  "branch_protected" #t "force" #f "admin" #f
+                  "post_merge" (hash "ok" #t "assertions_ok" #t "perf_ok" #t)
+                  "evidence_digest" (hash-ref p "evidence_digest"))))
+    (milestone:land! state m)))
+
+(define (pass-stage spec stage prn commit wl)
+  (pass-stage-on ms spec stage prn commit wl))
+
+; ── spec revision ──────────────────────────────────────────────
+
+(define base (cadr (project:compile "用aura写一个坦克大战游戏")))
+(define rr (requirements:extend base "加上双人模式"))
+(line "extend" (car rr))
+(define ext (cadr rr))
+(line "players" (hash-ref ext "players"))
+(line "milestones" (milestone-ids ext))
+(line "revision" (hash-ref ext "revision"))
+(line "fingerprint-changed" (not (equal? (hash-ref base "fingerprint")
+                                         (hash-ref ext "fingerprint"))))
+(line "base-fingerprint" (equal? (hash-ref ext "base_fingerprint")
+                                 (hash-ref base "fingerprint")))
+(line "frozen" (string-join (requirements:frozen ext) ","))
+(line "regression-count" (length (requirements:regression ext)))
+(line "regression-has-base" (member? "base-destroyed-lose" (requirements:regression ext)))
+(line "regression-has-move" (member? "move-right" (requirements:regression ext)))
+(line "audit-requirement" (audit-event? (requirements:audit ext) "requirement-added"))
+(line "audit-contract" (audit-event? (requirements:audit ext) "contract-revised"))
+(line "defaults-players" (hash-ref (entry (hash-ref ext "defaults") "players") "value"))
+(line "defaults-players-default" (hash-ref (entry (hash-ref ext "defaults") "players") "default"))
+(line "defaults-single" (hash-ref (entry (hash-ref ext "defaults") "single_player_regression") "value"))
+(line "duo-assertions" (length (stage-assertions ext "duo")))
+(line "old-levels-unchanged" (equal? (stage-assertions base "levels")
+                                     (stage-assertions ext "levels")))
+(line "duo-score-milestone" (hash-ref (project:score ext "duo" "mock") "milestone"))
+(line "duo-score-fingerprint" (equal? (hash-ref (project:score ext "duo" "mock") "spec_fingerprint")
+                                      (hash-ref ext "fingerprint")))
+(line "extend-again" (car (requirements:extend ext "加上双人模式")))
+(line "extend-unsupported" (car (requirements:extend base "加上三人模式")))
+
+; ── the #24 loop after the requirement is added ────────────────
+
+(define newr (milestone:new base (hash "workspace" 9 "issue" 25
+                                       "repo" "cybrid-systems/tank-battle")))
+(define ms (hash-ref newr "state"))
+(line "pass-move" (hash-ref (pass-stage base "move" 101 "commit-1" 11) "ok"))
+(line "pass-fight" (hash-ref (pass-stage base "fight" 102 "commit-2" 21) "ok"))
+(line "pass-levels" (hash-ref (pass-stage base "levels" 103 "commit-3" 31) "ok"))
+(line "pre-extend-stage" (hash-ref (milestone:status ms) "stage"))
+
+(define ex (milestone:extend ms ext))
+(line "extend-ok" (hash-ref ex "ok"))
+(line "extend-added" (string-join (hash-ref ex "added" '()) ","))
+(line "extend-current" (hash-ref ex "current"))
+(line "extend-passed" (hash-ref ex "passed"))
+(line "extend-regression" (hash-ref ex "regression"))
+(line "extend-done" (hash-ref ex "done"))
+(line "verify-after-extend" (hash-ref (milestone:verify ms) "ok"))
+(line "stages-after-extend" (length (milestone:stages ms)))
+(line "state-revision" (hash-ref (milestone:status ms) "revision"))
+(line "state-regression" (hash-ref (milestone:status ms) "regression"))
+
+(define duo-min (filter (lambda (a) (not (equal? a "solo-regression")))
+                        (stage-assertions ext "duo")))
+(line "duo-missing-regression"
+      (hash-ref (milestone:record-round! ms
+                  (with (round-for ext "duo" "duo-bad" 51) "assertions" duo-min))
+                "error"))
+
+(define duo-land (pass-stage ext "duo" 105 "commit-5" 51))
+(line "duo-land" (hash-ref duo-land "ok"))
+(line "duo-next" (hash-ref duo-land "next"))
+(line "duo-done" (hash-ref duo-land "done"))
+
+(define fun-land (pass-stage base "fun" 104 "commit-4" 41))
+(line "fun-land" (hash-ref fun-land "ok"))
+(line "fun-done" (hash-ref fun-land "done"))
+(line "final-stage" (hash-ref (milestone:status ms) "stage"))
+(line "final-passed" (hash-ref (milestone:status ms) "passed"))
+(line "final-verify" (hash-ref (milestone:verify ms) "ok"))
+(line "final-events" (hash-ref (milestone:verify ms) "events"))
+
+; ── frozen regression guard ────────────────────────────────────
+
+(define (drop-assertion spec stage assertion)
+  (let ((c (copy spec)))
+    (hash-set! c "milestones"
+      (map (lambda (m)
+             (if (equal? (hash-ref m "id" "") stage)
+               (let ((mc (copy m)))
+                 (hash-set! mc "assertions"
+                   (filter (lambda (a) (not (equal? a assertion)))
+                           (hash-ref m "assertions" '())))
+                 mc)
+               m))
+           (hash-ref spec "milestones")))
+    c))
+
+(define tampered (with (drop-assertion ext "levels" "base-destroyed-lose")
+                       "base_fingerprint" (hash-ref ext "fingerprint")))
+(line "tampered-levels"
+      (hash-ref (milestone:extend ms tampered) "error"))
+
+(define (remove-stage spec stage)
+  (let ((c (copy spec)))
+    (hash-set! c "milestones"
+      (filter (lambda (m) (not (equal? (hash-ref m "id" "") stage)))
+              (hash-ref spec "milestones")))
+    (hash-set! c "milestones"
+      (map (lambda (m)
+             (if (equal? (hash-ref m "id" "") "duo")
+               (with m "requires" (list "levels"))
+               m))
+           (hash-ref c "milestones")))
+    c))
+
+(define removed (with (remove-stage ext "fun")
+                      "base_fingerprint" (hash-ref ext "fingerprint")))
+(line "removed-stage"
+      (hash-ref (milestone:extend ms removed) "error"))
+
+; ── extension after a finished project re-queues the new stage ──
+
+(define done-ms (hash-ref (milestone:new base (hash "workspace" 10 "issue" 25
+                                                    "repo" "cybrid-systems/tank-battle"))
+                          "state"))
+(pass-stage-on done-ms base "move" 201 "commit-21" 61)
+(pass-stage-on done-ms base "fight" 202 "commit-22" 62)
+(pass-stage-on done-ms base "levels" 203 "commit-23" 63)
+(pass-stage-on done-ms base "fun" 204 "commit-24" 64)
+(line "done-before" (hash-ref (milestone:status done-ms) "done"))
+(define done-ex (milestone:extend done-ms ext))
+(line "done-extend" (hash-ref done-ex "ok"))
+(line "done-reordered" (hash-ref done-ex "reordered"))
+(line "done-current" (hash-ref done-ex "current"))
+(line "done-passed" (hash-ref done-ex "passed"))
+(line "done-verify" (hash-ref (milestone:verify done-ms) "ok"))

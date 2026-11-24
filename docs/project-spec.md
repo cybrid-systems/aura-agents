@@ -44,6 +44,11 @@ key. `players` becomes 2, a second control scheme and the
 `player-two-controls` assertion appear, and the original defaults remain
 in the audit.
 
+For a `#25` requirement added to a live project, use
+`requirements:extend` instead: it keeps the passed ladder, freezes the
+old assertions as a regression suite, inserts the new `duo` milestone
+and emits a new contract fingerprint. See `docs/requirements.md`.
+
 ## Milestones and assertions
 
 `spec.milestones` is the fixed ladder `move` (能动), `fight` (能打),
