@@ -1,0 +1,46 @@
+;; Issue #14 — Perf section: external-only USE parsing and honest
+;; capability tiers. Pure fixture strings; no target instrumentation.
+(require "std/string")
+(require "lib/perf/observe")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define stat0 "cpu  100 0 100 800 0 0 0 0 0 0\n")
+(define stat1 "cpu  200 0 200 1400 0 0 0 0 0 0\n")
+(line "cpu-util" (perf:cpu-util stat0 stat1))
+(line "mem-used" (perf:mem-used-pct "MemTotal: 1000 kB\nMemAvailable: 400 kB\n"))
+
+(define net "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n  eth0: 500 2 0 0 0 0 0 0 700 3 0 0 0 0 0 0\n")
+(define n (perf:net-sum net))
+(line "net-rx" (hash-ref n "rx_bytes"))
+(line "net-tx" (hash-ref n "tx_bytes"))
+(line "pressure" (hash-ref (perf:pressure "some avg10=1.25 avg60=0.50 avg300=0.10 total=42\n") "avg10"))
+
+(line "full-ebpf" (perf:classify (hash "perf" #t "bpftrace" #t "proc" #t "paranoid" 1)))
+(line "perf-only" (perf:classify (hash "perf" #t "bpftrace" #f "proc" #t "paranoid" 2)))
+(line "proc-only" (perf:classify (hash "perf" #f "bpftrace" #f "proc" #t "paranoid" 2)))
+(line "minimal" (perf:classify (hash "perf" #f "bpftrace" #f "proc" #f "paranoid" 4)))
+
+(line "proc-ok" (hash-ref (perf:require-evidence "proc-stat-only" "proc") "ok"))
+(line "perf-refuses-ebpf" (hash-ref (perf:require-evidence "perf-only" "ebpf") "ok"))
+(line "unknown-tier" (hash-ref (perf:require-evidence "proc-stat-only" "magic") "ok"))
+
+(define report (perf:report))
+(line "report" (if (and (hash? report) (equal? (hash-ref report "source") "external-only:/proc")) "ok" "bad"))
+(line "probe" (if (hash? (perf:probe)) "ok" "bad"))
+
+(define ev (perf:evidence))
+(line "evidence" (if (equal? (hash-ref ev "kind") "perf-evidence") "ok" "bad"))
+(line "evidence-caps" (string-join (hash-ref ev "caps") ","))
+
+(define report-text "# Overhead  Command  Shared Object      Symbol\n  42.00%  aura     aura               [.] fiber_resume\n  20.00%  aura     aura               [.] gc_step\n")
+(define tops (perf:top-symbols report-text 2))
+(line "top-count" (length tops))
+(line "top-symbol" (hash-ref (car tops) "symbol"))
+(line "top-overhead" (hash-ref (car tops) "overhead_pct"))
+(line "offcpu" (hash-ref (perf:offcpu-plan-with (hash "bpftrace" #t "perf" #f) 42 5) "mode"))
+(line "flamegraph" (hash-ref (perf:flamegraph-plan-with (hash "perf" #t)) "ok"))

@@ -1,0 +1,250 @@
+;; Perf section (#14): external-only system observation and an honest
+;; capability probe. No target instrumentation: /proc, ss and the
+;; perf/bpftrace tools only. When a tool is missing the report says so.
+
+(require "std/string")
+(require "std/list")
+(require "std/io")
+(require "std/process")
+
+(export perf:probe perf:classify perf:require-evidence perf:report
+        perf:evidence perf:top-symbols perf:offcpu-plan-with
+        perf:flamegraph-plan-with perf:cpu-util perf:mem-used-pct
+        perf:net-sum perf:pressure perf:profile-plan perf:help)
+
+(define (perf:help)
+  "Perf section: (perf:probe) -> capabilities; (perf:report) -> USE snapshot; (perf:require-evidence mode 'ebpf) fails closed when unsupported")
+
+(define (perf-num s)
+  (let ((n (try (string->number s) (catch (e) #f))))
+    (if (number? n) n 0)))
+
+(define (perf-tool? name)
+  (let ((p (try (command-output (string-append "command -v " name)) (catch (e) #f))))
+    (and (string? p) (> (string-length (string-trim p)) 0))))
+
+(define (perf-readable? path)
+  (let ((v (try (read-file path) (catch (e) #f))))
+    (string? v)))
+
+(define (perf-paranoid)
+  (let ((v (try (read-file "/proc/sys/kernel/perf_event_paranoid") (catch (e) #f))))
+    (if (string? v) (perf-num (string-trim v)) -1)))
+
+; tools is a hash of booleans plus "paranoid". The result names the
+; strongest evidence tier this host can honestly provide.
+(define (perf:classify tools)
+  (let* ((perf (hash-ref tools "perf" #f))
+         (bpf (hash-ref tools "bpftrace" #f))
+         (proc (hash-ref tools "proc" #f))
+         (paranoid (hash-ref tools "paranoid" -1)))
+    (cond
+      ((and perf bpf proc (<= paranoid 1)) "full-ebpf")
+      ((and perf proc (<= paranoid 2)) "perf-only")
+      (proc "proc-stat-only")
+      (else "minimal"))))
+
+(define (perf:probe)
+  (let* ((perf (perf-tool? "perf"))
+         (bpf (perf-tool? "bpftrace"))
+         (ss (perf-tool? "ss"))
+         (proc (perf-readable? "/proc/stat"))
+         (paranoid (perf-paranoid))
+         (mode (perf:classify (hash "perf" perf "bpftrace" bpf
+                                    "proc" proc "paranoid" paranoid)))
+         (missing (filter (lambda (x) (not (cadr x)))
+                          (list (list "perf" perf) (list "bpftrace" bpf)
+                                (list "ss" ss) (list "proc" proc)))))
+    (hash "mode" mode
+          "degraded" (not (equal? mode "full-ebpf"))
+          "missing" (map car missing)
+          "perf_event_paranoid" paranoid
+          "tools" (hash "perf" perf "bpftrace" bpf "ss" ss "proc" proc))))
+
+; Evidence tiers are ordered. A contract that demands a stronger tier
+; than the host offers is refused, never silently skipped.
+(define (perf-tier-rank tier)
+  (cond ((equal? tier "minimal") 0)
+        ((equal? tier "proc") 1)
+        ((equal? tier "proc-stat-only") 1)
+        ((equal? tier "perf") 2)
+        ((equal? tier "perf-only") 2)
+        ((equal? tier "ebpf") 3)
+        ((equal? tier "full-ebpf") 3)
+        (else -1)))
+
+(define (perf:require-evidence mode needed)
+  (let ((m (perf-tier-rank mode))
+        (n (perf-tier-rank needed)))
+    (if (or (< m 0) (< n 0) (< m n))
+      (hash "ok" #f "error" "capability-missing" "mode" mode "needed" needed)
+      (hash "ok" #t "mode" mode "needed" needed))))
+
+; ── parsers (pure; fixtures use the same functions) ────────────
+
+(define (perf-first-line text)
+  (let ((rows (string-split text "\n")))
+    (if (pair? rows) (car rows) "")))
+
+(define (perf-cpu-row text)
+  (let ((words (string-split-words (perf-first-line text))))
+    (if (and (pair? words) (equal? (car words) "cpu"))
+      (map perf-num (cdr words))
+      '())))
+
+; (cpu-util stat0 stat1) -> percent busy in [0,100], or #f.
+(define (perf:cpu-util stat0 stat1)
+  (let* ((a (perf-cpu-row stat0))
+         (b (perf-cpu-row stat1)))
+    (if (or (< (length a) 4) (< (length b) 4))
+      #f
+      (let* ((sum-a (apply + (take a 8)))
+             (sum-b (apply + (take b 8)))
+             (idle-a (+ (list-ref a 3) (if (>= (length a) 5) (list-ref a 4) 0)))
+             (idle-b (+ (list-ref b 3) (if (>= (length b) 5) (list-ref b 4) 0)))
+             (dt (- sum-b sum-a))
+             (di (- idle-b idle-a)))
+        (if (<= dt 0) #f
+            (/ (* 100.0 (- dt di)) dt))))))
+
+(define (perf-kb text key)
+  (let loop ((lines (string-split text "\n")))
+    (cond ((not (pair? lines)) #f)
+          ((string-prefix? (string-trim (car lines)) key)
+           (let ((words (string-split-words (car lines))))
+             (if (and (pair? words) (pair? (cdr words)))
+               (perf-num (cadr words))
+               #f)))
+          (else (loop (cdr lines))))))
+
+(define (perf:mem-used-pct meminfo)
+  (let ((total (perf-kb meminfo "MemTotal:"))
+        (avail (perf-kb meminfo "MemAvailable:")))
+    (if (and total avail (> total 0))
+      (/ (* 100.0 (- total avail)) total)
+      #f)))
+
+; Sum rx/tx bytes over non-loopback interfaces.
+(define (perf:net-sum netdev)
+  (let loop ((lines (string-split netdev "\n")) (rx 0) (tx 0))
+    (cond
+      ((not (pair? lines)) (hash "rx_bytes" rx "tx_bytes" tx))
+      ((not (string-contains? (car lines) ":")) (loop (cdr lines) rx tx))
+      (else
+       (let* ((parts (string-split (car lines) ":"))
+              (iface (if (pair? parts) (string-trim (car parts)) ""))
+              (nums (if (pair? (cdr parts)) (string-split-words (cadr parts)) '())))
+         (if (or (equal? iface "lo") (< (length nums) 9))
+           (loop (cdr lines) rx tx)
+           (loop (cdr lines)
+                 (+ rx (perf-num (list-ref nums 0)))
+                 (+ tx (perf-num (list-ref nums 8))))))))))
+
+(define (perf:pressure text)
+  (let ((words (string-split-words (perf-first-line text))))
+    (let loop ((xs words) (out (hash)))
+      (cond
+        ((not (pair? xs)) out)
+        ((string-prefix? (car xs) "avg10=")
+         (hash-set! out "avg10" (perf-num (string-drop (car xs) 6)))
+         (loop (cdr xs) out))
+        (else (loop (cdr xs) out))))))
+
+; ── report ─────────────────────────────────────────────────────
+
+(define (perf-read path)
+  (let ((v (try (read-file path) (catch (e) #f))))
+    (if (string? v) v "")))
+
+(define (perf:report)
+  (let* ((probe (perf:probe))
+         (cpu (perf-read "/proc/stat"))
+         (mem (perf-read "/proc/meminfo"))
+         (net (perf-read "/proc/net/dev"))
+         (pressure (perf-read "/proc/pressure/cpu")))
+    (hash "mode" (hash-ref probe "mode")
+          "degraded" (hash-ref probe "degraded")
+          "missing" (hash-ref probe "missing" '())
+          "cpu_util_pct" #f
+          "mem_used_pct" (perf:mem-used-pct mem)
+          "net" (perf:net-sum net)
+          "cpu_pressure" (perf:pressure pressure)
+          "source" "external-only:/proc")))
+
+; Evidence-only peer payload: capabilities are read+publish; no keep or
+; rollback path exists in this section.
+(define (perf:evidence)
+  (let ((r (perf:report)))
+    (hash "kind" "perf-evidence"
+          "mode" (hash-ref r "mode")
+          "degraded" (hash-ref r "degraded")
+          "missing_probes" (hash-ref r "missing" '())
+          "report" r
+          "caps" '("read" "publish"))))
+
+; Parse the default 'perf report --stdio --no-children' table. The
+; symbol may contain spaces; the first three words are overhead, command
+; and DSO, the rest is the symbol.
+(define (perf:top-symbols report . rest)
+  (let ((limit (if (and (pair? rest) (number? (car rest))) (car rest) 5)))
+    (let loop ((lines (string-split report "\n")) (acc '()))
+      (cond
+        ((not (pair? lines)) (reverse acc))
+        ((>= (length acc) limit) (reverse acc))
+        (else
+         (let* ((line (string-trim (car lines)))
+                (words (string-split-words line)))
+           (cond
+             ((or (not (pair? words))
+                  (string-prefix? line "#")
+                  (not (string-suffix? (car words) "%")))
+              (loop (cdr lines) acc))
+             ((< (length words) 4) (loop (cdr lines) acc))
+             (else
+              (let ((overhead (perf-num (substring (car words) 0 (- (string-length (car words)) 1))))
+                    (cmd (cadr words))
+                    (dso (caddr words))
+                    (symbol (string-join (cdddr words) " ")))
+                (loop (cdr lines)
+                      (cons (hash "overhead_pct" overhead
+                                  "command" cmd
+                                  "dso" dso
+                                  "symbol" symbol)
+                            acc)))))))))))
+
+(define (perf:offcpu-plan-with tools pid seconds)
+  (cond
+    ((not (and (number? pid) (number? seconds)))
+     (hash "ok" #f "error" "bad-arguments"))
+    ((hash-ref tools "bpftrace" #f)
+     (hash "ok" #t "mode" "offcpu"
+           "command" (string-append "offcputime-bpfcc -p " (number->string pid)
+                                    " " (number->string seconds))
+           "evidence" "off-cpu-stacks"))
+    ((hash-ref tools "perf" #f)
+     (hash "ok" #t "mode" "sched"
+           "command" (string-append "perf sched record -p " (number->string pid)
+                                    " -- sleep " (number->string seconds))
+           "evidence" "sched-latency"))
+    (else (hash "ok" #f "error" "offcpu-unavailable"))))
+
+(define (perf:flamegraph-plan-with tools)
+  (if (hash-ref tools "perf" #f)
+    (hash "ok" #t
+          "on_cpu" "perf script -i out/perf.data | stackcollapse-perf.pl | flamegraph.pl > out/oncpu.svg"
+          "off_cpu" "perf script -i out/perf.data | stackcollapse-perf.pl | flamegraph.pl > out/offcpu.svg")
+    (hash "ok" #f "error" "perf-missing")))
+
+(define (perf:profile-plan pid seconds)
+  (let ((probe (perf:probe)))
+    (cond
+      ((not (hash-ref (hash-ref probe "tools") "perf" #f))
+       (hash "ok" #f "error" "perf-missing" "mode" (hash-ref probe "mode")))
+      ((not (number? pid)) (hash "ok" #f "error" "bad-pid"))
+      ((not (number? seconds)) (hash "ok" #f "error" "bad-seconds"))
+      (else
+       (hash "ok" #t
+             "mode" (hash-ref probe "mode")
+             "record" (string-append "perf record -F 99 -g -p " (number->string pid)
+                                     " -o out/perf.data -- sleep " (number->string seconds))
+             "report" "perf report -i out/perf.data --stdio --no-children")))))

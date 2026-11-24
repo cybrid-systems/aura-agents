@@ -1,0 +1,10 @@
+perf:probe: -> Any
+perf:classify: Any -> Any
+perf:require-evidence: Any Any -> Any
+perf:report: -> Any
+perf:cpu-util: Any Any -> Any
+perf:mem-used-pct: Any -> Any
+perf:net-sum: Any -> Any
+perf:pressure: Any -> Any
+perf:profile-plan: Any Any -> Any
+perf:help: -> Any
