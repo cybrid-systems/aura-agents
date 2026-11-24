@@ -1,0 +1,51 @@
+;; Issue #12 — Score EDSL and Conductor: normal, contract-blocked and
+;; budget-fused paths, plus the conductor's read+publish-only permission.
+(require "std/string")
+(require "lib/score")
+(require "lib/conductor")
+(require "lib/instruments/manifest")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(manifest:reset!)
+(manifest:load-dir "instruments")
+
+(define compiled (score:compile "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。" "mock"))
+(line "compile" (car compiled))
+(define s (cadr compiled))
+(line "parts" (length (hash-ref s "parts")))
+(line "fingerprint" (hash-ref s "contract_fingerprint"))
+(define v (score:validate s (manifest:registry)))
+(line "validate" (car v))
+(line "order" (string-join (car (cddr v)) ","))
+
+(define r (conductor:run s "ok"))
+(line "run" (hash-ref r "state"))
+(line "verdict" (hash-ref r "verdict"))
+(line "events" (length (hash-ref r "events")))
+
+(define blocked-score (cadr (score:compile "SIMULATE-P99 给 aura-redis 加 ZRANGEBYSCORE" "mock")))
+(define rb (conductor:run blocked-score "ok"))
+(line "contract-blocked" (hash-ref rb "state"))
+(line "contract-verdict" (hash-ref rb "verdict"))
+
+(hash-set! s "budget" (hash "wall_ms" 1000 "tokens" 10 "failures" 3))
+(define rbudget (conductor:run s "ok"))
+(line "budget" (hash-ref rbudget "state"))
+(line "budget-events" (length (hash-ref rbudget "events")))
+
+;; A dependency cycle is refused before anything runs.
+(define s2 (cadr (score:compile "给 aura-redis 加 ZRANGEBYSCORE" "mock")))
+(define patch (score-part-by-id (hash-ref s2 "parts") "patch"))
+(hash-set! patch "depends_on" (list "judge"))
+(line "cycle" (car (score:validate s2 (manifest:registry))))
+
+(line "conductor-caps" (string-join (conductor:permissions) ","))
+
+;; JSON round-trip keeps the identity.
+(define back (score:from-json (score:to-json s2)))
+(line "roundtrip" (if (equal? (hash-ref back "id") (hash-ref s2 "id")) "ok" "bad"))

@@ -1,0 +1,219 @@
+;; Score EDSL (#12)
+;;
+;; A Score is the conductor's declarative plan: parts, their capability
+;; and target kind, dependency edges, a contract fingerprint, a budget and
+;; the approval points. It serializes to plain JSON and is auditable.
+;; The conductor only schedules; it never holds keep/rollback.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+(require "lib/roles/planner")
+(require "lib/instruments/manifest")
+
+(export score:compile score:make score:validate score:order
+        score:to-json score:from-json score:contract-fingerprint
+        score-part-by-id score:help)
+
+(define (score:help)
+  "Score EDSL: (score:compile requirement mode) -> (ok score) | (error ...); (score:validate s registry); (score:to-json s)")
+
+; ── deterministic fingerprint ─────────────────────────────────
+
+(define (score-contract-text contract)
+  (if (not (pair? contract))
+    ""
+    (let* ((keys (sort (map car contract)))
+           (rows (map (lambda (k)
+                        (let ((p (assoc k contract)))
+                          (string-append k "=" (if (pair? p) (cadr p) ""))))
+                      keys)))
+      (string-join rows "&"))))
+
+(define (score:contract-fingerprint requirement contract)
+  (let* ((s (string-append requirement "|" (score-contract-text contract)))
+         (h0 2166136261))
+    (let loop ((i 0) (h h0))
+      (if (>= i (string-length s))
+        (number->string h)
+        (loop (+ i 1)
+              (bitwise-and (* (bitwise-xor h (char->integer (string-ref s i)))
+                              16777619)
+                           4294967295))))))
+
+; ── construction ───────────────────────────────────────────────
+
+(define (score-target requirement)
+  (cond
+    ((string-contains? requirement "aura-runner") "aura-runner")
+    ((string-contains? requirement "aura-redis") "aura-redis")
+    (else "workspace")))
+
+(define (score:make requirement contract tasks mode)
+  (let* ((fp (score:contract-fingerprint requirement contract))
+         (target (score-target requirement))
+         (parts
+           (list
+             (hash "id" "observe"
+                   "capability" "observe.system-use"
+                   "target_kind" target
+                   "depends_on" '()
+                   "retry" 1
+                   "approval" #f
+                   "input" (hash "motif" requirement))
+             (hash "id" "patch"
+                   "capability" "patch.write"
+                   "target_kind" target
+                   "depends_on" (list "observe")
+                   "retry" 1
+                   "approval" "human"
+                   "input" (hash "requirement" requirement
+                                 "tasks" tasks
+                                 "contract" contract))
+             (hash "id" "static"
+                   "capability" "check.static"
+                   "target_kind" "*"
+                   "depends_on" (list "patch")
+                   "retry" 0
+                   "approval" #f
+                   "input" (hash "gate" "static"))
+             (hash "id" "judge"
+                   "capability" "judge.contract-gate"
+                   "target_kind" target
+                   "depends_on" (list "static")
+                   "retry" 0
+                   "approval" #f
+                   "input" (hash "contract" contract
+                                 "fingerprint" fp))
+             (hash "id" "memory"
+                   "capability" "memory.provenance"
+                   "target_kind" "*"
+                   "depends_on" (list "judge")
+                   "retry" 0
+                   "approval" #f
+                   "input" (hash "fingerprint" fp)))))
+    (hash "kind" "score"
+          "id" (string-append "score-" (substring fp 0 (min 8 (string-length fp))))
+          "requirement" requirement
+          "mode" mode
+          "target_kind" target
+          "contract" contract
+          "contract_fingerprint" fp
+          "budget" (hash "wall_ms" 300000 "tokens" 400000 "failures" 3)
+          "approvals" (list (hash "part" "patch" "level" "human"))
+          "parts" parts)))
+
+(define (score:compile requirement mode)
+  (if (not (and (string? requirement) (> (string-length requirement) 0)))
+    (list "error" "bad-requirement")
+    (let ((plan (planner:plan-with requirement mode #f)))
+      (if (not (and (pair? plan) (equal? (car plan) "ok")))
+        (list "error" "planner-failed")
+        (list "ok" (score:make requirement (cadr plan) (caddr plan) mode))))))
+
+; ── validation / ordering ─────────────────────────────────────
+
+(define (score-part-by-id parts id)
+  (let loop ((xs parts))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (score-positive-budget? b)
+  (and (hash? b)
+       (let ((w (hash-ref b "wall_ms" #f))
+             (t (hash-ref b "tokens" #f))
+             (f (hash-ref b "failures" #f)))
+         (and (number? w) (> w 0)
+              (number? t) (> t 0)
+              (integer? f) (>= f 0)))))
+
+(define (score-dep-ok? parts p)
+  (let loop ((ds (hash-ref p "depends_on" '())))
+    (cond ((not (pair? ds)) #t)
+          ((not (score-part-by-id parts (car ds))) #f)
+          (else (loop (cdr ds))))))
+
+(define (score-visit id parts state out)
+  (let ((s (hash-ref state id #f)))
+    (cond
+      ((equal? s "done") (list "ok" #t))
+      ((equal? s "visiting") (list "error" "cycle" id))
+      (else
+       (let ((p (score-part-by-id parts id)))
+         (if (not p)
+           (list "error" "missing-part" id)
+           (begin
+             (hash-set! state id "visiting")
+             (let loop ((ds (hash-ref p "depends_on" '())) (err #f))
+               (cond
+                 (err err)
+                 ((not (pair? ds))
+                  (begin
+                    (hash-set! state id "done")
+                    (hash-set! out "ids" (cons id (hash-ref out "ids" '())))
+                    (list "ok" #t)))
+                 (else
+                  (let ((r (score-visit (car ds) parts state out)))
+                    (if (equal? (car r) "error")
+                      r
+                      (loop (cdr ds) #f)))))))))))))
+
+(define (score:order score)
+  (let ((parts (hash-ref score "parts" '())))
+    (if (not (pair? parts))
+      (list "error" "no-parts")
+      (let loop ((ps parts) (state (hash)) (out (hash "ids" '())))
+        (if (not (pair? ps))
+          (list "ok" (reverse (hash-ref out "ids" '())))
+          (let ((r (score-visit (hash-ref (car ps) "id") parts state out)))
+            (if (equal? (car r) "error")
+              r
+              (loop (cdr ps) state out))))))))
+
+(define (score:validate score registry)
+  (let ((reg (if (and (hash? registry) (> (length (hash-keys registry)) 0))
+               registry
+               (let ((r (manifest:load-dir "instruments")))
+                 (if (hash-ref r "ok" #f) (manifest:registry) (hash))))))
+    (cond
+      ((not (hash? score)) (list "error" "not-a-score"))
+      ((not (equal? (hash-ref score "kind" #f) "score")) (list "error" "not-a-score"))
+      ((not (score-positive-budget? (hash-ref score "budget" #f))) (list "error" "bad-budget"))
+      ((not (and (string? (hash-ref score "contract_fingerprint" #f))
+                 (> (string-length (hash-ref score "contract_fingerprint" "")) 0)))
+       (list "error" "missing-contract-fingerprint"))
+      ((not (pair? (hash-ref score "parts" '()))) (list "error" "no-parts"))
+      (else
+       (let loop ((ps (hash-ref score "parts" '()))
+                  (seen (hash))
+                  (err #f))
+         (cond
+           (err err)
+           ((not (pair? ps))
+            (let ((o (score:order score)))
+              (if (equal? (car o) "error") o
+                (list "ok" (hash-ref score "contract_fingerprint") (cadr o)))))
+           (else
+            (let* ((p (car ps))
+                   (id (hash-ref p "id" #f))
+                   (cap (hash-ref p "capability" #f))
+                   (target (hash-ref p "target_kind" #f)))
+              (cond
+                ((not (and (string? id) (> (string-length id) 0)))
+                 (loop (cdr ps) seen (list "error" "bad-part-id")))
+                ((hash-ref seen id #f)
+                 (loop (cdr ps) seen (list "error" "duplicate-part" id)))
+                ((not (score-dep-ok? (hash-ref score "parts") p))
+                 (loop (cdr ps) seen (list "error" "missing-dependency" id)))
+                ((not (manifest:select cap target))
+                 (loop (cdr ps) seen (list "error" "no-instrument" id)))
+                (else
+                 (hash-set! seen id #t)
+                 (loop (cdr ps) seen #f)))))))))))
+
+(define (score:to-json score) (json-encode score))
+
+(define (score:from-json text)
+  (let ((v (try (json-parse text) (catch (e) #f))))
+    (if (hash? v) v (list "error" "invalid-json"))))

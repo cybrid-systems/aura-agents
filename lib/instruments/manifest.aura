@@ -1,0 +1,179 @@
+;; Instrument Manifest Protocol (#11)
+;;
+;; A section (instrument) declares what it can do, what it needs, and what
+;; it costs. The conductor selects by capability + target kind; it never
+;; hard-codes a section's CLI or assumes its permissions. Manifests are
+;; plain JSON loaded from instruments/ or registered by a peer.
+;;
+;; Fail closed: an unknown capability, a duplicate name, a missing field,
+;; a negative cost, or keep/rollback authority on a non-judge instrument
+;; is refused before it can be selected.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+(require "std/io")
+(require "std/char")
+
+(export manifest:reset! manifest:registry manifest:count
+        manifest:register! manifest:load-dir manifest:validate
+        manifest:select manifest:select-all manifest:known-capabilities
+        manifest:help)
+
+(define *registry* (hash))
+
+(define (manifest:reset!)
+  (set! *registry* (hash))
+  #t)
+
+(define (manifest:registry) *registry*)
+(define (manifest:count) (length (hash-keys *registry*)))
+
+(define (manifest:known-capabilities)
+  '("observe.system-use" "observe.offcpu" "observe.flamegraph"
+    "trial.isolated" "judge.contract-gate" "evidence.emit"
+    "evidence.verify" "keep.decide" "rollback.decide"
+    "memory.provenance" "memory.invalidate" "memory.prune"
+    "patch.write" "patch.rehearse" "load.replay"
+    "check.static" "report.render"))
+
+(define (manifest:help)
+  "std instruments: (manifest:load-dir DIR) loads *.json; (manifest:select cap target) picks one; (manifest:register! m) validates + adds")
+
+; ── small validators ───────────────────────────────────────────
+
+(define (m:nonempty-string? s)
+  (and (string? s) (> (string-length s) 0)))
+
+(define (m:slug? s)
+  (and (m:nonempty-string? s)
+       (let loop ((i 0))
+         (if (>= i (string-length s))
+           #t
+           (let ((c (string-ref s i)))
+             (and (or (char-alphabetic? c) (char-numeric? c) (= c 45))
+                  (loop (+ i 1))))))))
+
+; version is digits.digits.digits; no range support yet.
+(define (m:version? s)
+  (and (string? s)
+       (let ((parts (string-split s ".")))
+         (and (= (length parts) 3)
+              (every (lambda (p)
+                       (and (> (string-length p) 0)
+                            (let loop ((i 0))
+                              (if (>= i (string-length p))
+                                #t
+                                (let ((c (string-ref p i)))
+                                  (and (char-numeric? c) (loop (+ i 1))))))))
+                     parts)))))
+
+(define (m:string-list? x)
+  (and (pair? x) (every (lambda (v) (m:nonempty-string? v)) x)))
+
+(define (m:capability-list? x)
+  (and (pair? x)
+       (every (lambda (v) (member? v (manifest:known-capabilities))) x)))
+
+(define (m:permission? v)
+  (member? v '("read" "publish" "subscribe" "keep" "rollback"
+               "approve" "constraint-write" "exec" "write" "mutate"
+               "network" "ffi")))
+
+(define (m:permission-list? x)
+  (and (pair? x) (every m:permission? x)))
+
+(define (m:role? x)
+  (and (integer? x) (>= x 0) (<= x 6)))
+
+(define (m:cost-ok? c)
+  (and (hash? c)
+       (let ((wall (hash-ref c "wall_ms" #f))
+             (tokens (hash-ref c "tokens" #f))
+             (cpu (hash-ref c "cpu_pct" #f)))
+         (and (number? wall) (>= wall 0)
+              (number? tokens) (>= tokens 0)
+              (number? cpu) (>= cpu 0)
+              (<= cpu 100)))))
+
+(define (m:fail code field)
+  (hash "ok" #f "error" code "field" field))
+
+; ── validation ─────────────────────────────────────────────────
+
+(define (manifest:validate m)
+  (cond
+    ((not (hash? m)) (m:fail "not-a-hash" ""))
+    ((not (m:slug? (hash-ref m "name" #f))) (m:fail "bad-name" "name"))
+    ((not (m:version? (hash-ref m "version" #f))) (m:fail "bad-version" "version"))
+    ((not (m:role? (hash-ref m "bus_role" #f))) (m:fail "bad-bus-role" "bus_role"))
+    ((not (m:capability-list? (hash-ref m "capabilities" '()))) (m:fail "bad-capabilities" "capabilities"))
+    ((not (m:string-list? (hash-ref m "target_kinds" '()))) (m:fail "bad-target-kinds" "target_kinds"))
+    ((not (m:string-list? (hash-ref m "inputs" '()))) (m:fail "bad-inputs" "inputs"))
+    ((not (m:string-list? (hash-ref m "outputs" '()))) (m:fail "bad-outputs" "outputs"))
+    ((not (m:cost-ok? (hash-ref m "cost" #f))) (m:fail "bad-cost" "cost"))
+    ((not (m:permission-list? (hash-ref m "required_caps" '()))) (m:fail "bad-required-caps" "required_caps"))
+    (else
+     (let* ((caps (hash-ref m "capabilities" '()))
+            (need (hash-ref m "required_caps" '()))
+            (judge (member? "judge.contract-gate" caps))
+            (wants-verdict (or (member? "keep" need) (member? "rollback" need)
+                               (member? "keep" caps) (member? "rollback" caps))))
+       (if (and wants-verdict (not judge))
+         (m:fail "unauthorized-verdict" "required_caps")
+         (hash "ok" #t "manifest" m))))))
+
+; ── registry + loading ────────────────────────────────────────
+
+(define (manifest:register! m)
+  (let ((v (manifest:validate m)))
+    (if (not (hash-ref v "ok" #f))
+      v
+      (let ((name (hash-ref m "name")))
+        (if (hash-ref *registry* name #f)
+          (m:fail "duplicate-name" name)
+          (begin
+            (hash-set! *registry* name m)
+            (hash "ok" #t "name" name)))))))
+
+(define (manifest:load-dir dir)
+  (let ((entries (try (directory-list dir) (catch (e) #f))))
+    (if (not (pair? entries))
+      (m:fail "directory-unreadable" dir)
+      (let loop ((names (sort (filter (lambda (e) (string-suffix? e ".json")) entries)))
+                 (loaded '()))
+        (if (null? names)
+          (hash "ok" #t "count" (length loaded) "names" (reverse loaded))
+          (let* ((file (string-append dir "/" (car names)))
+                 (text (try (read-file file) (catch (e) #f)))
+                 (m (if (string? text) (try (json-parse text) (catch (e) #f)) #f)))
+            (if (not (hash? m))
+              (hash "ok" #f "error" "manifest-parse-failed" "file" file)
+              (let ((r (manifest:register! m)))
+                (if (not (hash-ref r "ok" #f))
+                  (hash "ok" #f "error" (hash-ref r "error")
+                        "file" file "field" (hash-ref r "field" ""))
+                  (loop (cdr names) (cons (hash-ref m "name") loaded)))))))))))
+
+; ── selection ─────────────────────────────────────────────────
+
+(define (m:exact-target? m target)
+  (member? target (hash-ref m "target_kinds" '())))
+
+(define (m:by-name a b)
+  (string<? (hash-ref a "name") (hash-ref b "name")))
+
+(define (manifest:select-all cap target)
+  (let* ((all (map (lambda (k) (hash-ref *registry* k)) (hash-keys *registry*)))
+         (fit (filter (lambda (m)
+                        (and (member? cap (hash-ref m "capabilities" '()))
+                             (or (member? "*" (hash-ref m "target_kinds" '()))
+                                 (member? target (hash-ref m "target_kinds" '())))))
+                      all))
+         (exact (sort (filter (lambda (m) (m:exact-target? m target)) fit) m:by-name))
+         (wild (sort (filter (lambda (m) (not (m:exact-target? m target))) fit) m:by-name)))
+    (append exact wild)))
+
+(define (manifest:select cap target)
+  (let ((xs (manifest:select-all cap target)))
+    (if (pair? xs) (car xs) #f)))

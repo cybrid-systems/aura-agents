@@ -3,6 +3,12 @@ entry = "demo/run.aura"
 preset = "dev"
 out = "out"
 
-# Rolling Aura nightly from main. CI installs that same prebuilt release.
+# Rolling Aura nightly from main. The [dependencies] block is the orchestra
+# baseline (#13): the same commit, nightly archive digests and aura-ci image
+# digest as baseline/aura-baseline.json. CI fails when they drift.
 [dependencies]
 aura = "nightly"
+aura_commit = "793b486602e770719548f02efe1c6f905a51a903"
+aura_sha256_linux_x86_64 = "c0d2f7b88cd598a3e91c947ba63a9bc97a78b3820cf5e372f409941dd9ee2c2b"
+aura_sha256_linux_arm64 = "6deaa418c04c68819a291346955211be069e8cf58ae4ec3778fb1b78ab5fd526"
+aura_ci_digest = "sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5"

@@ -7,8 +7,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/cybrid-systems/aura-ci@sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5
     steps:
       - uses: actions/checkout@v4
+      - name: Orchestra baseline drift (#13)
+        run: python3 scripts/check-baseline.py --self
       - name: Install Aura nightly
         run: echo "$(bash scripts/install-aura.sh)" >> "$GITHUB_PATH"
       - name: Test
@@ -19,5 +23,7 @@ jobs:
         env:
           AURA_AGENTS_LLM: mock
         run: bash scripts/smoke.sh
-      - name: Shell syntax
-        run: bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh
+      - name: Shell and Python syntax
+        run: |
+          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh
+          python3 -m py_compile scripts/check-baseline.py

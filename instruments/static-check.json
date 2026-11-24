@@ -1,0 +1,11 @@
+{
+  "name": "static-check",
+  "version": "0.1.0",
+  "bus_role": 0,
+  "capabilities": ["check.static", "evidence.emit"],
+  "target_kinds": ["*"],
+  "inputs": ["candidate-patch"],
+  "outputs": ["static-evidence"],
+  "required_caps": ["read"],
+  "cost": {"wall_ms": 2000, "tokens": 0, "cpu_pct": 1}
+}

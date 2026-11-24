@@ -1,0 +1,12 @@
+{
+  "name": "perf-observer",
+  "version": "1.0.0",
+  "bus_role": 1,
+  "capabilities": ["observe.system-use", "observe.offcpu", "observe.flamegraph", "evidence.emit"],
+  "target_kinds": ["aura-redis", "aura-runner", "service"],
+  "inputs": ["motif", "target"],
+  "outputs": ["metric-evidence", "motif"],
+  "required_caps": ["read", "publish"],
+  "cost": {"wall_ms": 30000, "tokens": 0, "cpu_pct": 5},
+  "degraded": ["no-perf", "no-bpf"]
+}

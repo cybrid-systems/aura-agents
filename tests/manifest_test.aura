@@ -1,0 +1,76 @@
+;; Issue #11 — Instrument Manifest Protocol and dynamic section discovery.
+(require "std/string")
+(require "lib/instruments/manifest")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(manifest:reset!)
+(define loaded (manifest:load-dir "instruments"))
+(line "load" (if (hash-ref loaded "ok" #f) "ok" "bad"))
+(line "count" (manifest:count))
+(line "names" (string-join (sort (hash-ref loaded "names" '())) ","))
+
+(define (sel cap target)
+  (let ((m (manifest:select cap target)))
+    (if m (hash-ref m "name") "none")))
+
+(line "perf" (sel "observe.system-use" "aura-redis"))
+(line "harness" (sel "judge.contract-gate" "aura-runner"))
+(line "memory" (sel "memory.provenance" "anything"))
+(line "worker" (sel "patch.write" "workspace"))
+(line "static" (sel "check.static" "aura-redis"))
+(line "unknown" (sel "load.replay" "aura-redis"))
+
+;; A sixth/fifth section needs only a manifest + peer; the selector reads
+;; the registry, not hard-coded names.
+(line "extension" (sel "check.static" "brand-new-target"))
+
+;; A brand-new manifest registered at runtime wins for its exact target
+;; without any conductor change.
+(define lint-sample
+  (hash "name" "lint-sample"
+        "version" "1.0.0"
+        "bus_role" 0
+        "capabilities" (list "check.static")
+        "target_kinds" (list "aura-redis")
+        "inputs" (list "candidate-patch")
+        "outputs" (list "static-evidence")
+        "required_caps" (list "read")
+        "cost" (hash "wall_ms" 500 "tokens" 0 "cpu_pct" 1)))
+(line "register-extension" (if (hash-ref (manifest:register! lint-sample) "ok" #f) "ok" "bad"))
+(line "extension-exact" (sel "check.static" "aura-redis"))
+
+;; Duplicate names are refused.
+(define dup (manifest:register! (manifest:select "patch.write" "workspace")))
+(line "duplicate" (if (equal? (hash-ref dup "error" "") "duplicate-name") "ok" "bad"))
+
+;; Keep/rollback on a non-judge is refused before registration.
+(define bad-judge
+  (hash "name" "not-a-judge"
+        "version" "1.0.0"
+        "bus_role" 5
+        "capabilities" (list "patch.write")
+        "target_kinds" (list "aura-redis")
+        "inputs" (list "x")
+        "outputs" (list "y")
+        "required_caps" (list "keep")
+        "cost" (hash "wall_ms" 1 "tokens" 0 "cpu_pct" 1)))
+(line "unauthorized" (if (equal? (hash-ref (manifest:validate bad-judge) "error" "") "unauthorized-verdict") "ok" "bad"))
+
+(line "missing-name" (if (equal? (hash-ref (manifest:validate (hash "version" "1.0.0")) "error" "") "bad-name") "ok" "bad"))
+
+(define bad-cap
+  (hash "name" "bad-cap"
+        "version" "1.0.0"
+        "bus_role" 0
+        "capabilities" (list "no.such.capability")
+        "target_kinds" (list "*")
+        "inputs" (list "x")
+        "outputs" (list "y")
+        "required_caps" (list "read")
+        "cost" (hash "wall_ms" 1 "tokens" 0 "cpu_pct" 1)))
+(line "bad-capability" (if (equal? (hash-ref (manifest:validate bad-cap) "error" "") "bad-capabilities") "ok" "bad"))

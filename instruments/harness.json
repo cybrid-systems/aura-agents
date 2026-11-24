@@ -1,0 +1,11 @@
+{
+  "name": "harness-judge",
+  "version": "1.0.0",
+  "bus_role": 2,
+  "capabilities": ["judge.contract-gate", "evidence.verify", "keep.decide", "rollback.decide"],
+  "target_kinds": ["aura-redis", "aura-runner", "service"],
+  "inputs": ["contract", "candidate-evidence", "held-out-evidence"],
+  "outputs": ["gate-evidence", "keep-verdict", "rollback-verdict"],
+  "required_caps": ["read", "publish", "keep", "rollback"],
+  "cost": {"wall_ms": 45000, "tokens": 0, "cpu_pct": 20}
+}

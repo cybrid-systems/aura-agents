@@ -1,0 +1,16 @@
+load=ok
+count=5
+names=harness-judge,memory-curator,patch-worker,perf-observer,static-check
+perf=perf-observer
+harness=harness-judge
+memory=memory-curator
+worker=patch-worker
+static=static-check
+unknown=none
+extension=static-check
+register-extension=ok
+extension-exact=lint-sample
+duplicate=ok
+unauthorized=ok
+missing-name=ok
+bad-capability=ok

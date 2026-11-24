@@ -1,0 +1,11 @@
+{
+  "name": "memory-curator",
+  "version": "1.0.0",
+  "bus_role": 0,
+  "capabilities": ["memory.provenance", "memory.invalidate", "memory.prune"],
+  "target_kinds": ["*"],
+  "inputs": ["score", "gate-evidence"],
+  "outputs": ["experience-node", "invalidation"],
+  "required_caps": ["read", "publish"],
+  "cost": {"wall_ms": 5000, "tokens": 0, "cpu_pct": 2}
+}

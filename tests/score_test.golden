@@ -1,0 +1,15 @@
+compile=ok
+parts=5
+fingerprint=3725536110
+validate=ok
+order=observe,patch,static,judge,memory
+run=done
+verdict=keep
+events=12
+contract-blocked=blocked
+contract-verdict=rollback
+budget=budget-exhausted
+budget-events=3
+cycle=error
+conductor-caps=read,publish
+roundtrip=ok

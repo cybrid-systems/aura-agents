@@ -1,0 +1,11 @@
+{
+  "name": "patch-worker",
+  "version": "1.0.0",
+  "bus_role": 5,
+  "capabilities": ["patch.write", "patch.rehearse", "trial.isolated", "evidence.emit"],
+  "target_kinds": ["aura-redis", "aura-runner", "workspace"],
+  "inputs": ["requirement", "contract", "score-part"],
+  "outputs": ["candidate-patch", "trial-evidence"],
+  "required_caps": ["read", "write", "mutate", "publish"],
+  "cost": {"wall_ms": 120000, "tokens": 200000, "cpu_pct": 30}
+}

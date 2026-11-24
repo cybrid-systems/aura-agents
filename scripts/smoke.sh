@@ -45,3 +45,14 @@ if grep -q 'http-post' "$out"; then
   exit 1
 fi
 echo "smoke=ok"
+
+# #12: the Score/Conductor demo must finish on the mock sections.
+score_out="$(mktemp)"
+if ! aura run demo/score.aura >"$score_out" 2>&1; then
+  echo "score demo failed" >&2
+  cat "$score_out" >&2
+  exit 1
+fi
+grep -q '^score=done$' "$score_out" || { echo "missing score=done" >&2; exit 1; }
+grep -q '^verdict=keep$' "$score_out" || { echo "missing verdict=keep" >&2; exit 1; }
+echo "score-smoke=ok"

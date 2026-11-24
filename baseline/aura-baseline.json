@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "generated_at": "2026-11-24T04:50:00Z",
+  "aura": {
+    "commit_sha": "793b486602e770719548f02efe1c6f905a51a903",
+    "nightly_tag": "nightly",
+    "nightly_updated_at": "2026-11-24T03:50:21Z",
+    "assets": {
+      "linux-x86_64": {
+        "name": "aura-nightly-linux-x86_64.tar.gz",
+        "sha256": "c0d2f7b88cd598a3e91c947ba63a9bc97a78b3820cf5e372f409941dd9ee2c2b"
+      },
+      "linux-arm64": {
+        "name": "aura-nightly-linux-arm64.tar.gz",
+        "sha256": "6deaa418c04c68819a291346955211be069e8cf58ae4ec3778fb1b78ab5fd526"
+      }
+    }
+  },
+  "aura_ci": {
+    "image": "ghcr.io/cybrid-systems/aura-ci",
+    "digest": "sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5",
+    "tag_seen": "latest"
+  },
+  "members": [
+    "cybrid-systems/aura-agents",
+    "cybrid-systems/aura-perf",
+    "cybrid-systems/aura-harness",
+    "cybrid-systems/aura-memory",
+    "cybrid-systems/aura-memory-runtime"
+  ],
+  "stages": [
+    "cybrid-systems/aura-runner",
+    "cybrid-systems/aura-redis"
+  ],
+  "notes": "Aura main green nightly at 793b48660; the asset digests are the GitHub release asset digests. Bump this file only through a reviewed PR; never touch tags or releases."
+}

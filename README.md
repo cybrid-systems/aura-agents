@@ -70,6 +70,36 @@ Planner and worker peers attach as role 0 until [aura#5400](https://github.com/c
 
 The stand-in adapters remain the deterministic default for `aura test`; set `AURA_AGENTS_BUS=real` to probe the kernel's task/approval/gate verbs instead. `lib/graph/ingest.aura` can read a real task timeline with `ingest:from-bus`.
 
+## Orchestra foundation (#11-#13)
+
+`instruments/` declares each section: capability tags, target kinds,
+inputs/outputs, required permissions and a cost profile. `lib/instruments/manifest.aura`
+validates and loads them; the conductor never hard-codes a section name.
+A new section is a manifest plus a peer, no conductor change. Invalid
+permissions (keep/rollback on a non-judge) and duplicate names are refused.
+
+`lib/score.aura` is the Score EDSL: requirement + contract fingerprint +
+budget + parts with dependency edges. `score:compile` turns one sentence
+into a deterministic score through the planner/mock seam; `score:validate`
+checks instruments, cycles and budget; `score:to-json`/`from-json` make it
+auditable. `lib/conductor.aura` runs the parts in topological order over
+the mock sections, journals every transition in `lib/adapt/journal`, and
+stops on a contract failure or budget fuse. Its own permission set is
+`read,publish` — it never holds `keep`/`rollback` and never writes a target
+patch itself.
+
+`baseline/aura-baseline.json` is the orchestra baseline: Aura commit,
+nightly archive SHA256 per arch, and the `aura-ci` image digest.
+`scripts/check-baseline.py --self` is the drift gate used by CI; it refuses
+floating `aura-ci:latest`, a legacy dev image, a missing installer, or a
+different commit/digest. The baseline is updated by a reviewed change, never
+by a tag or release write.
+
+```bash
+aura test
+python3 scripts/check-baseline.py --self
+```
+
 ## Experience graph (#2-#9)
 
 `lib/graph/` is a structured, auditable experience graph built in Aura-native code. It never stores model weights, embeddings or source text.

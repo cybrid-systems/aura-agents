@@ -1,0 +1,113 @@
+;; Conductor (#12): schedule a Score over mock sections, with budget,
+;; contract and audit. The conductor's own permission set is read+publish;
+;; it never calls keep/rollback and never writes a target patch itself.
+
+(require "std/string")
+(require "std/list")
+(require "lib/score")
+(require "lib/instruments/manifest")
+(require "lib/adapt/journal")
+
+(export conductor:run conductor:permissions conductor:reset! conductor:help)
+
+(define (conductor:help)
+  "Conductor: (conductor:run score mode) -> (hash ok state verdict order events); mode ok|contract-fail|budget")
+
+(define (conductor:permissions) '("read" "publish"))
+
+(define (conductor:reset!) (journal:reset!))
+
+(define (con-ensure-registry!)
+  (if (= (manifest:count) 0)
+    (manifest:load-dir "instruments")
+    #t))
+
+(define (con-part-cost part)
+  (let ((m (manifest:select (hash-ref part "capability") (hash-ref part "target_kind"))))
+    (if m (hash-ref (hash-ref m "cost" (hash)) "wall_ms" 1000) 1000)))
+
+(define (con-event! kind part result)
+  (journal:emit! kind 0 1
+                 (hash "summary" (string-append "score " kind)
+                       "facts" (hash "part" part "result" result))))
+
+(define (con-handler part mode)
+  (let ((cap (hash-ref part "capability" "")))
+    (cond
+      ((equal? cap "observe.system-use")
+       (hash "ok" #t "evidence" (hash "metric" "p99" "baseline" 100 "candidate" 100)))
+      ((equal? cap "patch.write")
+       (hash "ok" #t "patch" "candidate" "tasks" (length (hash-ref (hash-ref part "input" (hash)) "tasks" '()))))
+      ((equal? cap "check.static")
+       (hash "ok" #t "static" "clean"))
+      ((equal? cap "judge.contract-gate")
+       (let* ((contract (hash-ref (hash-ref part "input" (hash)) "contract" '()))
+              (p99 (let ((p (assoc "p99" contract))) (if (pair? p) (cadr p) "missing"))))
+         (hash "ok" #t "verdict"
+               (if (or (equal? mode "contract-fail") (not (equal? p99 "ok")))
+                 "rollback" "keep"))))
+      ((equal? cap "memory.provenance")
+       (hash "ok" #t "memory" "recorded"))
+      (else (hash "ok" #f "error" "no-handler")))))
+
+(define (con-run-parts score order mode)
+  (let ((budget (hash-ref score "budget" (hash)))
+        (parts (hash-ref score "parts" '()))
+        (used 0)
+        (fails 0)
+        (verdict ""))
+    (let loop ((os order))
+      (cond
+        ((not (pair? os))
+         (hash "ok" (equal? verdict "keep")
+               "state" (if (equal? verdict "keep") "done" "blocked")
+               "verdict" verdict
+               "used_ms" used))
+        ((>= fails (hash-ref budget "failures" 3))
+         (con-event! "score-budget-stop" "budget" "failures")
+         (hash "ok" #f "state" "budget-exhausted" "verdict" verdict "used_ms" used))
+        (else
+         (let* ((id (car os))
+                (part (score-part-by-id parts id)))
+           (if (not part)
+             (hash "ok" #f "state" "invalid" "verdict" verdict "used_ms" used)
+             (let* ((cost (con-part-cost part))
+                    (next (+ used cost)))
+               (if (> next (hash-ref budget "wall_ms" 0))
+                 (begin
+                   (con-event! "score-budget-stop" id "wall-ms")
+                   (hash "ok" #f "state" "budget-exhausted" "verdict" verdict "used_ms" used))
+                 (begin
+                   (con-event! "score-part-start" id "start")
+                   (let ((r (con-handler part mode)))
+                     (if (hash-ref r "ok" #f)
+                       (begin
+                         (con-event! "score-part-complete" id
+                                     (hash-ref r "verdict" "ok"))
+                         (if (and (equal? id "judge")
+                                  (not (equal? (hash-ref r "verdict" "") "keep")))
+                           (set! verdict "rollback")
+                           (if (equal? verdict "") (set! verdict "keep") #f))
+                         (loop (cdr os)))
+                       (begin
+                         (set! fails (+ fails 1))
+                         (con-event! "score-part-failed" id (hash-ref r "error" "fail"))
+                         (loop (cdr os)))))))))))))))
+
+(define (conductor:run score mode)
+  (con-ensure-registry!)
+  (let ((v (score:validate score (manifest:registry))))
+    (if (not (equal? (car v) "ok"))
+      (hash "ok" #f "state" "invalid" "error" v "events" (journal:events))
+      (let ((order (car (cddr v))))
+        (journal:reset!)
+        (con-event! "score-start" (hash-ref score "id") "start")
+        (let ((r (con-run-parts score order mode)))
+          (con-event! (if (equal? (hash-ref r "state") "done") "score-done" "score-blocked")
+                      (hash-ref score "id") (hash-ref r "state"))
+          (hash "ok" (hash-ref r "ok")
+                "state" (hash-ref r "state")
+                "verdict" (hash-ref r "verdict")
+                "order" order
+                "used_ms" (hash-ref r "used_ms")
+                "events" (journal:events)))))))

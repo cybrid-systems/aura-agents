@@ -1,0 +1,28 @@
+;; Score/Conductor demo (#12): one sentence -> score -> simulated
+;; sections -> verdict, with no network and no real patch.
+(require "lib/score")
+(require "lib/conductor")
+(require "lib/instruments/manifest")
+
+(define (score-line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(manifest:load-dir "instruments")
+(define compiled
+  (score:compile "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。" "mock"))
+(if (not (equal? (car compiled) "ok"))
+  (error "score compile failed")
+  (begin
+    (define s (cadr compiled))
+    (score-line "score-id" (hash-ref s "id"))
+    (score-line "score-parts" (length (hash-ref s "parts")))
+    (score-line "score-fingerprint" (hash-ref s "contract_fingerprint"))
+    (define r (conductor:run s "ok"))
+    (score-line "score" (hash-ref r "state"))
+    (score-line "verdict" (hash-ref r "verdict"))
+    (score-line "score-events" (length (hash-ref r "events")))
+    (if (not (equal? (hash-ref r "state") "done"))
+      (error "score did not finish"))))
