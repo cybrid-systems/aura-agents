@@ -32,8 +32,8 @@ worker.aura processes (each claims, executes its task fixture, heartbeats,
 reports contract evidence and completes), verifies the board and audit replay
 with verify.aura, then builds, tests, compares p99 and opens the PR. The
 worker actions are deterministic fixtures (the mock-LLM discipline): the
-demo proves the bus workflow, not code synthesis. Set AURA_DEMO_WORKERS to
-4-6 and AURA_DEMO_TASKS to the matching task count.
+demo proves the bus workflow, not code synthesis. The shipped fixture uses four tasks; AURA_DEMO_WORKERS may be 4-6
+(extra workers drain and exit).
 
 ## Quick start
 
