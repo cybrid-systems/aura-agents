@@ -1,0 +1,5 @@
+ld.so 42 [000] 100.000000: sched:sched_switch: prev_comm=ld.so prev_pid=42 prev_prio=120 prev_state=S ==> next_comm=swapper/0 next_pid=0 next_prio=120
+	    ffff leaf+0x10 (/tmp/aura)
+	    ffff main+0x20 (/tmp/aura)
+
+ld.so 42 [000] 100.001000: sched:sched_switch: prev_comm=swapper/0 prev_pid=0 prev_prio=120 prev_state=R ==> next_comm=ld.so next_pid=42 next_prio=120

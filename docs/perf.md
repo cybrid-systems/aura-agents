@@ -80,17 +80,19 @@ If `perf` is absent the plan is `perf-missing` with the current tier.
 `overhead_pct` / `command` / `dso` / `symbol` rows. The symbol keeps
 spaces (C++ and Lisp names both do).
 
-`(perf:offcpu-plan-with tools pid seconds)` chooses
-`offcputime-bpfcc` when bpftrace is usable and `perf sched record`
-otherwise; with neither it is `offcpu-unavailable`, never a fabricated
-stack. On this host bpftrace is root-only and tracefs is root-only, so
-the stack-level off-CPU path is blocked; `scripts/proc_schedstat.py`
-reports the external runqueue/context-switch floor instead.
+`(perf:offcpu-plan-with tools pid seconds)` keeps the BPF/`perf sched`
+plan surface. When root is available, `scripts/perf-live.sh` uses the
+direct tracepoint path instead: `perf record -e sched:sched_switch -g -a`
+captures both switch-out and switch-in, and `scripts/perf_offcpu.py`
+attributes the window to the stack captured at switch-out. That is a
+time-weighted off-CPU flamegraph. `scripts/proc_schedstat.py` remains the
+non-root `/proc` floor (runqueue wait + context switches).
 
 `(perf:flamegraph-plan-with tools)` returns the self-contained pipeline:
-`perf script` -> `scripts/perf_flamegraph.py` -> folded stacks + static
-SVG. The CI image has no Perl `flamegraph.pl`, so the Python renderer is
-the supported path.
+`perf script` -> `scripts/perf_flamegraph.py` for on-CPU and
+`scripts/perf_offcpu.py` for off-CPU -> folded stacks + static SVG. The
+CI image has no Perl `flamegraph.pl`, so the Python renderers are the
+supported path.
 
 ## Live external evidence
 
@@ -106,28 +108,39 @@ modified; the script owns all load.
 - `perf report --stdio --no-children` gives top symbols;
 - `perf script` is collapsed by `scripts/perf_flamegraph.py` into folded
   stacks and a static SVG (no Perl flamegraph dependency);
+- with root tracefs (`AURA_SUDO_PASS_FILE`, default `$HOME/keys/sudo`),
+  `perf record -e sched:sched_switch -g -a` -> `perf_offcpu.py` produces
+  the time-weighted off-CPU stacks and SVG;
 - `scripts/proc_schedstat.py` samples per-task runqueue wait and
-  voluntary/involuntary context switches as the off-CPU floor.
+  voluntary/involuntary context switches as the non-root floor.
 
 Artifacts land in `out/perf/`: `*-oncpu.data`, `*-report.txt`,
-`*-oncpu.script`, `*-oncpu.folded`, `*-oncpu.svg`, `*-offcpu.json`,
-`live-evidence.json`. The script fails closed when perf is unavailable.
+`*-oncpu.script`, `*-oncpu.folded`, `*-oncpu.svg`, `offcpu.data`,
+`*-offcpu.folded`, `*-offcpu.svg`, `*-offcpu.json`,
+`live-evidence.json`. The script fails closed when perf or tracefs access
+is unavailable; the sudo password file is read only, never written to the
+repo.
 
 Real run on this workstation (12 s, 8 concurrent runner clients, 50k
 Redis commands):
 
 ```
 perf-mode=perf-only  blocked=[bpftrace root-required]
-runner samples 594: reclaim_tw_unreachable 25.6%, file_reclaim_mark_value 17.7%
-redis  samples 215: sock_def_readable 27.0%, arch_counter_get_cntvct 6.5%
-runner off-CPU: run 6006 ms, runqueue wait 0.13 ms, 102 voluntary / 17 involuntary switches
-redis  off-CPU: run 576 ms, runqueue wait 1.80 ms, 51010 voluntary switches
+runner samples 617: reclaim_tw_unreachable 25-27%, file_reclaim_mark_value ~18%
+redis  samples 260: sock_def_readable ~26%, arch_counter_get_cntvct ~7%
+runner off-CPU stacks: 76.8 ms, top frames are evaluator / poll paths
+redis  off-CPU stacks: 10555 ms, top
+  ar_core_serve_forever;serve_once;epoll_pwait ...
+  event_base_loop;__poll ...
+runner /proc floor: run 5986 ms, runqueue wait 0.25 ms, 202/22 switches
+redis  /proc floor: run 543 ms, runqueue wait 1.48 ms, 51012 switches
 ```
 
 The runner hotspot is the evaluator's value reclamation, not game code;
-that is an Aura-runtime finding, not a target patch. Stack-level off-CPU
-flamegraphs remain unavailable here because bpftrace is root-only and
-tracefs is root-only; the script reports the `/proc` floor instead.
+that is an Aura-runtime finding, not a target patch. The redis off-CPU
+flamegraph is dominated by its epoll wait loop, which is the expected
+idle-server shape; the runner off-CPU total is tiny because it is mostly
+on-CPU.
 
 Point both scripts at local checkouts:
 
@@ -135,9 +148,14 @@ Point both scripts at local checkouts:
 AURA_BIN=/path/to/aura \
 AURA_REDIS_BIN=/path/to/aura_redis_server \
 AURA_RUNNER_DIR=/path/to/aura-runner \
+AURA_SUDO_PASS_FILE=$HOME/keys/sudo \
 bash scripts/live-acceptance.sh
 bash scripts/perf-live.sh
 ```
+
+`AURA_SUDO_PASS_FILE` is optional: without it the script still records
+on-CPU and `/proc` off-CPU, and prints `offcpu-stack=blocked` for the
+stack-level off-CPU artifacts.
 
 ## Evidence-only peer
 

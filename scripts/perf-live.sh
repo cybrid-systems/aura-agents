@@ -23,6 +23,7 @@ REDIS_BIN="${AURA_REDIS_BIN:-$HOME/aura-redis/native/build/aura_redis_server}"
 DURATION="${AURA_PERF_SECONDS:-12}"
 REDIS_FREQ="${AURA_PERF_REDIS_FREQ:-499}"
 OUT="${AURA_PERF_OUT:-out/perf}"
+SUDO_PASS_FILE="${AURA_SUDO_PASS_FILE:-$HOME/keys/sudo}"
 
 mkdir -p "$OUT"
 if ! command -v perf >/dev/null 2>&1; then
@@ -80,6 +81,10 @@ PY
 listener_pid() {
   ss -ltnp "sport = :$1" 2>/dev/null \
     | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+sudo_run() {
+  printf '%s\n' "$(cat "$SUDO_PASS_FILE")" | sudo -S -p '' "$@"
 }
 
 redis_port="$(pick_port "${AURA_LIVE_REDIS_PORT:-26499}")"
@@ -143,6 +148,21 @@ perf record -F "$REDIS_FREQ" -g -p "$redis_pid" -o "$OUT/redis-oncpu.data" \
   -- sleep "$DURATION" >"$OUT/redis-perf.log" 2>&1 &
 perf_redis=$!
 
+# Off-CPU stacks need root tracefs/BPF. Record system-wide sched_switch
+# and filter both switch-out and switch-in in perf_offcpu.py; a filtered
+# record with -p only sees switch-out and cannot close a window.
+OFFCPU_STACK=0
+perf_sched=""
+if [[ -r "$SUDO_PASS_FILE" ]] && sudo_run true >/dev/null 2>&1; then
+  sudo_run rm -f "$OUT/offcpu.data" "$OUT/offcpu.data.old" 2>/dev/null || true
+  sudo_run perf record -e sched:sched_switch -g -a -o "$OUT/offcpu.data" \
+    -- sleep "$DURATION" >"$OUT/offcpu-record.log" 2>&1 &
+  perf_sched=$!
+  OFFCPU_STACK=1
+else
+  echo "perf-live: offcpu-stack=blocked reason=sudo-unavailable"
+fi
+
 # Give perf record a moment to attach, then drive both real targets with
 # a long enough Redis phase to sample it while it is on CPU.
 sleep 1
@@ -156,6 +176,12 @@ wait "$perf_runner"
 wait "$perf_redis"
 wait "$offcpu_runner"
 wait "$offcpu_redis"
+if [[ -n "$perf_sched" ]]; then
+  if ! wait "$perf_sched"; then
+    OFFCPU_STACK=0
+    echo "perf-live: offcpu-stack=blocked reason=sched-record-failed"
+  fi
+fi
 
 for target in runner redis; do
   perf report -i "$OUT/$target-oncpu.data" --stdio --no-children \
@@ -168,6 +194,27 @@ for target in runner redis; do
     --svg "$OUT/$target-oncpu.svg" \
     --title "aura-$target on-CPU"
 done
+
+if [[ "$OFFCPU_STACK" == 1 ]]; then
+  for target in runner redis; do
+    pid_var="${target}_pid"
+    if ! sudo_run perf script -i "$OUT/offcpu.data" 2>/dev/null \
+      | python3 scripts/perf_offcpu.py --script - --pid "${!pid_var}" \
+          --folded "$OUT/$target-offcpu.folded" \
+          --svg "$OUT/$target-offcpu.svg" \
+          --drop-unknown \
+          --title "aura-$target off-CPU"; then
+      echo "perf-live: offcpu-stack=blocked target=$target"
+      OFFCPU_STACK=0
+    fi
+  done
+  if [[ "$OFFCPU_STACK" == 1 ]]; then
+    echo "perf-live: offcpu-stack=ok"
+  fi
+  sudo_run chown "$(id -u):$(id -g)" "$OUT/offcpu.data" 2>/dev/null || true
+else
+  echo "perf-live: offcpu-stack=blocked"
+fi
 
 AURA_PERF_RUNNER_REPORT="$OUT/runner-report.txt" \
 AURA_PERF_REDIS_REPORT="$OUT/redis-report.txt" \

@@ -495,7 +495,7 @@
   (if (hash-ref tools "perf" #f)
     (hash "ok" #t
           "on_cpu" "perf script -i out/perf.data > out/oncpu.script && python3 scripts/perf_flamegraph.py --script out/oncpu.script --folded out/oncpu.folded --svg out/oncpu.svg"
-          "off_cpu" "stack-level off-CPU needs tracefs/BPF; use scripts/proc_schedstat.py for runqueue wait and context switches"
+          "off_cpu" "perf record -e sched:sched_switch -g -a -o out/offcpu.data -- sleep N (root); perf script | python3 scripts/perf_offcpu.py --script - --pid PID"
           "off_cpu_floor" "python3 scripts/proc_schedstat.py --pid PID --seconds N")
     (hash "ok" #f "error" "perf-missing")))
 
