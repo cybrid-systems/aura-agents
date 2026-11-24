@@ -139,8 +139,14 @@ enemy score, base loss, two levels and clear-win, with no renderer or
 external IO. `tests/game_arena_test.aura` runs the real `arena:step`
 through the contract for every core rule.
 
-COW worldlines and N-fiber parallel rehearsal are #24/#28/#29; this is
-the per-frame contract and single-worldline state machine they call.
+`lib/game/loop.aura` is the N-fiber rehearsal: every candidate gets a
+deep-copied root, runs its pure `step` through `game:run`, and the loop
+returns per-candidate results plus one winner. `loop:commit` is the hook
+for `mutate :rebind`; no candidate writes a file. Docs: `docs/game-loop.md`.
+
+COW snapshot/restore and the live hot swap itself are #24/#28/#29 work;
+this is the per-frame contract, single-worldline state machine and the
+in-memory rehearsal/selection they call.
 
 ## Experience graph (#2-#9)
 

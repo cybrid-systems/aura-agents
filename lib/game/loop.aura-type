@@ -1,0 +1,5 @@
+loop:rehearse: Any Any Any Any -> Any
+loop:commit: Any Any -> Any
+loop:copy: Any -> Any
+loop:best: Any -> Any
+loop:help: -> Any

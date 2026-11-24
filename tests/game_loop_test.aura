@@ -1,0 +1,44 @@
+;; Issue #24/#29 — N-fiber rehearsal over independent deep-copied root
+;; states, one winner, no file writes.
+(require "std/string")
+(require "std/list")
+(require "lib/game/arena")
+(require "lib/game/assert")
+(require "lib/game/loop")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (find-result results id)
+  (let loop ((xs results))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define root (arena:new (hash "seed" 42 "players" 1)))
+(define frozen-step (lambda (state input) (arena:step state (hash))))
+(define candidates
+  (list (hash "id" "normal" "step" arena:step)
+        (hash "id" "frozen" "step" frozen-step)))
+(define ids (list "state-advance" "score-lives" "frame-budget"
+                  "visual-keyframe" "move-right"))
+(define run (loop:rehearse root candidates (list (hash "move" "right")) ids))
+
+(line "winner" (hash-ref run "winner"))
+(line "results" (length (hash-ref run "results" '())))
+(define normal (find-result (hash-ref run "results" '()) "normal"))
+(define frozen (find-result (hash-ref run "results" '()) "frozen"))
+(line "normal-ok" (hash-ref normal "ok"))
+(line "normal-x" (hash-ref (hash-ref (hash-ref normal "state") "player") "x"))
+(line "frozen-ok" (hash-ref frozen "ok"))
+(line "frozen-x" (hash-ref (hash-ref (hash-ref frozen "state") "player") "x"))
+(line "root-x" (hash-ref (hash-ref root "player") "x"))
+
+(define committed (hash "state" #f))
+(loop:commit (lambda (s) (hash-set! committed "state" s)) run)
+(line "commit-x" (hash-ref (hash-ref (hash-ref committed "state") "player") "x"))
+
+(line "no-candidates" (hash-ref (loop:rehearse root '() '() ids) "error"))
