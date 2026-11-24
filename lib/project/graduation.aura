@@ -1,0 +1,215 @@
+;; Graduation and handoff (#34): a green-field repository leaves the
+;; conductor only after N unattended, evidence-backed rounds with the
+;; sentinel untouched and the red lines intact. After handoff the
+;; conductor keeps inception, major-upgrade and help, plus a bounded
+;; takeover; daily dispatch is refused.
+;;
+;; Pure state. It does not create a repo, PR, tag or release. The caller
+;; executes the returned dispatch/escalation actions.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+(require "lib/project/redline")
+
+(export graduation:policy graduation:new graduation:record-run!
+        graduation:eligible? graduation:handoff graduation:dispatch
+        graduation:escalate graduation:tick graduation:status
+        graduation:report graduation:audit graduation:help)
+
+(define (graduation:help)
+  "Graduation (#34): (graduation:new opts); (graduation:record-run! s run); (graduation:handoff s opts); (graduation:dispatch s req); (graduation:escalate s req now); (graduation:tick s now)")
+
+(define (gr-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (gr-num h k d) (let ((v (gr-get h k d))) (if (number? v) v d)))
+(define (gr-str h k d) (let ((v (gr-get h k d))) (if (string? v) v d)))
+(define (gr-list h k) (let ((v (gr-get h k '()))) (if (list? v) v '())))
+(define (gr-true? h k) (eq? (gr-get h k #f) #t))
+
+(define (graduation:policy)
+  (hash "rounds" 3
+        "takeover_ms" 3600000
+        "required"
+        (list "conductor_absent" "evidence_pr" "canary"
+              "sentinel_untouched" "redlines_ok" "budget_active")
+        "escalation" (list "inception" "major-upgrade" "stuck")))
+
+(define (gr-baseline)
+  (let ((v (try (json-parse (read-file "baseline/aura-baseline.json"))
+                (catch (e) #f))))
+    (if (hash? v) v (hash))))
+
+(define (gr-audit! s event)
+  (hash-set! s "audit" (cons event (gr-list s "audit")))
+  s)
+
+(define (graduation:new opts)
+  (let* ((o (if (hash? opts) opts (hash)))
+         (policy (graduation:policy))
+         (rounds (let ((n (gr-num o "rounds" (gr-num policy "rounds" 3))))
+                   (if (> n 0) n 3)))
+         (takeover (let ((n (gr-num o "takeover_ms"
+                                    (gr-num policy "takeover_ms" 3600000))))
+                     (if (> n 0) n 3600000))))
+    (hash "kind" "graduation"
+          "status" "incubating"
+          "required_rounds" rounds
+          "takeover_ms" takeover
+          "runs" '()
+          "handoff" #f
+          "takeover" #f
+          "audit" '())))
+
+(define (gr-good? run)
+  (and (gr-true? run "conductor_absent")
+       (gr-true? run "evidence_pr")
+       (gr-true? run "canary")
+       (gr-true? run "sentinel_untouched")
+       (gr-true? run "redlines_ok")
+       (gr-true? run "budget_active")))
+
+(define (gr-good-runs s)
+  (filter gr-good? (gr-list s "runs")))
+
+(define (graduation:record-run! s run)
+  (cond
+    ((not (hash? s)) s)
+    ((not (hash? run))
+     (gr-audit! s (hash "event" "run-refused" "reason" "not-a-run")))
+    ((or (not (string? (gr-str run "id" #f))) (string=? (gr-str run "id" "") ""))
+     (gr-audit! s (hash "event" "run-refused" "reason" "missing-id")))
+    (else
+     (let* ((why (cond ((not (gr-true? run "conductor_absent")) "conductor-present")
+                       ((not (gr-true? run "evidence_pr")) "no-evidence-pr")
+                       ((not (gr-true? run "canary")) "canary-failed")
+                       ((not (gr-true? run "sentinel_untouched")) "sentinel-touched")
+                       ((not (gr-true? run "redlines_ok")) "redline-breach")
+                       ((not (gr-true? run "budget_active")) "budget-inactive")
+                       (else #f)))
+            (row (hash "id" (gr-str run "id" "")
+                       "conductor_absent" (gr-true? run "conductor_absent")
+                       "evidence_pr" (gr-true? run "evidence_pr")
+                       "canary" (gr-true? run "canary")
+                       "sentinel_untouched" (gr-true? run "sentinel_untouched")
+                       "redlines_ok" (gr-true? run "redlines_ok")
+                       "budget_active" (gr-true? run "budget_active")
+                       "pr" (gr-get run "pr" #f)
+                       "evidence" (gr-get run "evidence" ""))))
+       (hash-set! s "runs" (append (gr-list s "runs") (list row)))
+       (gr-audit! s (hash "event" (if why "run-rejected" "run-accepted")
+                          "id" (gr-str run "id" "")
+                          "reason" (if why why "all-conditions-hold")))))))
+
+(define (graduation:eligible? s)
+  (>= (length (gr-good-runs s)) (gr-num s "required_rounds" 3)))
+
+(define (gr-merge-ok? opts)
+  (let ((merge (gr-get opts "merge" #f)))
+    (if (not (hash? merge))
+      "merge-evidence-required"
+      (let ((r (redline:check (hash "kind" "merge" "merge" merge))))
+        (if (gr-get r "ok" #f) #f (gr-str r "reason" "merge-refused"))))))
+
+(define (graduation:handoff s opts)
+  (let* ((o (if (hash? opts) opts (hash)))
+         (why (cond
+                ((not (graduation:eligible? s)) "not-enough-unattended-rounds")
+                ((not (gr-str o "sentinel_fingerprint" #f)) "sentinel-fingerprint-required")
+                (else (gr-merge-ok? o)))))
+    (if why
+      (hash "ok" #f "reason" why "state" s)
+      (let* ((baseline (gr-baseline))
+             (aura (gr-get baseline "aura" (hash)))
+             (ci (gr-get baseline "aura_ci" (hash)))
+             (good (gr-good-runs s))
+             (report
+               (hash "kind" "graduation-report"
+                     "status" "graduated"
+                     "seed_version" (gr-str o "seed_version" "1.0.0")
+                     "aura_commit" (gr-get aura "commit_sha" "")
+                     "aura_ci_digest" (gr-get ci "digest" "")
+                     "sentinel_fingerprint" (gr-str o "sentinel_fingerprint" "")
+                     "rounds" (length good)
+                     "required_rounds" (gr-num s "required_rounds" 3)
+                     "round_ids" (map (lambda (r) (gr-str r "id" "")) good)
+                     "prs" (filter (lambda (x) x)
+                                   (map (lambda (r) (gr-get r "pr" #f)) good))
+                     "risks" (gr-list o "risks")
+                     "redlines" (redline:policy)
+                     "daily_dispatch" #f
+                     "tag" #f
+                     "release" #f)))
+        (hash-set! s "status" "graduated")
+        (hash-set! s "handoff" report)
+        (gr-audit! s (hash "event" "graduated"
+                           "rounds" (length good)
+                           "sentinel" (gr-str o "sentinel_fingerprint" "")))
+        (hash "ok" #t "report" report "state" s)))))
+
+(define (gr-escalation? kind)
+  (let loop ((xs (gr-list (graduation:policy) "escalation")))
+    (cond ((not (pair? xs)) #f)
+          ((equal? kind (car xs)) #t)
+          (else (loop (cdr xs))))))
+
+(define (graduation:dispatch s req)
+  (let ((kind (gr-str req "kind" "feature"))
+        (status (gr-str s "status" "")))
+    (cond
+      ((equal? status "takeover")
+       (hash "ok" #t "route" "takeover" "kind" kind
+             "expires_ms" (gr-num (gr-get s "takeover" (hash)) "expires_ms" 0)))
+      ((not (equal? status "graduated"))
+       (hash "ok" #t "route" "incubator" "kind" kind))
+      ((gr-escalation? kind)
+       (hash "ok" #t "route" "escalation" "kind" kind
+             "hint" "use-graduation:escalate"))
+      (else
+       (hash "ok" #f "route" "graduated" "kind" kind
+             "error" "daily-dispatch-refused"
+             "hint" "escalation-required")))))
+
+(define (graduation:escalate s req now_ms)
+  (let ((kind (gr-str req "kind" ""))
+        (now (if (number? now_ms) now_ms 0)))
+    (cond
+      ((not (graduation:eligible? s))
+       (hash "ok" #f "error" "not-graduated"))
+      ((not (gr-escalation? kind))
+       (hash "ok" #f "error" "not-an-escalation" "kind" kind))
+      ((equal? (gr-str s "status" "") "takeover")
+       (hash "ok" #f "error" "takeover-active"))
+      (else
+       (let* ((limit (gr-num s "takeover_ms" 3600000))
+              (takeover (hash "kind" kind
+                              "reason" (gr-str req "reason" "")
+                              "started_ms" now
+                              "expires_ms" (+ now limit)
+                              "limit_ms" limit)))
+         (hash-set! s "status" "takeover")
+         (hash-set! s "takeover" takeover)
+         (gr-audit! s (hash "event" "takeover-started" "kind" kind
+                            "expires_ms" (+ now limit)))
+         (hash "ok" #t "takeover" takeover "state" s))))))
+
+(define (graduation:tick s now_ms)
+  (let ((now (if (number? now_ms) now_ms 0)))
+    (cond
+      ((not (equal? (gr-str s "status" "") "takeover")) s)
+      ((>= now (gr-num (gr-get s "takeover" (hash)) "expires_ms" 0))
+       (hash-set! s "status" "graduated")
+       (hash-set! s "takeover" #f)
+       (gr-audit! s (hash "event" "takeover-expired" "at_ms" now)))
+      (else s))))
+
+(define (graduation:status s) (gr-str s "status" "incubating"))
+(define (graduation:audit s) (reverse (gr-list s "audit")))
+
+(define (graduation:report s)
+  (hash "status" (graduation:status s)
+        "eligible" (graduation:eligible? s)
+        "good_rounds" (length (gr-good-runs s))
+        "required_rounds" (gr-num s "required_rounds" 3)
+        "handoff" (gr-get s "handoff" #f)
+        "takeover" (gr-get s "takeover" #f)
+        "audit" (length (gr-list s "audit"))))

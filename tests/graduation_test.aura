@@ -1,0 +1,83 @@
+;; Issue #34 — graduation only after N unattended, evidence-backed runs
+;; with the sentinel untouched; after handoff daily dispatch is refused,
+;; a bounded escalation works and expires.
+(require "std/string")
+(require "lib/project/graduation")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (run id ok)
+  (hash "id" id
+        "conductor_absent" ok
+        "evidence_pr" ok
+        "canary" ok
+        "sentinel_untouched" ok
+        "redlines_ok" ok
+        "budget_active" ok
+        "pr" (if ok (+ 100 (string-length id)) #f)
+        "evidence" (if ok "ci-ok" "ci-failed")))
+
+(define (merge-good)
+  (hash "branch_protected" #t "required_checks" #t
+        "force" #f "admin" #f "direct" #f))
+
+(define s (graduation:new (hash "rounds" 3 "takeover_ms" 5000)))
+(line "initial" (graduation:status s))
+(graduation:record-run! s (run "r1" #t))
+(graduation:record-run! s (run "r2" #t))
+(line "two-good" (graduation:eligible? s))
+(graduation:record-run! s (run "r3" #f))
+(line "three-runs-two-good" (graduation:eligible? s))
+(graduation:record-run! s (run "r4" #t))
+(line "eligible" (graduation:eligible? s))
+(line "reject-audited" (length (filter (lambda (e) (equal? (hash-ref e "event") "run-rejected"))
+                                       (graduation:audit s))))
+
+(define bad (graduation:new (hash "rounds" 1)))
+(graduation:record-run! bad (hash "id" "s2" "conductor_absent" #t
+                                  "evidence_pr" #t "canary" #t
+                                  "sentinel_untouched" #f
+                                  "redlines_ok" #t "budget_active" #t))
+(line "sentinel-touch-blocks" (graduation:eligible? bad))
+(line "no-handoff" (hash-ref (graduation:handoff bad (hash "sentinel_fingerprint" "fp")) "ok"))
+
+(define h (graduation:handoff s (hash "sentinel_fingerprint" "fp-1"
+                                      "seed_version" "1.0.0"
+                                      "merge" (merge-good)
+                                      "risks" (list "none"))))
+(line "handoff-ok" (hash-ref h "ok"))
+(line "handoff-report" (hash-ref (hash-ref h "report") "kind"))
+(line "handoff-status" (graduation:status s))
+(line "handoff-tag" (hash-ref (hash-ref h "report") "tag"))
+(line "handoff-release" (hash-ref (hash-ref h "report") "release"))
+(line "handoff-daily" (hash-ref (hash-ref h "report") "daily_dispatch"))
+(line "handoff-rounds" (hash-ref (hash-ref h "report") "rounds"))
+
+(line "dispatch-feature" (hash-ref (graduation:dispatch s (hash "kind" "feature")) "ok"))
+(line "dispatch-feature-error" (hash-ref (graduation:dispatch s (hash "kind" "feature")) "error"))
+(line "dispatch-inception" (hash-ref (graduation:dispatch s (hash "kind" "inception")) "ok"))
+(line "dispatch-inception-route" (hash-ref (graduation:dispatch s (hash "kind" "inception")) "route"))
+
+(define e (graduation:escalate s (hash "kind" "stuck" "reason" "sentinel") 1000))
+(line "escalate-ok" (hash-ref e "ok"))
+(line "escalate-status" (graduation:status s))
+(line "escalate-expires" (hash-ref (hash-ref e "takeover") "expires_ms"))
+(line "takeover-dispatch" (hash-ref (graduation:dispatch s (hash "kind" "feature")) "route"))
+(graduation:tick s 5999)
+(line "before-expiry" (graduation:status s))
+(graduation:tick s 6000)
+(line "after-expiry" (graduation:status s))
+(line "expired-takeover" (hash-ref s "takeover"))
+(line "dispatch-after" (hash-ref (graduation:dispatch s (hash "kind" "feature")) "ok"))
+(line "audit-events" (length (graduation:audit s)))
+
+(define bad-merge (graduation:handoff s (hash "sentinel_fingerprint" "fp-1"
+                                               "merge" (hash "branch_protected" #t
+                                                             "required_checks" #t
+                                                             "force" #t))))
+(line "force-merge-refused" (hash-ref bad-merge "ok"))
+(line "force-merge-reason" (hash-ref bad-merge "reason"))
