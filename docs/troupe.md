@@ -71,10 +71,14 @@ same 8-client external load:
 | 3 | 16 | 10 | 6842 | 5258 |
 
 `first_wish` fell from 7/6/5 ms to 4/5/4 ms; over-budget stayed 0; the
-runner's own 32 tests pass on the new binary. `scripts/fixtures/troupe_canary_5433.aura`
-runs the existing `troupe:cycle` over these measured values and returns
-`delivered` with `pipeline=open-pr`, `merge=auto-merge`, `canary=keep`.
-The real merge is the Aura PR, not a fake target patch.
+runner's own 32 tests pass on the new binary. After rebasing the fix onto
+`e53037cdb`, two more canary runs gave old/new p99 15/10 and 14/9 ms,
+old/new `run_ms` 6660/4382 and 6499/4498, and first-wish 7/3 and 6/3.
+
+`scripts/fixtures/troupe_canary_5433.aura` runs the existing
+`troupe:cycle` over these measured values and returns `delivered` with
+`pipeline=open-pr`, `merge=auto-merge`, `canary=keep`. The real change is
+the Aura main commit `9dc4ee988`, not a fake target patch.
 
 ## Tests
 
