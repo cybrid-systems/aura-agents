@@ -100,4 +100,12 @@ for marker in \
     exit 1
   fi
 done
+for prefix in perf-mode= perf-degraded= perf-blocked= perf-usable= \
+  perf-cpu-util= perf-ss= perf-tcp= perf-hypotheses=; do
+  if ! grep -q "^${prefix}" "$out"; then
+    echo "live-acceptance: missing USE field $prefix" >&2
+    tail -n 30 "$out" >&2 || true
+    exit 1
+  fi
+done
 echo "live-acceptance=ok"

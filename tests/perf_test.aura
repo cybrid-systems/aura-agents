@@ -1,6 +1,7 @@
 ;; Issue #14 — Perf section: external-only USE parsing and honest
 ;; capability tiers. Pure fixture strings; no target instrumentation.
 (require "std/string")
+(require "std/list")
 (require "lib/perf/observe")
 
 (define (line k v)
@@ -14,11 +15,50 @@
 (line "cpu-util" (perf:cpu-util stat0 stat1))
 (line "mem-used" (perf:mem-used-pct "MemTotal: 1000 kB\nMemAvailable: 400 kB\n"))
 
-(define net "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n  eth0: 500 2 0 0 0 0 0 0 700 3 0 0 0 0 0 0\n")
+(define net "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n  eth0: 500 2 1 4 0 0 0 0 700 3 2 5 0 0 0 0\n")
 (define n (perf:net-sum net))
 (line "net-rx" (hash-ref n "rx_bytes"))
 (line "net-tx" (hash-ref n "tx_bytes"))
+(line "net-rx-err" (hash-ref n "rx_errors"))
+(line "net-tx-err" (hash-ref n "tx_errors"))
+(line "net-rx-drop" (hash-ref n "rx_dropped"))
+(line "net-tx-drop" (hash-ref n "tx_dropped"))
 (line "pressure" (hash-ref (perf:pressure "some avg10=1.25 avg60=0.50 avg300=0.10 total=42\n") "avg10"))
+
+(define ss (perf:ss-summary "Total: 734\nTCP:   20 (estab 3, closed 10, orphaned 1, timewait 6)\nUDP:   10 4\n"))
+(line "ss-total" (hash-ref ss "total"))
+(line "ss-tcp" (hash-ref ss "tcp"))
+(line "ss-estab" (hash-ref ss "estab"))
+(line "ss-timewait" (hash-ref ss "timewait"))
+
+(define disk (perf:disk-sum "   8       0 sda 100 0 2000 50 200 0 4000 60 0 80 110 0 0 0 0\n   7       0 loop0 1 0 8 0 0 0 0 0 0 0 0 0 0 0 0\n"))
+(line "disk-reads" (hash-ref disk "reads"))
+(line "disk-writes" (hash-ref disk "writes"))
+(line "disk-sectors-r" (hash-ref disk "sectors_read"))
+(line "disk-sectors-w" (hash-ref disk "sectors_written"))
+
+(define snmp "Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts\nTcp: 1 200 120000 -1 10 20 0 0 5 100 200 7 2 3\n")
+(define tcp (perf:tcp-snmp snmp))
+(line "tcp-retrans" (hash-ref tcp "retrans"))
+(line "tcp-in-errors" (hash-ref tcp "in_errors"))
+(line "tcp-out-rsts" (hash-ref tcp "out_rsts"))
+
+(define blocked (perf:blocked-probes (hash "perf" #t "bpftrace" #t "ss" #t)
+                                     (hash "perf" #f "bpftrace" #f "ss" #t)
+                                     3))
+(line "blocked-count" (length blocked))
+(line "blocked-tool" (hash-ref (car blocked) "tool"))
+
+(define hints (perf:hypotheses
+                (hash "capabilities" (hash "blocked" (list (hash "tool" "perf")))
+                      "cpu_util_pct" 91.0
+                      "mem_used_pct" 50.0
+                      "cpu_pressure" (hash "avg10" 25.0)
+                      "net" (hash "rx_errors" 0 "tx_errors" 0)
+                      "tcp" (hash "retrans" 0)
+                      "ss" (hash "timewait" 0))))
+(line "hints-count" (length hints))
+(line "hint-cpu" (hash-ref (car (filter (lambda (h) (equal? (hash-ref h "signal") "cpu-util")) hints)) "signal"))
 
 (line "full-ebpf" (perf:classify (hash "perf" #t "bpftrace" #t "proc" #t "paranoid" 1)))
 (line "perf-only" (perf:classify (hash "perf" #t "bpftrace" #f "proc" #t "paranoid" 2)))
@@ -30,7 +70,7 @@
 (line "unknown-tier" (hash-ref (perf:require-evidence "proc-stat-only" "magic") "ok"))
 
 (define report (perf:report))
-(line "report" (if (and (hash? report) (equal? (hash-ref report "source") "external-only:/proc")) "ok" "bad"))
+(line "report" (if (and (hash? report) (string-prefix? (hash-ref report "source" "") "external-only:")) "ok" "bad"))
 (line "probe" (if (hash? (perf:probe)) "ok" "bad"))
 
 (define ev (perf:evidence))

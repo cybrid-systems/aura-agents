@@ -7,10 +7,11 @@
 (require "std/io")
 (require "std/process")
 
-(export perf:probe perf:classify perf:require-evidence perf:report
-        perf:evidence perf:top-symbols perf:offcpu-plan-with
+(export perf:probe perf:classify perf:blocked-probes perf:require-evidence
+        perf:report perf:evidence perf:top-symbols perf:offcpu-plan-with
         perf:flamegraph-plan-with perf:cpu-util perf:mem-used-pct
-        perf:net-sum perf:pressure perf:profile-plan perf:help)
+        perf:net-sum perf:pressure perf:ss-summary perf:disk-sum
+        perf:tcp-snmp perf:hypotheses perf:profile-plan perf:help)
 
 (define (perf:help)
   "Perf section: (perf:probe) -> capabilities; (perf:report) -> USE snapshot; (perf:require-evidence mode 'ebpf) fails closed when unsupported")
@@ -26,6 +27,22 @@
 (define (perf-readable? path)
   (let ((v (try (read-file path) (catch (e) #f))))
     (string? v)))
+
+; Installed is not usable. perf with perf_event_paranoid=3 and bpftrace
+; without root both report a clear refusal; capture it instead of calling
+; the tool present and advertising an evidence tier it cannot deliver.
+(define (perf-command-ok? cmd)
+  (let ((code (try (shell (string-append cmd " >/dev/null 2>&1"))
+                   (catch (e) 1))))
+    (eq? code 0)))
+
+(define (perf-blocked-reason tool paranoid)
+  (cond
+    ((equal? tool "perf")
+     (string-append "perf_event_paranoid=" (number->string paranoid)
+                    " (CAP_PERFMON/CAP_SYS_ADMIN required)"))
+    ((equal? tool "bpftrace") "root-required")
+    (else "command-failed")))
 
 (define (perf-paranoid)
   (let ((v (try (read-file "/proc/sys/kernel/perf_event_paranoid") (catch (e) #f))))
@@ -44,22 +61,47 @@
       (proc "proc-stat-only")
       (else "minimal"))))
 
+(define (perf:blocked-probes installed usable paranoid)
+  (let loop ((ks (list "perf" "bpftrace" "ss")))
+    (cond
+      ((not (pair? ks)) '())
+      ((and (hash-ref installed (car ks) #f)
+            (not (hash-ref usable (car ks) #f)))
+       (cons (hash "tool" (car ks)
+                   "reason" (perf-blocked-reason (car ks) paranoid))
+             (loop (cdr ks))))
+      (else (loop (cdr ks))))))
+
 (define (perf:probe)
-  (let* ((perf (perf-tool? "perf"))
-         (bpf (perf-tool? "bpftrace"))
-         (ss (perf-tool? "ss"))
+  (let* ((perf-installed (perf-tool? "perf"))
+         (bpf-installed (perf-tool? "bpftrace"))
+         (ss-installed (perf-tool? "ss"))
          (proc (perf-readable? "/proc/stat"))
          (paranoid (perf-paranoid))
-         (mode (perf:classify (hash "perf" perf "bpftrace" bpf
+         (perf-ok (and perf-installed
+                       (perf-command-ok? "perf stat -e task-clock true")))
+         (bpf-ok (and bpf-installed
+                      (perf-command-ok? "bpftrace -e 'BEGIN { exit(); }'")))
+         (ss-ok (and ss-installed (perf-command-ok? "ss -s")))
+         (installed (hash "perf" perf-installed "bpftrace" bpf-installed
+                          "ss" ss-installed "proc" proc))
+         (usable (hash "perf" perf-ok "bpftrace" bpf-ok
+                       "ss" ss-ok "proc" proc))
+         (mode (perf:classify (hash "perf" perf-ok "bpftrace" bpf-ok
                                     "proc" proc "paranoid" paranoid)))
          (missing (filter (lambda (x) (not (cadr x)))
-                          (list (list "perf" perf) (list "bpftrace" bpf)
-                                (list "ss" ss) (list "proc" proc)))))
+                          (list (list "perf" perf-installed)
+                                (list "bpftrace" bpf-installed)
+                                (list "ss" ss-installed)
+                                (list "proc" proc)))))
     (hash "mode" mode
           "degraded" (not (equal? mode "full-ebpf"))
           "missing" (map car missing)
+          "blocked" (perf:blocked-probes installed usable paranoid)
+          "installed" installed
+          "usable" usable
           "perf_event_paranoid" paranoid
-          "tools" (hash "perf" perf "bpftrace" bpf "ss" ss "proc" proc))))
+          "tools" usable)))
 
 ; Evidence tiers are ordered. A contract that demands a stronger tier
 ; than the host offers is refused, never silently skipped.
@@ -124,21 +166,122 @@
       (/ (* 100.0 (- total avail)) total)
       #f)))
 
-; Sum rx/tx bytes over non-loopback interfaces.
+; Sum rx/tx bytes and errors/drops over non-loopback interfaces.
 (define (perf:net-sum netdev)
-  (let loop ((lines (string-split netdev "\n")) (rx 0) (tx 0))
+  (let loop ((lines (string-split netdev "\n"))
+             (rx 0) (tx 0) (rx-err 0) (tx-err 0) (rx-drop 0) (tx-drop 0))
     (cond
-      ((not (pair? lines)) (hash "rx_bytes" rx "tx_bytes" tx))
-      ((not (string-contains? (car lines) ":")) (loop (cdr lines) rx tx))
+      ((not (pair? lines))
+       (hash "rx_bytes" rx "tx_bytes" tx
+             "rx_errors" rx-err "tx_errors" tx-err
+             "rx_dropped" rx-drop "tx_dropped" tx-drop))
+      ((not (string-contains? (car lines) ":"))
+       (loop (cdr lines) rx tx rx-err tx-err rx-drop tx-drop))
       (else
        (let* ((parts (string-split (car lines) ":"))
               (iface (if (pair? parts) (string-trim (car parts)) ""))
               (nums (if (pair? (cdr parts)) (string-split-words (cadr parts)) '())))
-         (if (or (equal? iface "lo") (< (length nums) 9))
-           (loop (cdr lines) rx tx)
+         (if (or (equal? iface "lo") (< (length nums) 12))
+           (loop (cdr lines) rx tx rx-err tx-err rx-drop tx-drop)
            (loop (cdr lines)
                  (+ rx (perf-num (list-ref nums 0)))
-                 (+ tx (perf-num (list-ref nums 8))))))))))
+                 (+ tx (perf-num (list-ref nums 8)))
+                 (+ rx-err (perf-num (list-ref nums 2)))
+                 (+ tx-err (perf-num (list-ref nums 10)))
+                 (+ rx-drop (perf-num (list-ref nums 3)))
+                 (+ tx-drop (perf-num (list-ref nums 11))))))))))
+
+; (perf:ss-summary "ss -s" text) -> socket counts without needing root.
+(define (perf:ss-summary text)
+  (let ((lines (string-split text "\n")))
+    (let loop ((xs lines) (out (hash "total" 0 "tcp" 0 "estab" 0
+                                     "closed" 0 "orphaned" 0 "timewait" 0)))
+      (cond
+        ((not (pair? xs)) out)
+        ((string-prefix? (string-trim (car xs)) "Total:")
+         (let ((words (string-split-words (car xs))))
+           (if (and (pair? (cdr words)) (number? (string->number (cadr words))))
+             (hash-set! out "total" (string->number (cadr words)))
+             #f)
+           (loop (cdr xs) out)))
+        ((string-prefix? (string-trim (car xs)) "TCP:")
+         (let* ((clean (string-replace
+                         (string-replace
+                           (string-replace (car xs) "(" " ")
+                           ")" " ")
+                         "," " "))
+                (words (string-split-words clean)))
+           (if (and (pair? (cdr words)) (number? (string->number (cadr words))))
+             (hash-set! out "tcp" (string->number (cadr words)))
+             #f)
+           (let scan ((ws words))
+             (cond
+               ((not (pair? ws)) #f)
+               ((and (pair? (cdr ws))
+                     (member? (car ws) (list "estab" "closed" "orphaned" "timewait"))
+                     (number? (string->number (cadr ws))))
+                (hash-set! out (car ws) (string->number (cadr ws)))
+                (scan (cddr ws)))
+               (else (scan (cdr ws)))))
+           (loop (cdr xs) out)))
+        (else (loop (cdr xs) out))))))
+
+; (perf:disk-sum /proc/diskstats text) -> sector/IO totals for real
+; block devices (loop, ram and device-mapper pseudo entries are skipped).
+(define (perf-disk? name)
+  (not (or (string-prefix? name "loop") (string-prefix? name "ram")
+           (string-prefix? name "zram") (string-prefix? name "dm-")
+           (string-prefix? name "sr"))))
+
+(define (perf:disk-sum text)
+  (let loop ((lines (string-split text "\n"))
+             (reads 0) (writes 0) (sectors-r 0) (sectors-w 0)
+             (io-ms 0) (weighted-ms 0))
+    (cond
+      ((not (pair? lines))
+       (hash "reads" reads "writes" writes
+             "sectors_read" sectors-r "sectors_written" sectors-w
+             "io_ms" io-ms "weighted_io_ms" weighted-ms))
+      (else
+       (let ((ws (string-split-words (car lines))))
+         (if (or (< (length ws) 14) (not (perf-disk? (caddr ws))))
+           (loop (cdr lines) reads writes sectors-r sectors-w io-ms weighted-ms)
+           (loop (cdr lines)
+                 (+ reads (perf-num (list-ref ws 3)))
+                 (+ writes (perf-num (list-ref ws 7)))
+                 (+ sectors-r (perf-num (list-ref ws 5)))
+                 (+ sectors-w (perf-num (list-ref ws 9)))
+                 (+ io-ms (perf-num (list-ref ws 12)))
+                 (+ weighted-ms (perf-num (list-ref ws 13))))))))))
+
+; (perf:tcp-snmp /proc/net/snmp text) -> RetransSegs / InErrs / OutRsts.
+(define (perf:tcp-snmp text)
+  (let ((lines (string-split text "\n")))
+    (let loop ((xs lines) (header '()) (out (hash "retrans" 0 "in_errors" 0
+                                                   "out_rsts" 0)))
+      (cond
+        ((not (pair? xs)) out)
+        ((string-prefix? (string-trim (car xs)) "Tcp:")
+         (let ((ws (string-split-words (car xs))))
+           (if (null? header)
+             (loop (cdr xs) ws out)
+             (let ((vals (map perf-num (cdr ws))))
+               (let index-of ((names (cdr header)) (i 0))
+                 (cond
+                   ((not (pair? names)) #f)
+                   ((equal? (car names) "RetransSegs")
+                    (hash-set! out "retrans" (list-ref vals i))
+                    (index-of (cdr names) (+ i 1)))
+                   ((equal? (car names) "InErrs")
+                    (hash-set! out "in_errors" (list-ref vals i))
+                    (index-of (cdr names) (+ i 1)))
+                   ((equal? (car names) "OutRsts")
+                    (hash-set! out "out_rsts" (list-ref vals i))
+                    (index-of (cdr names) (+ i 1)))
+                   (else (index-of (cdr names) (+ i 1)))))
+               (loop (cdr xs) header out))))
+         )
+        (else (loop (cdr xs) header out))))))
 
 (define (perf:pressure text)
   (let ((words (string-split-words (perf-first-line text))))
@@ -156,20 +299,138 @@
   (let ((v (try (read-file path) (catch (e) #f))))
     (if (string? v) v "")))
 
-(define (perf:report)
-  (let* ((probe (perf:probe))
-         (cpu (perf-read "/proc/stat"))
+(define (perf-read-command cmd)
+  (let ((v (try (command-output cmd) (catch (e) ""))))
+    (if (string? v) v "")))
+
+(define (perf-delta before after keys)
+  (let loop ((ks keys) (out (hash)))
+    (cond
+      ((not (pair? ks)) out)
+      (else
+       (let ((a (hash-ref before (car ks) 0))
+             (b (hash-ref after (car ks) 0)))
+         (hash-set! out (car ks)
+                    (max 0 (- (if (number? b) b 0)
+                              (if (number? a) a 0))))
+         (loop (cdr ks) out))))))
+
+(define (perf-wait-ms ms)
+  (let ((start (monotonic-ms)))
+    (let loop ()
+      (if (>= (- (monotonic-ms) start) ms)
+        #t
+        (begin (try (fiber:yield) (catch (e) #f)) (loop))))))
+
+; Heuristics only; each names the evidence it read and never claims a
+; cause. A blocked tool is itself a finding, not a silent skip.
+(define (perf:hypotheses r)
+  (let* ((caps (hash-ref r "capabilities" (hash)))
+         (blocked (hash-ref caps "blocked" '()))
+         (cpu (hash-ref r "cpu_util_pct" #f))
+         (mem (hash-ref r "mem_used_pct" #f))
+         (press (hash-ref (hash-ref r "cpu_pressure" (hash)) "avg10" 0))
+         (net (hash-ref r "net" (hash)))
+         (tcp (hash-ref r "tcp" (hash)))
+         (ss (hash-ref r "ss" (hash)))
+         (hints (list)))
+    (if (pair? blocked)
+      (set! hints
+            (cons (hash "signal" "perf-blocked"
+                        "suggestion" "run with CAP_PERFMON or set perf_event_paranoid<=1; on/off-CPU flamegraphs are unavailable"
+                        "evidence" blocked)
+                  hints))
+      #f)
+    (if (and (number? cpu) (> cpu 80.0))
+      (set! hints
+            (cons (hash "signal" "cpu-util"
+                        "suggestion" "CPU-bound; inspect on-CPU symbols and per-fiber runqueue"
+                        "evidence" cpu)
+                  hints))
+      #f)
+    (if (> press 20.0)
+      (set! hints
+            (cons (hash "signal" "cpu-pressure"
+                        "suggestion" "runqueue contention; inspect off-CPU and channel waits"
+                        "evidence" press)
+                  hints))
+      #f)
+    (if (and (number? mem) (> mem 85.0))
+      (set! hints
+            (cons (hash "signal" "memory-used"
+                        "suggestion" "memory pressure; inspect heap growth and GC pauses"
+                        "evidence" mem)
+                  hints))
+      #f)
+    (if (or (> (hash-ref tcp "retrans" 0) 0)
+            (> (hash-ref net "rx_errors" 0) 0)
+            (> (hash-ref net "tx_errors" 0) 0))
+      (set! hints
+            (cons (hash "signal" "network-errors"
+                        "suggestion" "network errors or retransmits; inspect ss and TCP counters"
+                        "evidence" (hash "retrans" (hash-ref tcp "retrans" 0)
+                                         "rx_errors" (hash-ref net "rx_errors" 0)
+                                         "tx_errors" (hash-ref net "tx_errors" 0)))
+                  hints))
+      #f)
+    (if (> (hash-ref ss "timewait" 0) 100)
+      (set! hints
+            (cons (hash "signal" "timewait"
+                        "suggestion" "connection churn; inspect TIME_WAIT and connection reuse"
+                        "evidence" (hash-ref ss "timewait" 0))
+                  hints))
+      #f)
+    (if (null? hints)
+      (list (hash "signal" "none"
+                  "suggestion" "no USE threshold crossed in this window"
+                  "evidence" (hash "cpu_util_pct" cpu "mem_used_pct" mem
+                                   "cpu_pressure_avg10" press)))
+      (reverse hints))))
+
+(define (perf:report . rest)
+  (let* ((opts (if (and (pair? rest) (hash? (car rest))) (car rest) (hash)))
+         (window (let ((n (hash-ref opts "window_ms" 100)))
+                   (if (number? n) n 100)))
+         (probe (perf:probe))
+         (stat0 (perf-read "/proc/stat"))
+         (net0 (perf:net-sum (perf-read "/proc/net/dev")))
+         (disk0 (perf:disk-sum (perf-read "/proc/diskstats")))
+         (tcp0 (perf:tcp-snmp (perf-read "/proc/net/snmp")))
+         (_ (if (> window 0) (perf-wait-ms window) #f))
+         (stat1 (perf-read "/proc/stat"))
          (mem (perf-read "/proc/meminfo"))
-         (net (perf-read "/proc/net/dev"))
-         (pressure (perf-read "/proc/pressure/cpu")))
-    (hash "mode" (hash-ref probe "mode")
-          "degraded" (hash-ref probe "degraded")
-          "missing" (hash-ref probe "missing" '())
-          "cpu_util_pct" #f
-          "mem_used_pct" (perf:mem-used-pct mem)
-          "net" (perf:net-sum net)
-          "cpu_pressure" (perf:pressure pressure)
-          "source" "external-only:/proc")))
+         (net1 (perf:net-sum (perf-read "/proc/net/dev")))
+         (pressure (perf-read "/proc/pressure/cpu"))
+         (disk1 (perf:disk-sum (perf-read "/proc/diskstats")))
+         (tcp1 (perf:tcp-snmp (perf-read "/proc/net/snmp")))
+         (net (perf-delta net0 net1
+                          (list "rx_bytes" "tx_bytes" "rx_errors" "tx_errors"
+                                "rx_dropped" "tx_dropped")))
+         (disk (perf-delta disk0 disk1
+                           (list "reads" "writes" "sectors_read" "sectors_written"
+                                 "io_ms" "weighted_io_ms")))
+         (tcp (perf-delta tcp0 tcp1
+                          (list "retrans" "in_errors" "out_rsts")))
+         (ss (if (hash-ref (hash-ref probe "usable" (hash)) "ss" #f)
+               (perf:ss-summary (perf-read-command "ss -s"))
+               (hash "total" 0 "tcp" 0 "estab" 0 "closed" 0
+                     "orphaned" 0 "timewait" 0)))
+         (r (hash "mode" (hash-ref probe "mode")
+                  "degraded" (hash-ref probe "degraded")
+                  "missing" (hash-ref probe "missing" '())
+                  "blocked" (hash-ref probe "blocked" '())
+                  "capabilities" probe
+                  "cpu_util_pct" (perf:cpu-util stat0 stat1)
+                  "mem_used_pct" (perf:mem-used-pct mem)
+                  "net" (perf:net-sum net)
+                  "disk" disk
+                  "tcp" tcp
+                  "ss" ss
+                  "window_ms" window
+                  "cpu_pressure" (perf:pressure pressure)
+                  "source" "external-only:/proc,/ss")))
+    (hash-set! r "hypotheses" (perf:hypotheses r))
+    r))
 
 ; Evidence-only peer payload: capabilities are read+publish; no keep or
 ; rollback path exists in this section.
@@ -179,6 +440,8 @@
           "mode" (hash-ref r "mode")
           "degraded" (hash-ref r "degraded")
           "missing_probes" (hash-ref r "missing" '())
+          "blocked_probes" (hash-ref r "blocked" '())
+          "hypotheses" (hash-ref r "hypotheses" '())
           "report" r
           "caps" '("read" "publish"))))
 
@@ -239,7 +502,10 @@
   (let ((probe (perf:probe)))
     (cond
       ((not (hash-ref (hash-ref probe "tools") "perf" #f))
-       (hash "ok" #f "error" "perf-missing" "mode" (hash-ref probe "mode")))
+       (if (hash-ref (hash-ref probe "installed" (hash)) "perf" #f)
+         (hash "ok" #f "error" "perf-blocked" "mode" (hash-ref probe "mode")
+               "blocked" (hash-ref probe "blocked" '()))
+         (hash "ok" #f "error" "perf-missing" "mode" (hash-ref probe "mode"))))
       ((not (number? pid)) (hash "ok" #f "error" "bad-pid"))
       ((not (number? seconds)) (hash "ok" #f "error" "bad-seconds"))
       (else
