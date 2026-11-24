@@ -9,7 +9,7 @@
 (require "std/io")
 
 (export replay:plan replay:redis-corpus replay:redis-run replay:runner-run
-        replay:metrics replay:command replay:help)
+        replay:wish-schedule replay:metrics replay:command replay:help)
 
 (define (replay:help)
   "Replay: (replay:redis-run host port corpus); (replay:runner-run host port opts); (replay:plan protocol opts)")
@@ -144,10 +144,18 @@
 (define (send-json c h)
   (try (tcp-send c (string-append (json-encode h) "\n")) (catch (e) #f)))
 
+(define (replay:wish-schedule opts)
+  (let* ((opts (if (hash? opts) opts (hash)))
+         (ticks (rp-num (hash-ref opts "ticks" 30) 30))
+         (raw (hash-ref opts "wish_ats" #f))
+         (legacy (rp-num (hash-ref opts "wish_at" 10) 10))
+         (xs (if (pair? raw) raw (list legacy))))
+    (filter (lambda (i) (and (number? i) (>= i 0) (< i ticks))) xs)))
+
 (define (replay:runner-run host port opts)
   (let* ((opts (if (hash? opts) opts (hash)))
          (ticks (rp-num (hash-ref opts "ticks" 30) 30))
-         (wish-at (rp-num (hash-ref opts "wish_at" 10) 10))
+         (wish-ats (replay:wish-schedule opts))
          (c (try (tcp-connect host port) (catch (e) #f))))
     (if (not (number? c))
       (hash "ok" #f "error" "connect-failed")
@@ -155,7 +163,7 @@
         (send-json c (hash "op" "hello" "seed" (hash-ref opts "seed" 42)))
         (read-line c) ; welcome
         (read-line c) ; first state (fixture sends both)
-        (let loop ((i 0) (lat '()) (wish-ms #f) (errors 0) (over 0))
+        (let loop ((i 0) (lat '()) (wish-ms #f) (wishes 0) (errors 0) (over 0))
           (if (>= i ticks)
             (let* ((m (rp-metrics lat errors 0))
                    (sorted lat))
@@ -163,6 +171,7 @@
               (hash "ok" #t "kind" "runner-replay"
                     "ticks" ticks
                     "first_wish_ms" wish-ms
+                    "wishes" wishes
                     "tick_p50_ms" (hash-ref m "p50_ms")
                     "tick_p99_ms" (hash-ref m "p99_ms")
                     "over_budget_pct"
@@ -177,15 +186,16 @@
                                             "x" i)))
                    (line (read-line c))
                    (dt (- (rp-ms) t0))
-                   (wish (and (= i wish-at)
+                   (wish (and (member? i wish-ats)
                               (send-json c (hash "op" "wish"
                                                  "text" "make the road brighter"
                                                  "source" "replay"
                                                  "lang" "en"))))
                    (wish-line (if wish (read-line c) ""))
-                   (wish-now (if (and wish (= i wish-at)) (- (rp-ms) t0) wish-ms)))
+                   (wish-now (if (and wish (not wish-ms)) (- (rp-ms) t0) wish-ms)))
               (loop (+ i 1)
                     (if sent (cons dt lat) lat)
                     wish-now
+                    (if wish (+ wishes 1) wishes)
                     (if sent errors (+ errors 1))
                     (if (> dt 50.0) (+ over 1) over)))))))))

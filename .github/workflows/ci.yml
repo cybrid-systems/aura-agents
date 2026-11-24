@@ -31,5 +31,5 @@ jobs:
         run: bash scripts/replay-smoke.sh
       - name: Shell and Python syntax
         run: |
-          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh
+          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh scripts/live-acceptance.sh
           python3 -m py_compile scripts/check-baseline.py scripts/bump-baseline.py tests/fixtures/redis_fixture.py tests/fixtures/runner_fixture.py

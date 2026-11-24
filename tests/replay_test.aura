@@ -32,3 +32,10 @@
 (line "plan-protocol" (hash-ref plan "protocol"))
 (line "plan-token" (hash-ref plan "token"))
 (line "plan-concurrency" (hash-ref plan "concurrency"))
+
+(define ws1 (replay:wish-schedule (hash "ticks" 4 "wish_at" 2)))
+(line "wish-default" (car ws1))
+(line "wish-default-count" (length ws1))
+(define ws2 (replay:wish-schedule (hash "ticks" 10 "wish_ats" (list 2 5 9 12))))
+(line "wish-list-count" (length ws2))
+(line "wish-list-last" (last ws2))

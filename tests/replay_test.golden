@@ -10,3 +10,7 @@ errors=0
 plan-protocol=redis
 plan-token=tok-abc
 plan-concurrency=2
+wish-default=2
+wish-default-count=1
+wish-list-count=3
+wish-list-last=9

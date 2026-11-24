@@ -1,0 +1,54 @@
+;; #15/#14 live acceptance: drive a real aura-redis and a real headless
+;; aura-runner over their normal protocols, then take a real USE snapshot of
+;; this host. Run through scripts/live-acceptance.sh; no target hooks.
+(require "std/string")
+(require "std/json")
+(require "lib/replay/replay")
+(require "lib/perf/observe")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define redis-port (string->number (getenv "AURA_LIVE_REDIS_PORT")))
+(define runner-port (string->number (getenv "AURA_LIVE_RUNNER_PORT")))
+
+; ── real aura-redis: train and held-out corpora ─────────────────
+(define train (replay:redis-run "127.0.0.1" redis-port
+                                (replay:redis-corpus 7 120 "")))
+(line "redis-train-ok" (hash-ref train "ok" #f))
+(line "redis-train-errors" (hash-ref train "errors" -1))
+(line "redis-train-corpus" (hash-ref train "corpus" "-"))
+(line "redis-train-p99" (hash-ref train "p99_ms" -1))
+(line "redis-train-json" (json-encode train))
+
+(define held (replay:redis-run "127.0.0.1" redis-port
+                               (replay:redis-corpus 7 90 "live-token")))
+(line "redis-heldout-ok" (hash-ref held "ok" #f))
+(line "redis-heldout-errors" (hash-ref held "errors" -1))
+(line "redis-heldout-corpus" (hash-ref held "corpus" "-"))
+(line "redis-heldout-p99" (hash-ref held "p99_ms" -1))
+(line "redis-heldout-json" (json-encode held))
+
+; ── real headless aura-runner: 120 ticks, four wishes ─────────
+(define rr (replay:runner-run "127.0.0.1" runner-port
+                              (hash "ticks" 120
+                                    "wish_ats" (list 10 40 80 110))))
+(line "runner-ok" (hash-ref rr "ok" #f))
+(line "runner-ticks" (hash-ref rr "ticks" 0))
+(line "runner-wishes" (hash-ref rr "wishes" 0))
+(line "runner-first-wish-ms" (hash-ref rr "first_wish_ms" -1))
+(line "runner-tick-p50-ms" (hash-ref rr "tick_p50_ms" -1))
+(line "runner-tick-p99-ms" (hash-ref rr "tick_p99_ms" -1))
+(line "runner-over-budget-pct" (hash-ref rr "over_budget_pct" -1))
+(line "runner-errors" (hash-ref rr "errors" -1))
+(line "runner-json" (json-encode rr))
+
+; ── real external-only USE snapshot (#14) ───────────────────────
+(define probe (perf:probe))
+(line "perf-mode" (hash-ref probe "mode" "-"))
+(line "perf-degraded" (hash-ref probe "degraded" #t))
+(line "perf-missing" (json-encode (hash-ref probe "missing" '())))
+(line "perf-json" (json-encode (perf:report)))
