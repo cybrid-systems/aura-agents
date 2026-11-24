@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Orchestra baseline drift (#13)
         run: python3 scripts/check-baseline.py --self
+      - name: Baseline bump generator self-test (#13)
+        run: python3 scripts/bump-baseline.py --self-test
       - name: Install Aura nightly
         run: echo "$(bash scripts/install-aura.sh)" >> "$GITHUB_PATH"
       - name: Test
@@ -30,4 +32,4 @@ jobs:
       - name: Shell and Python syntax
         run: |
           bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh
-          python3 -m py_compile scripts/check-baseline.py tests/fixtures/redis_fixture.py tests/fixtures/runner_fixture.py
+          python3 -m py_compile scripts/check-baseline.py scripts/bump-baseline.py tests/fixtures/redis_fixture.py tests/fixtures/runner_fixture.py

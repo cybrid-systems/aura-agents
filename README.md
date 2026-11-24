@@ -175,3 +175,13 @@ is composed, candidates are pre-filtered by rehearsal, the Harness judge
 gates them, and the pipeline delivers/merges with a canary + revert path.
 Harmful candidates stop at the judge; rate limits and kill switch stop at
 the PR plan. Docs: `docs/troupe.md`; tests: `tests/troupe_test.aura`.
+
+## Baseline bump generator (#13)
+
+`scripts/bump-baseline.py --check` compares the locked Aura commit,
+nightly archive digests and `aura-ci` digest with the rolling release.
+`--simulate --sha ... --ci-digest ...` emits the next baseline plus the 7
+member/stage Bump PR payloads (aura.toml, baseline file, workflow digest
+patch, rollback pointer, forbidden actions) without network or any
+tag/release write. `--self-test` is wired into CI. Docs:
+`docs/baseline.md`; drift gate: `scripts/check-baseline.py --self`.
