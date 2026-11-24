@@ -13,7 +13,7 @@
         troupe:cycle troupe:help)
 
 (define (troupe:help)
-  "Troupe: (troupe:detect baseline current); (troupe:score motif); (troupe:rehearse candidates); (troupe:cycle cfg)")
+  "Troupe: (troupe:detect baseline current [perf-hot]); (troupe:score motif); (troupe:rehearse candidates); (troupe:cycle cfg)")
 
 (define (t:get h k d) (if (hash? h) (hash-ref h k d) d))
 (define (t:num h k d) (let ((v (t:get h k d))) (if (number? v) v d)))
@@ -23,25 +23,40 @@
 (define (t:ratio new old)
   (if (and (number? new) (number? old) (> old 0)) (/ (* 1.0 new) old) 1.0))
 
-(define (troupe:detect baseline current)
-  (let* ((base-p99 (t:num baseline "tick_p99_ms" 0))
+(define (t:hot-symbol? symbol pct)
+  (and (string? symbol)
+       (> (string-length symbol) 0)
+       (number? pct)
+       (>= pct 20.0)
+       (not (member? symbol (list "idle" "intel_idle" "cpuidle"
+                                   "swapper" "[unknown]")))))
+
+(define (troupe:detect baseline current . rest)
+  (let* ((perf (if (pair? rest) (car rest) #f))
+         (base-p99 (t:num baseline "tick_p99_ms" 0))
          (new-p99 (t:num current "tick_p99_ms" 0))
          (base-wish (t:num baseline "first_wish_ms" 0))
          (new-wish (t:num current "first_wish_ms" 0))
          (base-over (t:num baseline "over_budget_pct" 0))
          (new-over (t:num current "over_budget_pct" 0))
+         (hot-symbol (if (hash? perf) (t:get perf "symbol" "") ""))
+         (hot-pct (if (hash? perf) (t:num perf "overhead_pct" 0) 0))
+         (hot? (t:hot-symbol? hot-symbol hot-pct))
          (p99? (or (> (t:ratio new-p99 base-p99) 1.25) (> new-p99 100)))
          (wish? (or (> (t:ratio new-wish base-wish) 2.0) (> new-wish 200)))
          (over? (> (- new-over base-over) 20))
          (signals (append (if p99? (list "tick-p99") '())
                           (if wish? (list "first-wish") '())
-                          (if over? (list "over-budget") '()))))
+                          (if over? (list "over-budget") '())
+                          (if hot? (list "hot-symbol") '()))))
     (if (not (pair? signals))
-      (hash "kind" "motif" "target" "aura-runner" "signals" '() "severity" "none" "probe_free" #t)
+      (hash "kind" "motif" "target" "aura-runner" "signals" '()
+            "severity" "none" "probe_free" #t)
       (hash "kind" "motif" "target" "aura-runner"
             "signals" signals
             "severity" (if (>= (length signals) 2) "high" "medium")
             "baseline" baseline "current" current
+            "hot" (if hot? (hash "symbol" hot-symbol "overhead_pct" hot-pct) #f)
             "probe_free" #t))))
 
 ; ── small score from a motif ─────────────────────────────────
@@ -87,7 +102,7 @@
          (current (t:get cfg "current" (hash)))
          (policy (t:get cfg "policy" (pipeline:policy)))
          (state (t:get cfg "state" (pipeline:new-state)))
-         (motif (troupe:detect baseline current)))
+         (motif (troupe:detect baseline current (t:get cfg "perf" #f))))
     (cond
       ((equal? (t:get motif "severity" "none") "none")
        (hash "ok" #t "state" "no-motif" "motif" motif))

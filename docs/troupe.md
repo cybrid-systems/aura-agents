@@ -11,6 +11,14 @@ tick p99 > 1.25× baseline (or > 100 ms), first-wish > 2× baseline (or
 > 200 ms), and over-budget growth > 20 points. Signals become a `motif`
 hash with `probe_free:true`; no signal is `severity:none`.
 
+`(troupe:detect baseline current perf-hot)` also consumes the real Perf
+top-symbol row. A non-idle symbol at ≥20% becomes a `hot-symbol` signal
+with the symbol and share attached. The live `aura-runner` run on this
+host reports `reclaim_tw_unreachable` at ~25.6% and
+`file_reclaim_mark_value` at ~17.7%; that is an Aura-runtime hotspot, so
+the motif points at the runtime, not a game patch. `troupe:cycle` reads
+the same optional evidence from `cfg.perf`.
+
 ## Score and rehearsal
 
 `(troupe:score motif)` builds a small Score (observe -> patch -> static

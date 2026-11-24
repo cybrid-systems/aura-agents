@@ -1,5 +1,9 @@
 motif=tick-p99,first-wish
 motif-probe-free=#t
+hot-motif=hot-symbol
+hot-severity=medium
+hot-symbol=reclaim_tw_unreachable
+idle-severity=none
 cycle=delivered
 verdict=keep
 pipeline=open-pr

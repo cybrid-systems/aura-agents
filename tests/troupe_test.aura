@@ -23,6 +23,15 @@
 (line "motif" (string-join (hash-ref motif "signals") ","))
 (line "motif-probe-free" (hash-ref motif "probe_free"))
 
+(define perf-hot (hash "symbol" "reclaim_tw_unreachable" "overhead_pct" 25.0))
+(define hot-motif (troupe:detect baseline baseline perf-hot))
+(line "hot-motif" (string-join (hash-ref hot-motif "signals") ","))
+(line "hot-severity" (hash-ref hot-motif "severity"))
+(line "hot-symbol" (hash-ref (hash-ref hot-motif "hot") "symbol"))
+(define idle-motif (troupe:detect baseline baseline
+                                   (hash "symbol" "idle" "overhead_pct" 90.0)))
+(line "idle-severity" (hash-ref idle-motif "severity"))
+
 (define candidate
   (hash "id" "cand-good" "delta_tick_ms" -10 "delta_wish_ms" -50 "harm" #f
         "patch" (hash "edits" (list (hash "target" "lib/phys.aura" "kind" "replace"
