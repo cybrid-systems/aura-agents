@@ -1,0 +1,9 @@
+;; #22 dry-run: emit the deterministic scaffold plan for the tank spec.
+(require "std/json")
+(require "lib/project/spec")
+(require "lib/project/scaffold")
+
+(define spec (cadr (project:compile "用 aura 写一个坦克大战游戏")))
+(display "scaffold-json=")
+(display (json-encode (project:scaffold spec)))
+(newline)

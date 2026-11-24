@@ -1,0 +1,120 @@
+;; Green-field scaffold (#22): turn a #21 Game Spec into the first-day
+;; repository payload. This is the dry-run API: it reads the #13 baseline
+;; from this checkout and returns the exact files, copies and branch
+;; protection a real creator would apply. It never creates a GitHub repo,
+;; tag or release.
+
+(require "std/string")
+(require "std/list")
+(require "std/io")
+(require "std/json")
+(require "lib/project/spec")
+
+(export project:scaffold project:scaffold-file project:scaffold-help)
+
+(define (project:scaffold-help)
+  "Scaffold: (project:scaffold spec) -> repo name, files, copies and branch protection; dry-run only")
+
+(define (sc-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (sc-line s) (if (string? s) s ""))
+
+(define (sc-baseline)
+  (let ((v (try (json-parse (read-file "baseline/aura-baseline.json")) (catch (e) #f))))
+    (if (hash? v) v (hash))))
+
+(define (sc-sha baseline)
+  (sc-line (sc-get (sc-get baseline "aura" (hash)) "commit_sha" "")))
+(define (sc-asset-sha baseline arch)
+  (sc-line (sc-get (sc-get (sc-get (sc-get baseline "aura" (hash)) "assets" (hash)) arch (hash))
+                   "sha256" "")))
+(define (sc-ci-digest baseline)
+  (sc-line (sc-get (sc-get baseline "aura_ci" (hash)) "digest" "")))
+
+(define (sc-file path content)
+  (hash "path" path "content" content))
+
+(define (sc-repo-name spec)
+  (if (equal? (sc-get spec "theme" "") "tank-battle") "aura-tank-battle" "aura-game"))
+
+(define (project:scaffold-file plan path)
+  (let loop ((xs (sc-get plan "files" '())))
+    (cond ((not (pair? xs)) "")
+          ((equal? (sc-get (car xs) "path" "") path) (sc-get (car xs) "content" ""))
+          (else (loop (cdr xs))))))
+
+(define (sc-aura-toml repo sha x86 arm digest)
+  (string-append
+    "name = \"" repo "\"\n"
+    "entry = \"game/main.aura\"\n"
+    "preset = \"dev\"\n"
+    "out = \"out\"\n\n"
+    "# Orchestra baseline (#13). Generated from baseline/aura-baseline.json.\n"
+    "[dependencies]\n"
+    "aura = \"nightly\"\n"
+    "aura_commit = \"" sha "\"\n"
+    "aura_sha256_linux_x86_64 = \"" x86 "\"\n"
+    "aura_sha256_linux_arm64 = \"" arm "\"\n"
+    "aura_ci_digest = \"" digest "\"\n"))
+
+(define (sc-ci-yml digest)
+  (string-append
+    "name: ci\n"
+    "on:\n"
+    "  push:\n"
+    "  pull_request:\n"
+    "jobs:\n"
+    "  test:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    container:\n"
+    "      image: ghcr.io/cybrid-systems/aura-ci@" digest "\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@v4\n"
+    "      - name: Install pinned Aura\n"
+    "        run: ./scripts/install-aura.sh\n"
+    "      - name: Test\n"
+    "        run: aura test\n"))
+
+(define (sc-readme repo)
+  (string-append
+    "# " repo "\n\n"
+    "Green-field M4 scaffold generated from the #21 Game Spec.\n\n"
+    "## Run\n\n"
+    "```bash\n"
+    "aura run --headless --seed 42\n"
+    "```\n\n"
+    "## Test\n\n"
+    "```bash\n"
+    "aura test\n"
+    "```\n"))
+
+(define (project:scaffold spec)
+  (let* ((baseline (sc-baseline))
+         (sha (sc-sha baseline))
+         (x86 (sc-asset-sha baseline "linux-x86_64"))
+         (arm (sc-asset-sha baseline "linux-arm64"))
+         (digest (sc-ci-digest baseline))
+         (repo (sc-repo-name spec))
+         (files (list
+                  (sc-file "aura.toml" (sc-aura-toml repo sha x86 arm digest))
+                  (sc-file ".github/workflows/ci.yml" (sc-ci-yml digest))
+                  (sc-file "README.md" (sc-readme repo))
+                  (sc-file ".gitignore" "out/\n.deps/\n")
+                  (sc-file "game/main.aura" ";; M4 scaffold: replace with the first milestone.\n(display \"aura game scaffold\\n\")\n")
+                  (sc-file "tests/smoke_test.aura" "(display \"ok\")\n(newline)\n")
+                  (sc-file "tests/smoke_test.golden" "ok\n"))))
+    (hash "kind" "repo-scaffold"
+          "repo" repo
+          "visibility" "private"
+          "entry" "game/main.aura"
+          "files" files
+          "copies" (list "baseline/aura-baseline.json"
+                         "scripts/install-aura.sh"
+                         "scripts/check-baseline.py")
+          "baseline" (hash "aura_commit" sha
+                          "aura_ci_digest" digest
+                          "aura_sha256_linux_x86_64" x86
+                          "aura_sha256_linux_arm64" arm)
+          "branch_protection" (hash "required_checks" (list "ci")
+                                    "direct_push" #f
+                                    "admin_bypass" #f)
+          "forbidden" (list "tag" "release" "large-file"))))

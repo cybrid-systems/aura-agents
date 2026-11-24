@@ -114,6 +114,14 @@ constraints such as `要双人` without overturning unrelated defaults.
 `project:score` emits the #12 Score for one milestone with the spec
 fingerprint and a #5403-style budget. Docs: `docs/project-spec.md`.
 
+`lib/project/scaffold.aura` is the #22 dry-run half: from the spec it
+returns the repo name, the pinned-baseline `aura.toml` and `aura-ci` CI
+workflow, README/.gitignore/game skeleton, the files to copy from this
+checkout, branch protection (required `ci`, no direct `main`, no admin
+bypass) and the forbidden `tag`/`release`/`large-file` list. It never
+creates the repository; the GitHub creator still has to apply it. Docs:
+`docs/scaffold.md`.
+
 ## Experience graph (#2-#9)
 
 `lib/graph/` is a structured, auditable experience graph built in Aura-native code. It never stores model weights, embeddings or source text.

@@ -1,0 +1,14 @@
+repo=aura-tank-battle
+visibility=private
+files=7
+copies=3
+branch-direct=#f
+branch-admin=#f
+toml-commit=#t
+toml-x86=#t
+toml-arm=#t
+toml-digest=#t
+ci-pinned=#t
+ci-test=#t
+readme=#t
+forbidden=tag,release,large-file

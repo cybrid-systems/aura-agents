@@ -1,0 +1,3 @@
+project:scaffold: Any -> Any
+project:scaffold-file: Any Any -> Any
+project:scaffold-help: -> Any

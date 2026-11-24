@@ -29,7 +29,11 @@ jobs:
         env:
           AURA_AGENTS_LLM: mock
         run: bash scripts/replay-smoke.sh
+      - name: Scaffold dry-run (#22)
+        env:
+          AURA_AGENTS_LLM: mock
+        run: bash scripts/scaffold-dry-run.sh
       - name: Shell and Python syntax
         run: |
-          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh scripts/live-acceptance.sh
+          bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh scripts/replay-smoke.sh scripts/live-acceptance.sh scripts/scaffold-dry-run.sh
           python3 -m py_compile scripts/check-baseline.py scripts/bump-baseline.py tests/fixtures/redis_fixture.py tests/fixtures/runner_fixture.py
