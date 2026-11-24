@@ -3,14 +3,26 @@
 ;; this host. Run through scripts/live-acceptance.sh; no target hooks.
 (require "std/string")
 (require "std/json")
+(require "std/list")
 (require "lib/replay/replay")
 (require "lib/perf/observe")
+(require "lib/troupe/troupe")
 
 (define (line k v)
   (display k)
   (display "=")
   (display v)
   (newline))
+
+(define (num h k d)
+  (let ((v (hash-ref h k d)))
+    (if (number? v) v d)))
+
+(define (max-list xs)
+  (let loop ((ys xs) (m 0))
+    (cond ((not (pair? ys)) m)
+          ((> (car ys) m) (loop (cdr ys) (car ys)))
+          (else (loop (cdr ys) m)))))
 
 (define redis-port (string->number (getenv "AURA_LIVE_REDIS_PORT")))
 (define runner-port (string->number (getenv "AURA_LIVE_RUNNER_PORT")))
@@ -45,6 +57,39 @@
 (line "runner-over-budget-pct" (hash-ref rr "over_budget_pct" -1))
 (line "runner-errors" (hash-ref rr "errors" -1))
 (line "runner-json" (json-encode rr))
+
+; ── real external load for the #19 motif detector ──────────────
+; Eight concurrent external clients; the server is not modified and has
+; no probe. If the target stays healthy the detector must say no-motif.
+(define fids
+  (map (lambda (i)
+         (fiber:spawn
+           (lambda ()
+             (replay:runner-run "127.0.0.1" runner-port
+                                (hash "ticks" 240
+                                      "wish_ats" (list 20 100 200)
+                                      "seed" (+ 42 i))))))
+       (list 1 2 3 4 5 6 7 8)))
+(define load-runs (map (lambda (f) (fiber:join f)) fids))
+(define load-p99 (max-list (map (lambda (r) (num r "tick_p99_ms" 0)) load-runs)))
+(define load-wish (max-list (map (lambda (r) (num r "first_wish_ms" 0)) load-runs)))
+(define load-over (max-list (map (lambda (r) (num r "over_budget_pct" 0)) load-runs)))
+(line "load-clients" (length load-runs))
+(line "load-ok" (length (filter (lambda (r) (hash-ref r "ok" #f)) load-runs)))
+(line "load-p99" load-p99)
+(line "load-wish" load-wish)
+(line "load-over" load-over)
+
+(define current (hash "tick_p99_ms" load-p99
+                      "first_wish_ms" load-wish
+                      "over_budget_pct" load-over))
+(define motif (troupe:detect rr current))
+(define scored (troupe:score motif))
+(line "motif-severity" (hash-ref motif "severity" "none"))
+(line "motif-signals" (json-encode (hash-ref motif "signals" '())))
+(line "motif-probe-free" (hash-ref motif "probe_free" #f))
+(line "motif-score-ok" (hash-ref scored "ok" #f))
+(line "motif-json" (json-encode motif))
 
 ; ── real external-only USE snapshot (#14) ───────────────────────
 (define probe (perf:probe))

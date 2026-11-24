@@ -35,6 +35,20 @@ The returned hash keeps motif, rehearsal, judge package, pipeline/merge
 actions and canary; the caller can then feed the Memory invalidation and
 issue update.
 
+## Live external load
+
+`scripts/live-acceptance.sh` drives a real headless `aura-runner` with
+one baseline session (120 ticks, four wishes) and then eight concurrent
+external clients (240 ticks, three wishes each). It feeds the observed
+p99/first-wish/over-budget values to `troupe:detect` and prints
+`motif-severity`, `motif-signals`, `motif-probe-free` and the small
+Score. The target is not modified and has no probe.
+
+On the current nightly the target stayed healthy under that load
+(`load-p99` ~17 ms, `load-wish` ~6 ms, no over-budget), so the honest
+result was `severity:none`. A loaded target that crosses a threshold
+emits the same motif shape; the harness does not manufacture one.
+
 ## Tests
 
 `tests/troupe_test.aura` covers the full delivered path, a harmful

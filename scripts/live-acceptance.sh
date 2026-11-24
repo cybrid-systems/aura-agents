@@ -108,4 +108,11 @@ for prefix in perf-mode= perf-degraded= perf-blocked= perf-usable= \
     exit 1
   fi
 done
+for marker in load-ok=8 motif-probe-free=#t motif-score-ok=#t; do
+  if ! grep -qx "$marker" "$out"; then
+    echo "live-acceptance: missing motif marker $marker" >&2
+    tail -n 30 "$out" >&2 || true
+    exit 1
+  fi
+done
 echo "live-acceptance=ok"
