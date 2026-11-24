@@ -1,0 +1,59 @@
+;; Resource-adaptive rehearsal width (#29): read the host CPU and memory
+;; limits and choose a safe N. Pure fallbacks when /proc is unavailable.
+
+(require "std/string")
+(require "std/io")
+(require "std/list")
+
+(export resources:snapshot resources:choose-n resources:choose-n-for
+        resources:help)
+
+(define (resources:help)
+  "Resources: (resources:snapshot) -> {cpus, mem_mb}; (resources:choose-n candidates)")
+
+(define (r-lines text)
+  (filter (lambda (s) (> (string-length s) 0)) (string-split text "\n")))
+
+(define (r-cpu-count)
+  (let ((text (try (read-file "/proc/cpuinfo") (catch (e) #f))))
+    (if (not (string? text))
+      1
+      (max 1 (length (filter (lambda (l) (string-prefix? l "processor"))
+                             (r-lines text)))))))
+
+(define (r-number s)
+  (let ((n (try (string->number s) (catch (e) #f))))
+    (if (number? n) n 0)))
+
+(define (r-mem-kb)
+  (let ((text (try (read-file "/proc/meminfo") (catch (e) #f))))
+    (if (not (string? text))
+      0
+      (let loop ((ls (r-lines text)))
+        (cond ((not (pair? ls)) 0)
+              ((string-prefix? (car ls) "MemTotal:")
+               (let ((parts (string-split-words (car ls))))
+                 (if (and (pair? parts) (pair? (cdr parts)))
+                   (r-number (cadr parts))
+                   0)))
+              (else (loop (cdr ls))))))))
+
+(define (resources:snapshot)
+  (let* ((cpus (r-cpu-count))
+         (kb (r-mem-kb)))
+    (hash "cpus" cpus
+          "mem_mb" (if (> kb 0) (quotient kb 1024) 0))))
+
+(define (resources:choose-n-for cpus mem_mb candidates)
+  (let* ((c (max 1 (if (number? cpus) cpus 1)))
+         (m (max 1 (if (number? mem_mb) mem_mb 0)))
+         (by-mem (max 1 (quotient m 256)))
+         (by-cpu c)
+         (hard 8)
+         (limit (min hard by-cpu by-mem))
+         (want (if (number? candidates) candidates 1)))
+    (max 1 (min want limit))))
+
+(define (resources:choose-n candidates)
+  (let ((s (resources:snapshot)))
+    (resources:choose-n-for (hash-ref s "cpus" 1) (hash-ref s "mem_mb" 0) candidates)))

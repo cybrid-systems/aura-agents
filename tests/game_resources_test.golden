@@ -1,0 +1,11 @@
+choose-8=8
+choose-4=4
+choose-mem=4
+choose-min=1
+choose-cap=2
+snapshot-cpus=#t
+snapshot-mem=#t
+bounded-batches=2
+bounded-winner=normal
+bounded-ok=#t
+bounded-results=3

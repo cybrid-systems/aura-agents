@@ -1,0 +1,4 @@
+resources:snapshot: -> Any
+resources:choose-n: Any -> Any
+resources:choose-n-for: Any Any Any -> Any
+resources:help: -> Any

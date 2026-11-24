@@ -1,0 +1,38 @@
+;; Issue #29 — resource-adaptive rehearsal width and bounded batches.
+(require "std/string")
+(require "lib/game/arena")
+(require "lib/game/assert")
+(require "lib/game/loop")
+(require "lib/game/resources")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(line "choose-8" (resources:choose-n-for 8 16384 100))
+(line "choose-4" (resources:choose-n-for 4 16384 100))
+(line "choose-mem" (resources:choose-n-for 8 1024 100))
+(line "choose-min" (resources:choose-n-for 8 100 100))
+(line "choose-cap" (resources:choose-n-for 8 16384 2))
+
+(define snap (resources:snapshot))
+(line "snapshot-cpus" (>= (hash-ref snap "cpus" 0) 1))
+(line "snapshot-mem" (> (hash-ref snap "mem_mb" 0) 0))
+
+(define root (arena:new (hash "seed" 42 "players" 1)))
+(define frozen-step (lambda (state input) (arena:step state (hash))))
+(define candidates
+  (list (hash "id" "normal" "step" arena:step)
+        (hash "id" "frozen" "step" frozen-step)
+        (hash "id" "normal-2" "step" arena:step)))
+(define ids (list "state-advance" "score-lives" "frame-budget"
+                  "visual-keyframe" "move-right"))
+(define bounded
+  (loop:rehearse-bounded root candidates (list (hash "move" "right")) ids
+                         (resources:choose-n-for 8 512 (length candidates))))
+(line "bounded-batches" (hash-ref bounded "batches"))
+(line "bounded-winner" (hash-ref bounded "winner"))
+(line "bounded-ok" (hash-ref bounded "ok"))
+(line "bounded-results" (length (hash-ref bounded "results" '())))

@@ -1,4 +1,5 @@
 loop:rehearse: Any Any Any Any -> Any
+loop:rehearse-bounded: Any Any Any Any Any -> Any
 loop:commit: Any Any -> Any
 loop:copy: Any -> Any
 loop:best: Any -> Any

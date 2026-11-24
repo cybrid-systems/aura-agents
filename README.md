@@ -159,9 +159,14 @@ Docs: `docs/game-mutate.md`.
 0), hot rebind continuity (counter 2 → 12, no reset) and two fibers
 seeing 21/22 privately. Docs: `docs/game-cow.md`.
 
+`lib/game/resources.aura` reads `/proc` and chooses N (max 8, one per
+CPU, 256 MiB each, never above candidate count); `loop:rehearse-bounded`
+runs candidates in capped batches and selects the best winner. Docs:
+`docs/game-resources.md`.
+
 The pure game loop still deep-copies game state; the live adapter covers
-the workspace COW/hot-replace half. Resource-adaptive N and the external
-PR loop remain open in #29.
+the workspace COW/hot-replace half. The external PR loop remains open in
+#29.
 
 ## Experience graph (#2-#9)
 
