@@ -1,0 +1,215 @@
+;; Search-strategy wiring (#31): use the real Aura stdlib search stack
+;; at the fork-compete decision points. No parallel QD/MCTS/GA is
+;; implemented here. The capabilities value records known gaps instead of
+;; silently pretending they exist.
+;;
+;;   std/search    bandit (operator/arm choice) + beam (edit sequences)
+;;   std/qd        MAP-Elites diversity archive
+;;   std/evo-core  candidate + worldline-isolated trial
+;;   std/portfolio successive-halving budget allocation / early stop
+;;   std/proposer  available; not used for game tuning (deterministic
+;;                 mutate operators are the current proposal source)
+;;   std/mutate    deterministic tuning AST candidates
+
+(require "std/string")
+(require "std/list")
+(require "std/search")
+(require "std/qd")
+(require "std/evo-core")
+(require "std/portfolio")
+(require "lib/game/mutate")
+(require "lib/game/arena")
+(require "lib/game/loop")
+
+(export strategy:help strategy:capabilities strategy:ops strategy:propose
+        strategy:bandit-state strategy:bandit-choose
+        strategy:beam-state strategy:beam-best
+        strategy:archive strategy:insert! strategy:coverage strategy:elites
+        strategy:trial strategy:halving strategy:rehearse)
+
+(define (strategy:help)
+  "Strategy: (strategy:propose ast n); (strategy:bandit-choose arms scores); (strategy:beam-best root tree width scores gens); (strategy:halving members budget-ms)")
+
+(define (st-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (st-num h k d) (let ((v (st-get h k d))) (if (number? v) v d)))
+(define (st-list h k) (let ((v (st-get h k '()))) (if (pair? v) v '())))
+
+; ── honest capability record ───────────────────────────────────
+
+(define (strategy:capabilities)
+  (hash "search" (hash "module" "std/search"
+                       "kinds" (search:kinds)
+                       "used" (list "bandit" "beam"))
+        "qd" (hash "module" "std/qd"
+                   "used" (list "map-elites" "insert!" "coverage" "elites"))
+        "evo-core" (hash "module" "std/evo-core"
+                         "used" (list "candidate" "trial"))
+        "portfolio" (hash "module" "std/portfolio"
+                          "used" (list "successive-halving"))
+        "proposer" (hash "module" "std/proposer"
+                         "available" #t
+                         "used_for" "not wired: deterministic mutate operators propose now")
+        "mutate" (hash "module" "lib/game/mutate"
+                       "used" (list "apply" "candidates"))
+        "gaps"
+        (list
+          (hash "id" "generic-stage-aware-mcts"
+                "status" "missing"
+                "note" "std/search reserves mcts and refuses it; std/proposer only has MCTS-AHD")
+          (hash "id" "fiber-native-early-stop"
+                "status" "adapter"
+                "note" "portfolio:run successive-halving supplies the early-stop plan; no fiber primitive"))
+        "missing" '()))
+
+; ── deterministic candidate generation ────────────────────────
+
+(define (strategy:ops)
+  (list
+    (hash "op" "set" "key" "player-speed" "value" 2)
+    (hash "op" "inc" "key" "fire-cooldown" "delta" 1)
+    (hash "op" "inc" "key" "enemy-score" "delta" 25)
+    (hash "op" "set" "key" "bullet-speed" "value" 2)
+    (hash "op" "inc" "key" "player-speed" "delta" -1)))
+
+(define (st-take xs n)
+  (let loop ((rest xs) (i 0) (out '()))
+    (cond ((or (not (pair? rest)) (>= i n)) (reverse out))
+          (else (loop (cdr rest) (+ i 1) (cons (car rest) out))))))
+
+(define (strategy:propose ast limit)
+  (if (not (hash? ast))
+    '()
+    (let ((n (if (number? limit) limit 1)))
+      (mutate:candidates ast (st-take (strategy:ops) (max 0 n))))))
+
+(define (strategy:rehearse ast root inputs ids n)
+  (let* ((rows (strategy:propose ast n))
+         (candidates
+           (map (lambda (r)
+                  (let* ((r-ast (st-get r "ast" ast))
+                         (opts (mutate:arena-opts r-ast))
+                         (croot (arena:new
+                                  (hash "seed" 42 "players" 1
+                                        "tuning" (hash-ref opts "tuning" (hash))))))
+                    (hash "id" (st-get r "id" "candidate")
+                          "step" arena:step
+                          "root" croot)))
+                rows)))
+    (if (not (pair? candidates))
+      (hash "ok" #f "error" "no-candidates" "candidates" 0)
+      (let ((run (loop:rehearse-bounded root candidates inputs ids (max 1 n))))
+        (hash "ok" (st-get run "ok" #f)
+              "winner" (st-get run "winner" #f)
+              "results" (st-list run "results")
+              "candidates" (length candidates)
+              "batches" (st-get run "batches" 1))))))
+
+; ── bandit operator/arm choice ────────────────────────────────
+
+(define (strategy:bandit-state arms policy seed)
+  (search:init "bandit"
+               (hash "arms" (if (pair? arms) arms '())
+                     "policy" (if (string? policy) policy "ucb")
+                     "seed" (if (number? seed) seed 7))))
+
+(define (strategy:bandit-choose arms scores)
+  (cond
+    ((not (pair? arms)) (hash "ok" #f "error" "no-arms"))
+    (else
+     (let* ((state (strategy:bandit-state arms "ucb" 7))
+            (n (length arms))
+            (state (search:run
+                     state
+                     (lambda (arm)
+                       (let ((s (hash-ref (if (hash? scores) scores (hash)) arm 0.0)))
+                         (if (number? s) s 0.0)))
+                     (max 1 n))))
+       (hash "ok" #t
+             "arm" (search:best state)
+             "arms" arms
+             "state" (search:export state))))))
+
+; ── beam edit sequences ───────────────────────────────────────
+
+(define (strategy:beam-state root tree width)
+  (search:init "beam"
+               (hash "root" (if (string? root) root "root")
+                     "tree" (if (hash? tree) tree (hash))
+                     "width" (if (number? width) (max 1 width) 2))))
+
+(define (strategy:beam-best root tree width scores max-gen)
+  (let* ((state (strategy:beam-state root tree width))
+         (n (if (number? max-gen) (max 1 max-gen) 10))
+         (score-fn
+           (lambda (path)
+             (let* ((node (if (pair? path) (car (reverse path)) path))
+                    (s (hash-ref (if (hash? scores) scores (hash)) node 0.0)))
+               (if (number? s) s 0.0))))
+         (done (let loop ((s state) (i 0))
+                 (if (or (>= i n) (search:complete? s))
+                   s
+                   (loop (search:batch s score-fn) (+ i 1))))))
+    (hash "ok" #t
+          "edits" (search:best done)
+          "score" (search:best-score done)
+          "state" (search:export done))))
+
+; ── MAP-Elites diversity archive ──────────────────────────────
+
+(define (strategy:archive)
+  (qd:map-elites
+    (hash "descriptors" (list (list "tokens" 0 100 5)
+                              (list "score" 0 1000 10))
+          "quality" "score"
+          "seed" 7)))
+
+(define (strategy:insert! m cand quality behavior)
+  (qd:insert! m cand quality behavior))
+
+(define (strategy:coverage m) (qd:coverage m))
+(define (strategy:elites m) (qd:elites m))
+
+; ── evo-core trial handle ─────────────────────────────────────
+
+(define (strategy:trial genome id evaluate)
+  (if (not (string? genome))
+    (hash "ok" #f "error" "bad-genome")
+    (let* ((cand (evo:candidate genome (hash "id" (if (string? id) id "trial"))))
+           (r (evo:trial cand
+                         (hash "apply" (lambda (ctx c) #t)
+                               "evaluate" evaluate
+                               "timeout-ms" 1000))))
+      (hash "ok" (evo:trial-ok? r)
+            "status" (st-get r "status" "unknown")
+            "trial" r
+            "candidate" cand))))
+
+; ── portfolio successive halving ─────────────────────────────
+
+(define (strategy:halving members budget-ms)
+  (if (not (pair? members))
+    (hash "ok" #f "error" "no-members")
+    (let* ((pf
+             (let loop ((pf (portfolio:make (hash "sense" "max")))
+                        (xs members))
+               (if (not (pair? xs))
+                 pf
+                 (let* ((m (car xs))
+                        (id (st-get m "id" "member"))
+                        (factory (let ((f (st-get m "factory" #f)))
+                                   (if (procedure? f)
+                                     f
+                                     (lambda (inst ctx)
+                                       (st-num m "score" 0))))))
+                   (loop (portfolio:add! pf id factory) (cdr xs))))))
+           (r (portfolio:run pf (hash)
+                             (hash "budget-ms" (if (number? budget-ms) budget-ms 0)
+                                   "alloc" "successive-halving"
+                                   "clock" (lambda () 0)))))
+      (hash "ok" #t
+            "alloc" (st-get r "alloc" "successive-halving")
+            "winner" (st-get r "winner" #f)
+            "winner_score" (st-get r "winner-score" #f)
+            "rounds" (st-get r "rounds" 0)
+            "rows" (st-list r "rows")
+            "spent_ms" (st-get r "spent-ms" 0)))))

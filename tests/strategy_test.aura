@@ -1,0 +1,97 @@
+;; Issue #31 — real stdlib search wiring: deterministic proposals,
+;; bandit operator choice, beam edits, QD archive, evo-core trial and
+;; portfolio successive halving.
+(require "std/string")
+(require "std/qd")
+(require "std/evo-core")
+(require "lib/game/strategy")
+(require "lib/game/mutate")
+(require "lib/game/arena")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define caps (strategy:capabilities))
+(line "search-kinds" (string-join (hash-ref (hash-ref caps "search") "kinds") ","))
+(line "qd-module" (hash-ref (hash-ref caps "qd") "module"))
+(line "portfolio-module" (hash-ref (hash-ref caps "portfolio") "module"))
+(line "proposer-module" (hash-ref (hash-ref caps "proposer") "module"))
+(line "missing-modules" (length (hash-ref caps "missing")))
+(line "gaps" (length (hash-ref caps "gaps")))
+(line "gap-mcts" (let loop ((xs (hash-ref caps "gaps"))) (cond ((not (pair? xs)) #f) ((equal? (hash-ref (car xs) "id") "generic-stage-aware-mcts") #t) (else (loop (cdr xs))))))
+
+; deterministic candidate generation
+(define ast (mutate:new))
+(define proposals (strategy:propose ast 3))
+(line "proposals" (length proposals))
+(line "proposal-fingerprints" (length (map (lambda (p) (hash-ref p "fingerprint" "")) proposals)))
+(line "proposal-source" (string-contains? (hash-ref (car proposals) "source") "tuning"))
+(define rehearse
+  (strategy:rehearse ast (arena:new (hash "seed" 42 "players" 1))
+                     (list (hash)) (list "state-advance") 2))
+(line "rehearse-ok" (hash-ref rehearse "ok"))
+(line "rehearse-candidates" (hash-ref rehearse "candidates"))
+(line "rehearse-winner" (hash-ref rehearse "winner"))
+
+; bandit operator choice
+(define bandit (strategy:bandit-choose (list "set" "inc" "remove")
+                                       (hash "set" 1 "inc" 5 "remove" 2)))
+(line "bandit-ok" (hash-ref bandit "ok"))
+(line "bandit-arm" (hash-ref bandit "arm"))
+(line "bandit-arms" (length (hash-ref bandit "arms")))
+
+; beam edit sequence
+(define tree (hash "root" (list "set" "inc")
+                   "set" (list "remove")
+                   "inc" (list "add")
+                   "remove" (list)
+                   "add" (list)))
+(define beam (strategy:beam-best "root" tree 2
+                                 (hash "set" 3 "inc" 4 "remove" 5 "add" 2)
+                                 10))
+(line "beam-ok" (hash-ref beam "ok"))
+(line "beam-score" (hash-ref beam "score"))
+(line "beam-last" (let ((e (hash-ref beam "edits"))) (if (pair? e) (car (reverse e)) e)))
+
+; MAP-Elites archive
+(define qd (strategy:archive))
+(line "qd-coverage0" (strategy:coverage qd))
+(line "qd-insert1" (strategy:insert! qd (evo:candidate "g1" (hash "id" "a")) 0.8 (hash "tokens" 10 "score" 100)))
+(line "qd-coverage1" (strategy:coverage qd))
+(line "qd-insert2" (strategy:insert! qd (evo:candidate "g2" (hash "id" "b")) 0.9 (hash "tokens" 10 "score" 200)))
+(line "qd-elites1" (length (strategy:elites qd)))
+(line "qd-insert3" (strategy:insert! qd (evo:candidate "g3" (hash "id" "c")) 0.7 (hash "tokens" 90 "score" 300)))
+(line "qd-elites2" (length (strategy:elites qd)))
+(line "qd-coverage2" (strategy:coverage qd))
+(line "qd-best" (hash-ref (qd:best qd) "id"))
+
+; evo-core isolated trial handle
+(define trial (strategy:trial "(define (score x) x)" "t1"
+                              (lambda (cand)
+                                (hash "objectives" (hash "score" 1)
+                                      "constraints" (hash)
+                                      "behavior" (hash "tokens" 10)))))
+(line "trial-ok" (hash-ref trial "ok"))
+(line "trial-status" (hash-ref trial "status"))
+(line "trial-candidate" (hash-ref (hash-ref trial "candidate") "id"))
+
+; portfolio successive halving
+(define members (list (hash "id" "a" "score" 1)
+                      (hash "id" "b" "score" 5)
+                      (hash "id" "c" "score" 3)
+                      (hash "id" "d" "score" 2)))
+(define halving (strategy:halving members 0))
+(line "halving-ok" (hash-ref halving "ok"))
+(line "halving-alloc" (hash-ref halving "alloc"))
+(line "halving-winner" (hash-ref halving "winner"))
+(line "halving-score" (hash-ref halving "winner_score"))
+(line "halving-rounds" (hash-ref halving "rounds"))
+(line "halving-rows" (length (hash-ref halving "rows")))
+
+; edges
+(line "no-arms" (hash-ref (strategy:bandit-choose '() (hash)) "error"))
+(line "no-proposals" (length (strategy:propose ast 0)))
+(line "no-members" (hash-ref (strategy:halving '() 0) "error"))

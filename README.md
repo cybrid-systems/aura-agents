@@ -132,6 +132,13 @@ action, never a kernel fix PR). Reports include ladder/PRs/budget/
 unadopted requirements and always set `tag`/`release` to `#f`. Docs:
 `docs/lifecycle.md`.
 
+`lib/game/strategy.aura` is the #31 wiring over the real stdlib search
+stack: deterministic `mutate` proposals, `std/search` bandit operator
+choice and beam edit paths, `std/qd` MAP-Elites, `std/evo-core` trials
+and `std/portfolio` successive halving. It records the two real gaps
+(generic stage-aware MCTS, fiber-native early stop) instead of claiming
+them. Docs: `docs/strategy.md`.
+
 `lib/project/kpi.aura` is the #30 speed ledger: candidates/minute,
 wall per inner round, first-playable, per-milestone phase time, inner/
 outer ratio, N, early stop, OOM and hot-swap failures, all labelled
