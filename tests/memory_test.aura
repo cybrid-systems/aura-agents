@@ -1,0 +1,45 @@
+;; Issue #17 — Memory curator over the experience graph (#2-#9).
+(require "std/string")
+(require "std/json")
+(require "lib/graph/store")
+(require "lib/memory/curator")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(graph:reset! 9001)
+(graph:reset! 9002)
+(define g (graph:open 9001))
+
+(define keep (memory:record! g (hash "verdict" "keep" "task" 1 "worldline" 1
+                                     "summary" "ZRANGEBYSCORE p99 keep"
+                                     "candidate_hash" "c1" "contract_hash" "k1")))
+(define rollback (memory:record! g (hash "verdict" "rollback" "task" 2 "worldline" 2
+                                         "summary" "ZRANGEBYSCORE p99 rollback"
+                                         "candidate_hash" "c2" "contract_hash" "k2")))
+(line "keep" (hash-ref keep "provenance"))
+(line "rollback" (hash-ref rollback "provenance"))
+(line "nodes" (graph:node-count g))
+(line "keep-nodes" (length (graph:nodes-by-type g "keep-evidence")))
+(line "rollback-nodes" (length (graph:nodes-by-type g "rollback-evidence")))
+
+(define hint (memory:hint g "ZRANGEBYSCORE p99"))
+(line "hint" (if (> (string-length hint) 0) #t #f))
+(line "negative" (memory:negative? hint))
+
+(define inv (memory:invalidate! g 2 99 "rollback"))
+(line "invalidate" (hash-ref inv "ok"))
+(line "invalidated-positive" (if (> (hash-ref inv "invalidated") 0) #t #f))
+
+(define g2 (graph:open 9002))
+(line "tenant-isolation" (if (= (graph:node-count g2) 0) #t #f))
+(line "tenant-main" (graph:node-count g))
+
+(line "backend" (memory:backend))
+(line "stage2" (hash-ref (memory:use-backend! "cxx") "error"))
+(line "provenance-classes" (string-join (list (memory:provenance (hash "kind" "lost-conflict"))
+                                              (memory:provenance (hash "kind" "lost-pinned"))
+                                              (memory:provenance (hash "kind" "decayed"))) ","))

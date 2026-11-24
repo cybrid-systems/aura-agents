@@ -1,0 +1,14 @@
+keep=kept
+rollback=rejected
+nodes=4
+keep-nodes=1
+rollback-nodes=1
+hint=#t
+negative=#t
+invalidate=#t
+invalidated-positive=#t
+tenant-isolation=#t
+tenant-main=4
+backend=aura-native
+stage2=backend-not-available
+provenance-classes=lost-conflict,lost-pinned,decayed

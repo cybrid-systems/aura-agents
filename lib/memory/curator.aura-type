@@ -1,0 +1,10 @@
+memory:provenance: Any -> Any
+memory:record!: Any Any -> Any
+memory:hint: Any Any -> Any
+memory:negative?: Any -> Any
+memory:invalidate!: Any Any Any Any -> Any
+memory:prune!: Any -> Any
+memory:policy: -> Any
+memory:backend: -> Any
+memory:use-backend!: Any -> Any
+memory:help: -> Any

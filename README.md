@@ -143,3 +143,15 @@ The positive candidate returns a complete `keep` package; every negative
 case returns `rollback` with reasons. Only the judge's keep verdict asks
 for `keep,rollback`; normal permissions are `read,publish`.
 Docs: `docs/harness.md`; tests: `tests/harness_test.aura`.
+
+## Memory curator (#17)
+
+`lib/memory/curator.aura` is the bridge to the experience graph, not a
+second store. It classifies provenance (kept/rejected/lost-conflict/
+lost-pinned/decayed/replaced), projects Harness keep/rollback and audit
+outcomes through the existing event ingest, serves the bounded #5
+`EXPERIENCE GRAPH` hint (including `AVOID` lines), and triggers #6
+worldline invalidation. Each workspace stays in its own
+`out/experience/<id>/`; `memory:use-backend! "cxx"` is refused until the
+stage-2 runtime exposes an Aura binding and concurrency.
+Docs: `docs/memory.md`; tests: `tests/memory_test.aura`.

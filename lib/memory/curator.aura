@@ -1,0 +1,128 @@
+;; Memory curator (#17): the orchestra's read/write adapter over the
+;; experience graph (#2-#9). It does not duplicate the graph store; it
+;; classifies provenance, ingests Harness/audit outcomes, serves read-only
+;; hints and triggers the #6 invalidation path.
+
+(require "std/string")
+(require "std/json")
+(require "lib/graph/store")
+(require "lib/graph/ingest")
+(require "lib/graph/query")
+(require "lib/graph/invalidate")
+(require "lib/graph/prune")
+
+(export memory:provenance memory:record! memory:hint memory:negative?
+        memory:invalidate! memory:prune! memory:policy memory:backend
+        memory:use-backend! memory:help)
+
+(define (memory:help)
+  "Memory: (memory:record! graph outcome); (memory:hint graph requirement); (memory:invalidate! graph worldline seq reason); backend is aura-native")
+
+(define (memory:backend) "aura-native")
+
+; Stage-2 boundary: the C++26 runtime is not wired; only the Aura-native
+; #3 store is accepted today. The function exists so the caller has one
+; explicit place to switch when the FFI/WAL work lands.
+(define (memory:use-backend! name)
+  (if (equal? name "aura-native")
+    (hash "ok" #t "backend" "aura-native")
+    (hash "ok" #f "error" "backend-not-available" "backend" name)))
+
+(define (memory:policy)
+  (hash "max-nodes" 256 "audit-window" 32 "decay-after-seq" 4096))
+
+; ── provenance classification ──────────────────────────────────
+
+(define (memory:provenance outcome)
+  (let ((v (if (hash? outcome) (hash-ref outcome "verdict" #f) #f))
+        (k (if (hash? outcome) (hash-ref outcome "kind" #f) #f)))
+    (cond
+      ((equal? v "keep") "kept")
+      ((equal? v "rollback") "rejected")
+      ((equal? v "blocked") "rejected")
+      ((equal? k "lost-conflict") "lost-conflict")
+      ((equal? k "lost-pinned") "lost-pinned")
+      ((equal? k "decayed") "decayed")
+      ((equal? k "replaced") "replaced")
+      (else "added"))))
+
+; ── ingest a Harness/audit outcome ─────────────────────────────
+
+(define (memory:max-seq g)
+  (let loop ((xs (graph:all-nodes g))
+             (m (hash-ref g "last_ingested_seq" 0)))
+    (cond ((not (pair? xs)) m)
+          ((> (hash-ref (car xs) "seq" 0) m)
+           (loop (cdr xs) (hash-ref (car xs) "seq" 0)))
+          (else (loop (cdr xs) m)))))
+
+(define (memory:event-kind outcome)
+  (let ((v (hash-ref outcome "verdict" #f))
+        (k (hash-ref outcome "kind" #f)))
+    (cond
+      ((equal? v "keep") "gate-keep")
+      ((equal? v "rollback") "gate-rollback")
+      ((equal? v "blocked") "constraint-rejection")
+      ((string? k) k)
+      (else "constraint-rejection"))))
+
+(define (memory:record! g outcome)
+  (if (not (graph:graph? g))
+    (hash "ok" #f "error" "not-a-graph")
+    (let* ((p (memory:provenance outcome))
+           (kind (memory:event-kind outcome))
+           (task (let ((n (hash-ref outcome "task" 0))) (if (number? n) n 1)))
+           (wl (let ((n (hash-ref outcome "worldline" task))) (if (number? n) n task)))
+           (seq (+ 1 (memory:max-seq g)))
+           (summary (let ((s (hash-ref outcome "summary" #f)))
+                      (if (string? s) s (string-append "memory " p))))
+           (ev (hash "seq" seq
+                     "timestamp_ms" (current-time-ms)
+                     "kind" kind
+                     "task_id" task
+                     "worldline" wl
+                     "candidate_hash" (hash-ref outcome "candidate_hash" "")
+                     "contract_hash" (hash-ref outcome "contract_hash" "")
+                     "reason" (hash-ref outcome "reason" p)
+                     "summary" summary
+                     "facts" (hash "provenance" p
+                                   "verdict" (hash-ref outcome "verdict" "")
+                                   "kind" kind)))
+           (ingested (ingest:events g (list ev))))
+      (hash "ok" (equal? (car ingested) "ok")
+            "provenance" p
+            "event" ev
+            "ingest" ingested))))
+
+; ── read-only planner hint ────────────────────────────────────
+
+(define (memory:hint g requirement)
+  (if (not (graph:graph? g))
+    ""
+    (let ((q (graph:query-for-planner g requirement
+                                      (hash "max-hops" 2 "max-nodes" 6
+                                            "max-chars" 600))))
+      (hash-ref q "hint" ""))))
+
+(define (memory:negative? hint)
+  (and (string? hint)
+       (let ((lower (string-downcase hint)))
+         (or (string-contains? lower "avoid")
+             (string-contains? lower "rollback")
+             (string-contains? lower "reject")))))
+
+; ── invalidation + pruning ────────────────────────────────────
+
+(define (memory:invalidate! g worldline seq reason)
+  (if (not (graph:graph? g))
+    (hash "ok" #f "error" "not-a-graph")
+    (let ((r (invalidate:worldline! g worldline seq reason)))
+      (hash "ok" (equal? (car r) "ok")
+            "invalidated" (if (pair? (cdr r)) (cadr r) 0)
+            "result" r))))
+
+(define (memory:prune! g)
+  (if (not (graph:graph? g))
+    (hash "ok" #f "error" "not-a-graph")
+    (let ((r (prune:run! g (memory:policy))))
+      (hash "ok" #t "result" r "nodes" (graph:node-count g)))))
