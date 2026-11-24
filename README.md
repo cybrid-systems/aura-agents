@@ -132,6 +132,15 @@ action, never a kernel fix PR). Reports include ladder/PRs/budget/
 unadopted requirements and always set `tag`/`release` to `#f`. Docs:
 `docs/lifecycle.md`.
 
+`lib/project/kpi.aura` is the #30 speed ledger: candidates/minute,
+wall per inner round, first-playable, per-milestone phase time, inner/
+outer ratio, N, early stop, OOM and hot-swap failures, all labelled
+`measured` or `target`. `scripts/kpi-compare.sh` runs the real
+`loop:rehearse-bounded` against a generic edit-file/headless-process
+loop on the same four representative phases and writes
+`out/kpi/kpi-{aura,generic,compare}.json`. CI time is kept separate and
+is never counted as inner-loop speed. Docs: `docs/kpi.md`.
+
 `lib/project/scaffold.aura` is the #22 dry-run helper: from the spec it
 returns the repo name, the pinned-baseline `aura.toml` and `aura-ci` CI
 workflow, README/.gitignore/game skeleton, the files to copy from this

@@ -1,0 +1,211 @@
+;; Iteration-speed KPI (#30): collect the inner-loop metrics, compare
+;; them with a same-workload generic edit-file/headless-run baseline, and
+;; label every number as a target or a measurement. No speed claim is
+;; made from CI wall time.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+
+(export kpi:new kpi:targets kpi:add-round kpi:mark-milestone
+        kpi:mark-playable kpi:record-pr kpi:summary kpi:compare
+        kpi:report-action kpi:help)
+
+(define (kpi:help)
+  "KPI: (kpi:new opts); (kpi:add-round kpi {wall_ms,candidates,n,stage,...}); (kpi:summary kpi); (kpi:compare aura generic)")
+
+(define (kp-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (kp-num h k d) (let ((v (kp-get h k d))) (if (number? v) v d)))
+(define (kp-copy h)
+  (let ((out (hash)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
+    out))
+
+(define (kpi:targets)
+  (hash "wall_ms_per_inner_round" 1000
+        "candidates_per_minute" 60
+        "time_to_first_playable_ms" 60000
+        "inner_to_outer_ratio" 10
+        "hot_swap_failures" 0
+        "oom_degraded" 0))
+
+(define (kpi:new opts)
+  (hash "kind" "kpi"
+        "label" (kp-get opts "label" "tank-battle")
+        "includes_inception" (not (equal? (kp-get opts "includes_inception" #t) #f))
+        "hardware" (kp-get opts "hardware" (hash "cpus" 8 "mem_mb" 16384))
+        "started_ms" (current-time-ms)
+        "rounds" '()
+        "milestones" (hash)
+        "prs" '()
+        "rounds_since_pr" 0
+        "hot_swap_failures" 0
+        "oom_degraded" 0))
+
+(define (kpi:add-round kpi round)
+  (cond
+    ((not (hash? kpi)) (hash "ok" #f "error" "not-a-kpi"))
+    ((not (number? (kp-get round "wall_ms" #f))) (hash "ok" #f "error" "bad-wall-ms"))
+    ((< (kp-get round "wall_ms" 0) 0) (hash "ok" #f "error" "bad-wall-ms"))
+    ((not (and (number? (kp-get round "candidates" #f))
+               (> (kp-get round "candidates" 0) 0)))
+     (hash "ok" #f "error" "bad-candidates"))
+    ((not (and (number? (kp-get round "n" #f))
+               (> (kp-get round "n" 0) 0)))
+     (hash "ok" #f "error" "bad-n"))
+    (else
+     (let ((r (kp-copy round)))
+       (hash-set! r "stage" (kp-get r "stage" "unknown"))
+       (hash-set! r "early_stop" (kp-num r "early_stop" 0))
+       (hash-set! r "hot_swap_ok" (not (equal? (kp-get r "hot_swap_ok" #t) #f)))
+       (hash-set! kpi "rounds" (cons r (kp-get kpi "rounds" '())))
+       (hash-set! kpi "rounds_since_pr" (+ 1 (kp-num kpi "rounds_since_pr" 0)))
+       (if (equal? (kp-get r "oom" #f) #t)
+         (hash-set! kpi "oom_degraded" (+ 1 (kp-num kpi "oom_degraded" 0))))
+       (if (not (equal? (kp-get r "hot_swap_ok" #t) #t))
+         (hash-set! kpi "hot_swap_failures" (+ 1 (kp-num kpi "hot_swap_failures" 0))))
+       (hash "ok" #t
+             "rounds" (length (kp-get kpi "rounds" '()))
+             "wall_ms" (kp-num kpi "rounds_since_pr" 0))))))
+
+(define (kpi:mark-milestone kpi stage elapsed_ms)
+  (cond
+    ((not (hash? kpi)) (hash "ok" #f "error" "not-a-kpi"))
+    ((not (and (string? stage) (> (string-length stage) 0)))
+     (hash "ok" #f "error" "bad-stage"))
+    ((not (and (number? elapsed_ms) (>= elapsed_ms 0)))
+     (hash "ok" #f "error" "bad-elapsed"))
+    (else
+     (let ((ms (kp-copy (kp-get kpi "milestones" (hash)))))
+       (hash-set! ms stage elapsed_ms)
+       (hash-set! kpi "milestones" ms)
+       (hash "ok" #t "stage" stage "elapsed_ms" elapsed_ms)))))
+
+(define (kpi:mark-playable kpi elapsed_ms)
+  (kpi:mark-milestone kpi "move" elapsed_ms))
+
+(define (kpi:record-pr kpi)
+  (if (not (hash? kpi))
+    (hash "ok" #f "error" "not-a-kpi")
+    (let ((n (kp-num kpi "rounds_since_pr" 0)))
+      (hash-set! kpi "prs" (cons n (kp-get kpi "prs" '())))
+      (hash-set! kpi "rounds_since_pr" 0)
+      (hash "ok" #t "rounds_since_pr" n "prs" (length (kp-get kpi "prs" '()))))))
+
+(define (kpi-sums kpi)
+  (let ((rounds (kp-get kpi "rounds" '())))
+    (let loop ((xs rounds) (wall 0) (cands 0) (n 0) (early 0))
+      (cond ((not (pair? xs))
+             (hash "rounds" (length rounds) "wall" wall "candidates" cands
+                   "n" n "early_stop" early))
+            (else
+             (loop (cdr xs)
+                   (+ wall (kp-num (car xs) "wall_ms" 0))
+                   (+ cands (kp-num (car xs) "candidates" 0))
+                   (+ n (kp-num (car xs) "n" 0))
+                   (+ early (kp-num (car xs) "early_stop" 0))))))))
+
+(define (kpi-status-higher value target)
+  (cond ((not (number? value)) "not-measured")
+        ((>= value target) "meets-target")
+        (else "below-target")))
+
+(define (kpi-status-lower value target)
+  (cond ((not (number? value)) "not-measured")
+        ((= value 0) "not-measured")
+        ((<= value target) "meets-target")
+        (else "below-target")))
+
+(define (kpi-status-zero value)
+  (cond ((not (number? value)) "not-measured")
+        ((= value 0) "meets-target")
+        (else "below-target")))
+
+(define (kpi:summary kpi)
+  (let* ((sums (kpi-sums kpi))
+         (rounds (kp-num sums "rounds" 0))
+         (wall (kp-num sums "wall" 0))
+         (cands (kp-num sums "candidates" 0))
+         (nsum (kp-num sums "n" 0))
+         (early (kp-num sums "early_stop" 0))
+         (prs (length (kp-get kpi "prs" '())))
+         (milestones (kp-get kpi "milestones" (hash)))
+         (first-playable (hash-ref milestones "move" #f))
+         (wall-per (if (> rounds 0) (quotient wall rounds) 0))
+         (cpm (if (> wall 0) (quotient (* cands 60000) wall) 0))
+         (avg-n (if (> rounds 0) (quotient nsum rounds) 0))
+         (ratio (if (> prs 0) (quotient rounds prs) 0))
+         (targets (kpi:targets))
+         (hot (kp-num kpi "hot_swap_failures" 0))
+         (oom (kp-num kpi "oom_degraded" 0)))
+    (hash "kind" "kpi-summary"
+          "label" (kp-get kpi "label" "tank-battle")
+          "includes_inception" (equal? (kp-get kpi "includes_inception" #t) #t)
+          "hardware" (kp-get kpi "hardware" (hash))
+          "rounds" rounds
+          "candidates" cands
+          "wall_ms" wall
+          "wall_ms_per_inner_round" wall-per
+          "candidates_per_minute" cpm
+          "time_to_first_playable_ms" first-playable
+          "time_per_milestone" milestones
+          "inner_to_outer_ratio" ratio
+          "avg_n" avg-n
+          "early_stop" early
+          "oom_degraded" oom
+          "hot_swap_failures" hot
+          "targets" targets
+          "labels" (hash "wall_ms_per_inner_round" "measured"
+                         "candidates_per_minute" "measured"
+                         "time_to_first_playable_ms" (if (number? first-playable)
+                                                       "measured" "not-measured")
+                         "inner_to_outer_ratio" (if (> prs 0) "measured" "not-measured")
+                         "targets" "target")
+          "status" (hash
+                     "wall_ms_per_inner_round"
+                     (kpi-status-lower wall-per (hash-ref targets "wall_ms_per_inner_round" 1000))
+                     "candidates_per_minute"
+                     (kpi-status-higher cpm (hash-ref targets "candidates_per_minute" 60))
+                     "time_to_first_playable_ms"
+                     (if (number? first-playable)
+                       (kpi-status-lower first-playable
+                                         (hash-ref targets "time_to_first_playable_ms" 60000))
+                       "not-measured")
+                     "inner_to_outer_ratio"
+                     (if (> prs 0)
+                       (kpi-status-higher ratio (hash-ref targets "inner_to_outer_ratio" 10))
+                       "not-measured")
+                     "hot_swap_failures" (kpi-status-zero hot)
+                     "oom_degraded" (kpi-status-zero oom)))))
+
+(define (kpi:compare aura generic)
+  (let* ((aw (kp-num aura "wall_ms_per_inner_round" 0))
+         (gw (kp-num generic "wall_ms_per_inner_round" 0))
+         (ac (kp-num aura "candidates_per_minute" 0))
+         (gc (kp-num generic "candidates_per_minute" 0))
+         (af (kp-num aura "time_to_first_playable_ms" 0))
+         (gf (kp-num generic "time_to_first_playable_ms" 0))
+         (same-inception (equal? (kp-get aura "includes_inception" #t)
+                                 (kp-get generic "includes_inception" #t))))
+    (hash "kind" "kpi-comparison"
+          "aura" aura
+          "generic" generic
+          "speedup_wall" (if (> aw 0) (/ (* 1.0 gw) aw) 0)
+          "candidates_ratio" (if (> gc 0) (/ (* 1.0 ac) gc) 0)
+          "first_playable_ratio" (if (and same-inception (> af 0) (> gf 0))
+                                    (/ (* 1.0 gf) af)
+                                    "not-comparable")
+          "winner_wall" (if (and (> aw 0) (> gw 0))
+                           (if (< aw gw) "aura" "generic") "not-measured")
+          "labels" (hash "speedup_wall" "measured"
+                         "candidates_ratio" "measured"
+                         "first_playable_ratio" (if same-inception
+                                                 "measured" "not-comparable")))))
+
+(define (kpi:report-action report)
+  (hash "action" "comment-issue"
+        "repo" "cybrid-systems/aura"
+        "issue" 5405
+        "body" (json-encode report)
+        "tag" #f
+        "release" #f))

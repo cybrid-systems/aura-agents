@@ -1,0 +1,67 @@
+;; Issue #30 — iteration-speed KPI collection and target labeling.
+(require "std/string")
+(require "lib/project/kpi")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define k (kpi:new (hash "label" "tank-battle"
+                         "hardware" (hash "cpus" 8 "mem_mb" 16384))))
+(kpi:add-round k (hash "wall_ms" 400 "candidates" 4 "n" 4
+                       "stage" "move" "early_stop" 0
+                       "oom" #f "hot_swap_ok" #t))
+(kpi:add-round k (hash "wall_ms" 600 "candidates" 6 "n" 6
+                       "stage" "move" "early_stop" 1
+                       "oom" #f "hot_swap_ok" #t))
+(kpi:add-round k (hash "wall_ms" 1000 "candidates" 8 "n" 8
+                       "stage" "fight" "early_stop" 2
+                       "oom" #t "hot_swap_ok" #f))
+(kpi:mark-playable k 5000)
+(kpi:mark-milestone k "fight" 15000)
+(kpi:mark-milestone k "levels" 30000)
+(kpi:mark-milestone k "fun" 60000)
+(kpi:record-pr k)
+
+(define s (kpi:summary k))
+(line "kind" (hash-ref s "kind"))
+(line "rounds" (hash-ref s "rounds"))
+(line "wall-per-round" (hash-ref s "wall_ms_per_inner_round"))
+(line "candidates-per-minute" (hash-ref s "candidates_per_minute"))
+(line "first-playable" (hash-ref s "time_to_first_playable_ms"))
+(line "ratio" (hash-ref s "inner_to_outer_ratio"))
+(line "avg-n" (hash-ref s "avg_n"))
+(line "early-stop" (hash-ref s "early_stop"))
+(line "oom" (hash-ref s "oom_degraded"))
+(line "hot-failures" (hash-ref s "hot_swap_failures"))
+(line "milestone-levels" (hash-ref (hash-ref s "time_per_milestone") "levels"))
+(line "target-wall" (hash-ref (hash-ref s "targets") "wall_ms_per_inner_round"))
+(line "label-target" (hash-ref (hash-ref s "labels") "targets"))
+(line "label-wall" (hash-ref (hash-ref s "labels") "wall_ms_per_inner_round"))
+(line "status-wall" (hash-ref (hash-ref s "status") "wall_ms_per_inner_round"))
+(line "status-candidates" (hash-ref (hash-ref s "status") "candidates_per_minute"))
+(line "status-playable" (hash-ref (hash-ref s "status") "time_to_first_playable_ms"))
+(line "status-ratio" (hash-ref (hash-ref s "status") "inner_to_outer_ratio"))
+(line "status-hot" (hash-ref (hash-ref s "status") "hot_swap_failures"))
+(line "status-oom" (hash-ref (hash-ref s "status") "oom_degraded"))
+
+(define generic (hash "wall_ms_per_inner_round" 12000
+                      "candidates_per_minute" 20
+                      "time_to_first_playable_ms" 300000))
+(define cmp (kpi:compare s generic))
+(line "compare-kind" (hash-ref cmp "kind"))
+(line "compare-winner" (hash-ref cmp "winner_wall"))
+(line "speedup-gt1" (> (hash-ref cmp "speedup_wall") 1))
+(line "candidates-ratio-gt1" (> (hash-ref cmp "candidates_ratio") 1))
+(line "playable-ratio-gt1" (> (hash-ref cmp "first_playable_ratio") 1))
+
+(define action (kpi:report-action cmp))
+(line "action" (hash-ref action "action"))
+(line "action-issue" (hash-ref action "issue"))
+(line "action-body" (> (string-length (hash-ref action "body" "")) 0))
+
+(line "bad-wall" (hash-ref (kpi:add-round k (hash "wall_ms" -1 "candidates" 4 "n" 4)) "error"))
+(line "bad-n" (hash-ref (kpi:add-round k (hash "wall_ms" 10 "candidates" 4)) "error"))
+(line "bad-milestone" (hash-ref (kpi:mark-milestone k "" 1) "error"))

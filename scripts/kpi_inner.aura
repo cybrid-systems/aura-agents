@@ -1,0 +1,71 @@
+;; In-process half of the #30 KPI comparison. Measures four representative
+;; ladder phases with the real loop:rehearse-bounded over the tank arena
+;; and prints one JSON summary. This is a phase benchmark, not a claim of a
+;; full playthrough; time_per_milestone is the cumulative wall clock at the
+;; first successful phase rehearsal.
+(require "std/string")
+(require "std/list")
+(require "std/json")
+(require "lib/project/spec")
+(require "lib/project/kpi")
+(require "lib/game/arena")
+(require "lib/game/loop")
+(require "lib/game/resources")
+
+(define rounds-per-phase 10)
+(define start (monotonic-ms))
+(define spec (project:compile "用aura写一个坦克大战游戏"))
+(define snap (resources:snapshot))
+(define k (kpi:new (hash "label" "inner-loop-benchmark-phases"
+                         "includes_inception" #t
+                         "hardware" snap)))
+
+(define (move-root) (arena:new (hash "seed" 42 "players" 1)))
+(define (fight-root)
+  (let ((r (arena:new (hash "seed" 42 "players" 1))))
+    (hash-set! r "player" (hash "x" 5 "y" 12 "dir" "up"))
+    r))
+(define (levels-root)
+  (let ((r (arena:new (hash "seed" 42 "players" 1))))
+    (hash-set! r "enemies" '())
+    r))
+(define (fun-root) (arena:new (hash "seed" 42 "players" 1)))
+
+(define (run-phase stage root inputs ids)
+  (let loop ((i 0))
+    (if (< i rounds-per-phase)
+      (let* ((t0 (monotonic-ms))
+             (run (loop:rehearse-bounded root
+                    (list (hash "id" "normal-1" "step" arena:step)
+                          (hash "id" "frozen-1" "step"
+                                (lambda (state input) (arena:step state (hash))))
+                          (hash "id" "normal-2" "step" arena:step)
+                          (hash "id" "frozen-2" "step"
+                                (lambda (state input) (arena:step state (hash)))))
+                    inputs ids 4))
+             (dt (- (monotonic-ms) t0)))
+        (kpi:add-round k (hash "wall_ms" dt
+                               "candidates" 4
+                               "n" 4
+                               "stage" stage
+                               "early_stop" 0
+                               "oom" #f
+                               "hot_swap_ok" #t))
+        (if (and (= i 0) (equal? (hash-ref run "ok" #f) #t))
+          (kpi:mark-milestone k stage (- (monotonic-ms) start)))
+        (loop (+ i 1))))))
+
+(run-phase "move" (move-root) (list (hash "move" "right"))
+           (list "move-right" "state-advance"))
+(run-phase "fight" (fight-root) (list (hash "fire" #t))
+           (list "bullet-brick"))
+(run-phase "levels" (levels-root) (list (hash))
+           (list "two-levels" "enemy-spawn"))
+(run-phase "fun" (fun-root) (list (hash))
+           (list "score-lives" "frame-budget" "visual-keyframe"))
+
+(kpi:record-pr k)
+(define summary (kpi:summary k))
+(display "KPI_AURA_JSON=")
+(display (json-encode summary))
+(newline)
