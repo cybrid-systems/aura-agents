@@ -1,0 +1,151 @@
+;; Bootstrap red lines (#36): one testable policy for every green-field
+;; repository. The checks are pure; the caller records the returned audit
+;; value. Nothing here creates a tag, release, push or merge.
+
+(require "std/string")
+(require "std/list")
+
+(export redline:policy redline:protected redline:check redline:guard-genome
+        redline:merge redline:release redline:audit redline:help)
+
+(define (redline:help)
+  "Redlines (#36): (redline:check action); (redline:guard-genome genome); (redline:merge merge); (redline:release action)")
+
+(define (rl-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (rl-str h k d) (let ((v (rl-get h k d))) (if (string? v) v d)))
+
+(define (redline:protected)
+  (list "contract" "gate" "approval" "audit" "sandbox" "sentinel"
+        "assertions" "heldout" "held-out" "evaluate" "constraints"
+        "holdout-split" "frame-budget" "branch-protection"))
+
+(define (redline:policy)
+  (hash "kind" "bootstrap-redlines"
+        "sentinel-immutable" #t
+        "ingestion-grants" #f
+        "revertible" #t
+        "force-push" #f
+        "admin-merge" #f
+        "direct-push" #f
+        "auto-release" #f
+        "explicit-release" "user-only"
+        "protected" (redline:protected)))
+
+(define (rl-result ok action reason . rest)
+  (hash "ok" ok
+        "action" (if (string? action) action "unknown")
+        "reason" reason
+        "policy" (redline:policy)
+        "detail" (if (pair? rest) (car rest) (hash))))
+
+; ── sentinel mutation ────────────────────────────────────────
+
+(define (rl-protected-target? target)
+  (and (string? target)
+       (let loop ((xs (redline:protected)))
+         (cond ((not (pair? xs)) #f)
+               ((string-contains? target (car xs)) #t)
+               (else (loop (cdr xs)))))))
+
+(define (redline-guard-genome genome)
+  (let ((keys (hash-keys genome))
+        (src (rl-str genome "source" "")))
+    (let loop ((ks keys))
+      (cond
+        ((not (pair? ks)) #f)
+        ((rl-protected-target? (car ks)) (string-append "protected-key:" (car ks)))
+        ((and (string? src)
+              (or (string-contains? src "game:check")
+                  (string-contains? src "harness:judge")
+                  (string-contains? src "sentinel:")
+                  (string-contains? src "base-destroyed-lose")))
+         "protected-ref: game-sentinel")
+        (else (loop (cdr ks)))))))
+
+(define (redline:guard-genome genome)
+  (cond
+    ((not (hash? genome))
+     (rl-result #f "genome" "genome:not-a-hash"))
+    ((rl-protected-target? (rl-str genome "source" ""))
+     (rl-result #f "genome" "protected-ref: game-sentinel"))
+    (else
+     (let ((why (redline-guard-genome genome)))
+       (if why
+         (rl-result #f "genome" why)
+         (rl-result #t "genome" "sentinel-untouched"))))))
+
+; ── merges and releases ─────────────────────────────────────
+
+(define (redline:merge merge)
+  (let ((protected (eq? (rl-get merge "branch_protected" #f) #t))
+        (checks (eq? (rl-get merge "required_checks" #f) #t))
+        (force (rl-get merge "force" #f))
+        (admin (rl-get merge "admin" #f))
+        (direct (rl-get merge "direct" #f)))
+    (cond
+      ((eq? force #t) (rl-result #f "merge" "force-push"))
+      ((eq? admin #t) (rl-result #f "merge" "admin-merge"))
+      ((eq? direct #t) (rl-result #f "merge" "direct-push"))
+      ((not protected) (rl-result #f "merge" "branch-protection-required"))
+      ((not checks) (rl-result #f "merge" "required-checks-required"))
+      (else (rl-result #t "merge" "protected-merge")))))
+
+(define (redline:release action)
+  (let ((explicit (eq? (rl-get action "explicit_user" #f) #t))
+        (auto (eq? (rl-get action "auto" #f) #t))
+        (kind (rl-str action "kind" "release")))
+    (cond
+      (auto (rl-result #f kind "no-auto-release"))
+      ((not explicit) (rl-result #f kind "explicit-user-required"))
+      (else (rl-result #t kind "user-authorized")))))
+
+; ── ingestion never grants ──────────────────────────────────
+
+(define (rl-ingested-source? src)
+  (let ((s (if (string? src) (string-downcase src) "")))
+    (or (string=? s "ingest")
+        (string=? s "webhook")
+        (string=? s "message")
+        (string=? s "tool-description")
+        (string=? s "user-paste")
+        (string=? s "external"))))
+
+(define (redline:check action)
+  (let ((kind (rl-str action "kind" ""))
+        (op (rl-str action "op" "")))
+    (cond
+      ((or (string=? kind "mutate-sentinel")
+           (string=? kind "evolve-sentinel")
+           (string=? kind "edit-sentinel"))
+       (rl-result #f kind "sentinel-immutable"))
+      ((or (string=? kind "force-push") (string=? op "force-push"))
+       (rl-result #f "force-push" "force-push"))
+      ((or (string=? kind "admin-merge") (string=? op "admin-merge"))
+       (rl-result #f "admin-merge" "admin-merge"))
+      ((or (string=? kind "direct-push") (string=? op "direct-push"))
+       (rl-result #f "direct-push" "direct-push"))
+      ((or (string=? kind "tag") (string=? kind "release")
+           (string=? kind "auto-release"))
+       (redline:release action))
+      ((or (string=? kind "merge") (string=? kind "auto-merge"))
+       (redline:merge (rl-get action "merge" (hash))))
+      ((or (string=? kind "ingest-grant")
+           (string=? kind "ingest"))
+       (let ((src (rl-str action "source" ""))
+             (grants (rl-get action "grants" '())))
+         (if (and (rl-ingested-source? src) (pair? grants))
+           (rl-result #f "ingest" "ingestion-never-grants")
+           (rl-result #t "ingest" "data-only"))))
+      ((or (string=? kind "revert-pr") (string=? kind "revert"))
+       (rl-result #t "revert-pr" "revertible"))
+      ((or (string=? kind "post-task") (string=? kind "dispatch"))
+       (rl-result #t kind "dispatch-allowed"))
+      (else (rl-result #f kind "unknown-action")))))
+
+(define (redline:audit action)
+  (let ((r (redline:check action)))
+    (hash "kind" "redline-audit"
+          "decision" (if (rl-get r "ok" #f) "ALLOW" "REFUSE")
+          "action" (rl-get r "action" "")
+          "reason" (rl-get r "reason" "")
+          "policy" (redline:policy))))

@@ -1,0 +1,58 @@
+;; Issue #36 — sentinel-immutable, ingestion-never-grants, revertible
+;; merges, no force/admin/direct push and no automatic release.
+(require "std/string")
+(require "lib/project/redline")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (ok kind extra)
+  (let ((a (hash "kind" kind)))
+    (for-each (lambda (k) (hash-set! a k (hash-ref extra k))) (hash-keys extra))
+    (hash-ref (redline:check a) "ok")))
+
+(line "policy-version" (hash-ref (redline:policy) "kind"))
+(line "protected" (length (redline:protected)))
+(line "mutate-sentinel" (ok "mutate-sentinel" (hash)))
+(line "edit-sentinel" (hash-ref (redline:check (hash "kind" "edit-sentinel"
+                                                     "path" "sentinel/plane.aura")) "ok"))
+(line "force" (ok "force-push" (hash)))
+(line "admin" (ok "admin-merge" (hash)))
+(line "direct" (ok "direct-push" (hash)))
+(line "auto-release" (hash-ref (redline:check (hash "kind" "auto-release")) "ok"))
+(line "tag-no-user" (hash-ref (redline:check (hash "kind" "tag" "name" "v1")) "ok"))
+(line "tag-user" (hash-ref (redline:check (hash "kind" "tag" "name" "v1"
+                                                "explicit_user" #t)) "ok"))
+(line "release-auto" (hash-ref (redline:check (hash "kind" "release"
+                                                     "auto" #t
+                                                     "explicit_user" #t)) "ok"))
+(line "revert" (hash-ref (redline:check (hash "kind" "revert-pr" "pr" 7)) "ok"))
+(line "ingest-grant" (hash-ref (redline:check (hash "kind" "ingest-grant"
+                                                    "source" "webhook"
+                                                    "grants" (list "http-post"))) "ok"))
+(line "ingest-data" (hash-ref (redline:check (hash "kind" "ingest"
+                                                   "source" "webhook")) "ok"))
+(line "merge-protected" (hash-ref (redline:check
+                                    (hash "kind" "merge"
+                                          "merge" (hash "branch_protected" #t
+                                                        "required_checks" #t
+                                                        "force" #f
+                                                        "admin" #f
+                                                        "direct" #f))) "ok"))
+(line "merge-force" (hash-ref (redline:check
+                                (hash "kind" "merge"
+                                      "merge" (hash "branch_protected" #t
+                                                    "required_checks" #t
+                                                    "force" #t))) "ok"))
+(line "merge-unprotected" (hash-ref (redline:check
+                                      (hash "kind" "merge"
+                                            "merge" (hash "branch_protected" #f
+                                                          "required_checks" #t))) "ok"))
+(line "genome-protected" (hash-ref (redline:guard-genome (hash "assertions" (list "x"))) "ok"))
+(line "genome-source" (hash-ref (redline:guard-genome (hash "source" "(game:check a b c d \"base-destroyed-lose\")")) "ok"))
+(line "genome-safe" (hash-ref (redline:guard-genome (hash "mutation-ops" (list "rename"))) "ok"))
+(line "audit-decision" (hash-ref (redline:audit (hash "kind" "force-push")) "decision"))
+(line "unknown" (hash-ref (redline:check (hash "kind" "nope")) "reason"))
