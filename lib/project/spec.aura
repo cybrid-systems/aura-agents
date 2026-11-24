@@ -1,0 +1,305 @@
+;; Project inception (#21): one-line game requirement -> verifiable Game
+;; Spec, the fixed four-level milestone ladder and the written default
+;; table. Pure data: no repository creation, no network, no questions.
+
+(require "std/string")
+(require "std/list")
+(require "lib/score")
+
+(export project:compile project:extend project:score project:defaults
+        project:milestone project:assertions project:fingerprint project:help)
+
+(define (project:help)
+  "Project: (project:compile requirement) -> (ok spec) | (error reason); (project:extend spec extra); (project:score spec milestone mode)")
+
+(define (pj-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (pj-has? s x) (string-contains? s x))
+(define (pj-num h k d) (let ((v (pj-get h k d))) (if (number? v) v d)))
+
+; ── written defaults ─────────────────────────────────────────────
+
+(define (project:defaults)
+  (list
+    (hash "key" "players" "value" 1 "note" "未说明人数时默认单人")
+    (hash "key" "style" "value" "classic-battle-city" "note" "未说明风格时默认经典坦克大战")
+    (hash "key" "view" "value" "top-down" "note" "未说明视角时默认俯视")
+    (hash "key" "movement" "value" "four-direction" "note" "未说明移动时默认四向")
+    (hash "key" "brick" "value" #t "note" "砖墙默认可破坏")
+    (hash "key" "steel" "value" #f "note" "钢板默认不可破坏")
+    (hash "key" "water" "value" #f "note" "水默认不可通行")
+    (hash "key" "base" "value" #t "note" "默认存在基地")
+    (hash "key" "enemy_spawn" "value" "top" "note" "敌人默认从顶部生成")
+    (hash "key" "tick_ms" "value" 16 "note" "默认固定 16ms tick")
+    (hash "key" "frame_budget_ms" "value" 50 "note" "单 tick 超过 50ms 视为超预算")
+    (hash "key" "levels" "value" 2 "note" "默认至少两关")
+    (hash "key" "seed" "value" 42 "note" "无头默认固定 seed 42")
+    (hash "key" "resolution" "value" "1280x720" "note" "默认分辨率")
+    (hash "key" "input" "value" "keyboard" "note" "默认键盘")))
+
+(define (pj-override-for overrides key)
+  (let loop ((xs overrides))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "key" "") key) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (pj-overrides req)
+  (let* ((players (cond ((pj-has? req "双人") 2)
+                        ((pj-has? req "三人") 3)
+                        ((pj-has? req "单人") 1)
+                        (else #f)))
+         (levels (cond ((pj-has? req "两关") 2)
+                       ((pj-has? req "二关") 2)
+                       ((pj-has? req "三关") 3)
+                       ((pj-has? req "四关") 4)
+                       (else #f)))
+         (style (cond ((pj-has? req "像素") "pixel")
+                      ((pj-has? req "写实") "realistic")
+                      (else #f)))
+         (view (if (pj-has? req "横版") "side-scrolling" #f))
+         (input (cond ((pj-has? req "手柄") "gamepad")
+                      ((pj-has? req "触屏") "touch")
+                      (else #f)))
+         (steel (cond ((or (pj-has? req "钢板可破") (pj-has? req "钢板可破坏")) #t)
+                      ((pj-has? req "钢板不可破") #f)
+                      (else 'unspecified)))
+         (base (cond ((or (pj-has? req "不要基地") (pj-has? req "无基地")) #f)
+                     ((or (pj-has? req "要基地") (pj-has? req "有基地")) #t)
+                     (else 'unspecified))))
+    (append
+      (if players (list (hash "key" "players" "value" players
+                             "reason" "explicit requirement")) '())
+      (if levels (list (hash "key" "levels" "value" levels
+                            "reason" "explicit requirement")) '())
+      (if style (list (hash "key" "style" "value" style
+                           "reason" "explicit requirement")) '())
+      (if view (list (hash "key" "view" "value" view
+                           "reason" "explicit requirement")) '())
+      (if input (list (hash "key" "input" "value" input
+                            "reason" "explicit requirement")) '())
+      (if (not (equal? steel 'unspecified))
+        (list (hash "key" "steel" "value" steel
+                    "reason" "explicit requirement")) '())
+      (if (not (equal? base 'unspecified))
+        (list (hash "key" "base" "value" base
+                    "reason" "explicit requirement")) '()))))
+
+(define (pj-default-entry d overrides)
+  (let* ((key (hash-ref d "key"))
+         (o (pj-override-for overrides key)))
+    (hash "key" key
+          "value" (if o (hash-ref o "value") (hash-ref d "value"))
+          "default" (hash-ref d "value")
+          "applied" (not o)
+          "note" (hash-ref d "note"))))
+
+(define (pj-entry entries key)
+  (let loop ((xs entries))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "key" "") key) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (pj-value entries key)
+  (let ((e (pj-entry entries key))) (if e (hash-ref e "value") #f)))
+
+(define (pj-audit overrides)
+  (map (lambda (d)
+         (let* ((key (hash-ref d "key"))
+                (o (pj-override-for overrides key)))
+           (hash "event" (if o "default-overridden" "default-applied")
+                 "key" key
+                 "value" (if o (hash-ref o "value") (hash-ref d "value"))
+                 "default" (hash-ref d "value")
+                 "reason" (if o (hash-ref o "reason" "explicit")
+                             (hash-ref d "note")))))
+       (project:defaults)))
+
+; ── assertion catalog (#23 placeholders) ────────────────────────
+
+(define (project:assertions)
+  (list
+    (hash "id" "move-right" "milestone" "move" "kind" "state"
+          "description" "按住右键时 x 按速度增加" "placeholder" #t)
+    (hash "id" "move-collision" "milestone" "move" "kind" "state"
+          "description" "玩家不能进入墙体格" "placeholder" #t)
+    (hash "id" "state-advance" "milestone" "move" "kind" "state"
+          "description" "固定 tick 推进帧与状态" "placeholder" #t)
+    (hash "id" "fire-bullet" "milestone" "fight" "kind" "state"
+          "description" "开火生成子弹并受冷却限制" "placeholder" #t)
+    (hash "id" "bullet-brick" "milestone" "fight" "kind" "state"
+          "description" "子弹命中砖墙后砖被破坏" "placeholder" #t)
+    (hash "id" "bullet-steel" "milestone" "fight" "kind" "state"
+          "description" "子弹不破坏钢板" "placeholder" #t)
+    (hash "id" "player-water" "milestone" "levels" "kind" "state"
+          "description" "玩家不能进入水域" "placeholder" #t)
+    (hash "id" "enemy-spawn" "milestone" "levels" "kind" "state"
+          "description" "敌人按 seed 从顶部生成" "placeholder" #t)
+    (hash "id" "enemy-destroy" "milestone" "fight" "kind" "state"
+          "description" "子弹命中敌人后敌人被销毁" "placeholder" #t)
+    (hash "id" "base-destroyed-lose" "milestone" "levels" "kind" "state"
+          "description" "基地被摧毁后进入失败状态" "placeholder" #t)
+    (hash "id" "clear-enemies-win" "milestone" "levels" "kind" "state"
+          "description" "清空敌人后进入过关状态" "placeholder" #t)
+    (hash "id" "two-levels" "milestone" "levels" "kind" "state"
+          "description" "第一关通过后加载第二关" "placeholder" #t)
+    (hash "id" "score-lives" "milestone" "fun" "kind" "state"
+          "description" "结束时计分与生命与脚本一致" "placeholder" #t)
+    (hash "id" "frame-budget" "milestone" "fun" "kind" "frame-budget"
+          "description" "p95 tick 不超过 50ms" "placeholder" #t)
+    (hash "id" "visual-keyframe" "milestone" "fun" "kind" "visual"
+          "description" "关键帧小体积视觉差在阈值内" "placeholder" #t)
+    (hash "id" "player-two-controls" "milestone" "fun" "kind" "state"
+          "description" "第二名玩家拥有独立控制" "placeholder" #t)))
+
+; ── rules, entities, ladder ────────────────────────────────────
+
+(define (pj-rule id text milestone assertions)
+  (hash "id" id "text" text "milestone" milestone
+        "assertions" assertions "automatable" #t))
+
+(define (pj-rules players base steel)
+  (append
+    (list
+      (pj-rule "player-move" "玩家按输入四向移动并与地形碰撞" "move"
+               (list "move-right" "move-collision" "state-advance"))
+      (pj-rule "fire" "玩家可发射弹药" "fight" (list "fire-bullet"))
+      (pj-rule "brick" "弹药命中砖墙后砖被破坏" "fight" (list "bullet-brick"))
+      (pj-rule "steel" (if steel "钢板可被弹药破坏" "钢板不被弹药破坏") "fight"
+               (list "bullet-steel"))
+      (pj-rule "enemy" "敌人由 seed 从顶部生成并可被销毁" "levels"
+               (list "enemy-spawn" "enemy-destroy"))
+      (pj-rule "water" "水域不可通行" "levels" (list "player-water"))
+      (pj-rule "clear-win" "清空敌人后过关" "levels" (list "clear-enemies-win"))
+      (pj-rule "two-levels" "至少两关或等价关卡加载" "levels" (list "two-levels"))
+      (pj-rule "score-lives" "计分与生命按规则结算" "fun" (list "score-lives"))
+      (pj-rule "frame-budget" "每 tick 帧预算不超过 50ms" "fun" (list "frame-budget"))
+      (pj-rule "visual" "关键帧小体积视觉夹具" "fun" (list "visual-keyframe")))
+    (if base
+      (list (pj-rule "base" "基地被摧毁则失败" "levels" (list "base-destroyed-lose")))
+      '())
+    (if (> players 1)
+      (list (pj-rule "player-two" "第二名玩家有独立控制" "fun" (list "player-two-controls")))
+      '())))
+
+(define (pj-entities players base steel)
+  (append
+    (list (hash "kind" "player" "count" players "hp" 1 "movement" "four-direction")
+          (hash "kind" "enemy" "spawn" "top" "ai" "patrol-fire")
+          (hash "kind" "bullet" "damage" 1)
+          (hash "kind" "brick" "destructible" #t)
+          (hash "kind" "steel" "destructible" steel)
+          (hash "kind" "water" "passable" #f))
+    (if base (list (hash "kind" "base" "destructible" #t)) '())))
+
+(define (pj-collision-rules base steel)
+  (append
+    (list (hash "pair" (list "bullet" "brick") "effect" "destroy-brick")
+          (hash "pair" (list "bullet" "steel")
+                "effect" (if steel "destroy-steel" "none"))
+          (hash "pair" (list "bullet" "enemy") "effect" "destroy-enemy")
+          (hash "pair" (list "player" "water") "effect" "block")
+          (hash "pair" (list "player" "wall") "effect" "block"))
+    (if base
+      (list (hash "pair" (list "bullet" "base") "effect" "destroy-base"))
+      '())))
+
+(define (pj-controls players)
+  (let ((p1 (list "WASD" "Space")))
+    (if (> players 1)
+      (list (hash "player" 1 "keys" p1)
+            (hash "player" 2 "keys" (list "ArrowKeys" "Enter")))
+      (list (hash "player" 1 "keys" p1)))))
+
+(define (pj-milestones players)
+  (list
+    (hash "id" "move" "name" "能动" "requires" '()
+          "assertions" (list "move-right" "move-collision" "state-advance")
+          "goal" "玩家可移动、碰撞成立、状态帧稳定推进")
+    (hash "id" "fight" "name" "能打" "requires" (list "move")
+          "assertions" (list "fire-bullet" "bullet-brick" "bullet-steel" "enemy-destroy")
+          "goal" "可发射并命中砖与敌人")
+    (hash "id" "levels" "name" "有关卡" "requires" (list "fight")
+          "assertions" (list "two-levels" "enemy-spawn" "base-destroyed-lose" "clear-enemies-win")
+          "goal" "至少两关、出生点、基地与胜负结算")
+    (hash "id" "fun" "name" "好玩" "requires" (list "levels")
+          "assertions" (append (list "score-lives" "frame-budget" "visual-keyframe")
+                               (if (> players 1) (list "player-two-controls") '()))
+          "goal" "AI、计分/生命、帧预算与固定脚本可玩一关")))
+
+; ── compile / extend / score ───────────────────────────────────
+
+(define (pj-canonical req players rules milestones)
+  (string-append req "|" (number->string players) "|"
+                 (string-join (map (lambda (r) (hash-ref r "id" "")) rules) ",") "|"
+                 (string-join (map (lambda (m) (hash-ref m "id" "")) milestones) ",")))
+
+(define (project:compile requirement)
+  (if (not (and (string? requirement) (> (string-length requirement) 0)))
+    (list "error" "bad-requirement")
+    (let* ((overrides (pj-overrides requirement))
+           (entries (map (lambda (d) (pj-default-entry d overrides))
+                         (project:defaults)))
+           (players (pj-value entries "players"))
+           (levels (pj-value entries "levels"))
+           (base (pj-value entries "base"))
+           (steel (pj-value entries "steel"))
+           (style (pj-value entries "style"))
+           (view (pj-value entries "view"))
+           (input (pj-value entries "input"))
+           (rules (pj-rules players base steel))
+           (milestones (pj-milestones players))
+           (fp (score:contract-fingerprint
+                 requirement
+                 (list (list "canonical" (pj-canonical requirement players rules milestones))))))
+      (list "ok"
+            (hash "kind" "game-spec"
+                  "id" (string-append "game-" (substring fp 0 (min 8 (string-length fp))))
+                  "source" requirement
+                  "genre" "2d-level-shooter"
+                  "theme" (if (pj-has? requirement "坦克") "tank-battle" "generic")
+                  "view" view
+                  "style" style
+                  "players" players
+                  "controls" (pj-controls players)
+                  "input_devices" (list input)
+                  "win_conditions" (list "clear-all-enemies")
+                  "lose_conditions" (append
+                                      (if base (list "base-destroyed") '())
+                                      (list "lives-exhausted"))
+                  "entities" (pj-entities players base steel)
+                  "collision_rules" (pj-collision-rules base steel)
+                  "levels" (hash "count" levels "generation" "seeded")
+                  "seed" (hash "strategy" "fixed-seeded" "value" 42)
+                  "entry" (hash "headless" "aura run --headless --seed 42"
+                                "headed" "aura run")
+                  "rules" rules
+                  "assertions" (project:assertions)
+                  "milestones" milestones
+                  "defaults" entries
+                  "audit" (pj-audit overrides)
+                  "overrides" overrides
+                  "fingerprint" fp)))))
+
+(define (project:extend spec extra)
+  (if (not (hash? spec))
+    (list "error" "not-a-spec")
+    (project:compile (string-append (pj-get spec "source" "") " " extra))))
+
+(define (project:milestone spec id)
+  (let loop ((xs (pj-get spec "milestones" '())))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define (project:fingerprint spec) (pj-get spec "fingerprint" ""))
+
+(define (project:score spec milestone-id mode)
+  (let* ((ms (project:milestone spec milestone-id))
+         (ids (if ms (hash-ref ms "assertions" '()) '()))
+         (contract (map (lambda (id) (list id "pass")) ids))
+         (req (string-append "game:" (pj-get spec "id" "") ":" milestone-id))
+         (sc (score:make req contract ids mode)))
+    (hash-set! sc "spec_fingerprint" (project:fingerprint spec))
+    (hash-set! sc "milestone" milestone-id)
+    (hash-set! sc "budget" (hash "wall_ms" (if (equal? milestone-id "fun") 600000 300000)
+                                 "tokens" 400000 "failures" 3))
+    sc))

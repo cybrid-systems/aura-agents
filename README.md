@@ -100,6 +100,20 @@ aura test
 python3 scripts/check-baseline.py --self
 ```
 
+## Project inception (#21)
+
+`lib/project/spec.aura` turns one green-field sentence such as
+`用 aura 写一个坦克大战游戏` into a verifiable Game Spec: entities,
+collision rules, win/lose conditions, seeded levels, headless entry and
+the fixed four-level ladder `move → fight → levels → fun`. Every rule
+names at least one assertion placeholder for the in-process frame checks
+of #23. Missing details use the written default table and are recorded
+in `spec.audit`; the module never asks a clarifying question. The same
+sentence compiles to the same fingerprint, and `project:extend` adds
+constraints such as `要双人` without overturning unrelated defaults.
+`project:score` emits the #12 Score for one milestone with the spec
+fingerprint and a #5403-style budget. Docs: `docs/project-spec.md`.
+
 ## Experience graph (#2-#9)
 
 `lib/graph/` is a structured, auditable experience graph built in Aura-native code. It never stores model weights, embeddings or source text.

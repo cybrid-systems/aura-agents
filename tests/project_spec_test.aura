@@ -1,0 +1,82 @@
+;; Issue #21 — one-line game requirement -> verifiable spec + fixed
+;; four-level ladder + written defaults. Pure rules; no network.
+(require "std/string")
+(require "lib/project/spec")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (assertion-id? assertions id)
+  (let loop ((xs assertions))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "id" "") id) #t)
+          (else (loop (cdr xs))))))
+
+(define (rule-covered? assertions r)
+  (let loop ((ids (hash-ref r "assertions" '())))
+    (cond ((not (pair? ids)) #t)
+          ((assertion-id? assertions (car ids)) (loop (cdr ids)))
+          (else #f))))
+
+(define (all-rules-covered? spec)
+  (let loop ((rs (hash-ref spec "rules" '())))
+    (cond ((not (pair? rs)) #t)
+          ((rule-covered? (hash-ref spec "assertions" '()) (car rs)) (loop (cdr rs)))
+          (else #f))))
+
+(define (audit-has? audit key)
+  (let loop ((xs audit))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "key" "") key) #t)
+          (else (loop (cdr xs))))))
+
+(define (all-defaults-audited? spec)
+  (let loop ((ds (hash-ref spec "defaults" '())))
+    (cond ((not (pair? ds)) #t)
+          ((audit-has? (hash-ref spec "audit" '()) (hash-ref (car ds) "key" ""))
+           (loop (cdr ds)))
+          (else #f))))
+
+(define requirement "用 aura 写一个坦克大战游戏")
+(define r (project:compile requirement))
+(line "compile" (car r))
+(define spec (cadr r))
+(line "kind" (hash-ref spec "kind"))
+(line "theme" (hash-ref spec "theme"))
+(line "players" (hash-ref spec "players"))
+(line "levels" (hash-ref (hash-ref spec "levels") "count"))
+(line "milestones" (length (hash-ref spec "milestones" '())))
+(line "milestone-ids" (string-join (map (lambda (m) (hash-ref m "id" ""))
+                                           (hash-ref spec "milestones" '())) ","))
+(line "rules" (length (hash-ref spec "rules" '())))
+(line "assertions" (length (hash-ref spec "assertions" '())))
+(line "defaults" (length (hash-ref spec "defaults" '())))
+(line "audit" (length (hash-ref spec "audit" '())))
+(line "rules-covered" (all-rules-covered? spec))
+(line "defaults-audited" (all-defaults-audited? spec))
+
+(define r2 (project:compile requirement))
+(line "stable-fingerprint"
+      (equal? (project:fingerprint spec) (project:fingerprint (cadr r2))))
+
+(define extended (cadr (project:extend spec "要双人")))
+(line "extended-players" (hash-ref extended "players"))
+(line "extended-milestones" (length (hash-ref extended "milestones" '())))
+(line "extended-rules" (length (hash-ref extended "rules" '())))
+(line "extended-defaults" (length (hash-ref extended "defaults" '())))
+(line "extended-view-preserved"
+      (equal? (hash-ref spec "view") (hash-ref extended "view")))
+(line "extended-default-players"
+      (hash-ref (car (hash-ref extended "defaults" '())) "default"))
+
+(define sc (project:score spec "move" "mock"))
+(line "score-kind" (hash-ref sc "kind"))
+(line "score-milestone" (hash-ref sc "milestone"))
+(line "score-fingerprint"
+      (if (= (string-length (hash-ref sc "contract_fingerprint" "")) 0) "bad" "ok"))
+(line "score-spec-fingerprint"
+      (equal? (hash-ref sc "spec_fingerprint") (project:fingerprint spec)))
+(line "score-budget" (hash-ref (hash-ref sc "budget") "wall_ms"))

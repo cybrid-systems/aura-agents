@@ -1,0 +1,8 @@
+project:compile: Any -> Any
+project:extend: Any Any -> Any
+project:score: Any Any Any -> Any
+project:defaults: -> Any
+project:milestone: Any Any -> Any
+project:assertions: -> Any
+project:fingerprint: Any -> Any
+project:help: -> Any
