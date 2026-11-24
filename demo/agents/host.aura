@@ -1,0 +1,24 @@
+;; Bus host for the demo. Keeps the process alive until the driver
+;; writes "quit" or closes stdin.
+(require "std/bus" all:)
+
+(define (env-int name fallback)
+  (let ((v (getenv name)))
+    (if (and (string? v) (number? (string->number v)))
+      (string->number v)
+      fallback)))
+
+(define WS (env-int "AURA_DEMO_WS" 5398))
+(define h (bus:host WS))
+(display (if (bus:ok? h) "host-ready" "host-FAIL"))
+(display "=") (display WS) (newline)
+
+(let loop ()
+  (let ((line (read-line)))
+    (cond
+      ((eof-object? line) #f)
+      ((string=? line "quit")
+       (bus:unhost WS)
+       (display "host-quit") (newline))
+      (else (loop)))))
+

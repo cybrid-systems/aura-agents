@@ -1,0 +1,57 @@
+;; Read-only verifier: every task is done, every contract is approved,
+;; every task has an audit timeline, and replay reports no findings.
+(require "std/bus" all:)
+(require "std/string" all:)
+
+(define (env-int name fallback)
+  (let ((v (getenv name)))
+    (if (and (string? v) (number? (string->number v)))
+      (string->number v)
+      fallback)))
+
+(define WS (env-int "AURA_DEMO_WS" 5398))
+(define RAW (let ((v (getenv "AURA_DEMO_TASK_IDS"))) (if (string? v) v "")))
+
+(define a (bus:attach "" WS 0 255 255))
+(if (bus:error? a)
+  (begin
+    (display "verify-attach-error=")
+    (display (bus:message a))
+    (newline)
+    (exit 1)))
+
+(define SID (list-ref a 1))
+(define ids (filter (lambda (x) (> (string-length x) 0)) (string-split RAW ",")))
+(define failures 0)
+
+(for-each
+  (lambda (raw-id)
+    (let* ((id (string->number raw-id))
+           (status (bus:task-status SID id))
+           (contract (bus:contract-status SID id))
+           (timeline (bus:task-audit SID id)))
+      (define state (list-ref status 2))
+      (define approval (list-ref contract 3))
+      (define events (list-ref timeline 1))
+      (if (or (not (= state 2)) (not (= approval 1)) (<= events 0))
+        (set! failures (+ failures 1))
+        #f)
+      (display "verify=") (display id)
+      (display " state=") (display state)
+      (display " contract=") (display approval)
+      (display " audit-events=") (display events)
+      (newline)))
+  ids)
+
+(define replay (bus:audit-replay SID))
+(define findings (if (and (pair? replay) (>= (length replay) 5)) (list-ref replay 4) -1))
+(display "replay-findings=") (display findings) (newline)
+(if (or (> failures 0) (not (= findings 0)))
+  (begin
+    (display "verify=FAIL") (newline)
+    (bus:detach SID)
+    (exit 1))
+  (begin
+    (display "verify=PASS") (newline)
+    (bus:detach SID)))
+

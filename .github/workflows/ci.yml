@@ -19,3 +19,5 @@ jobs:
         env:
           AURA_AGENTS_LLM: mock
         run: bash scripts/smoke.sh
+      - name: Shell syntax
+        run: bash -n scripts/demo-redis.sh scripts/finalize-redis.sh scripts/agent-task.sh

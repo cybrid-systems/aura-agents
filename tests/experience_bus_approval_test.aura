@@ -8,9 +8,11 @@
 
 (define posted (bus:post-task session 1 1 1))
 (define task-id (cadr posted))
+(bus:contract session task-id 42 100)
 (bus:approve session task-id 0 1000)
 (bus:approve session task-id 1 1000)
 (define claimed (bus:claim session 100 task-id))
+(bus:contract-evidence session task-id 1 100)
 (define completed (bus:complete session task-id 1))
 
 (display "post=") (display (car posted)) (newline)

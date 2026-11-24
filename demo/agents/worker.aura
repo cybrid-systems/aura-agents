@@ -1,0 +1,66 @@
+;; A real worker peer: claim -> run the task action in the target
+;; checkout -> heartbeat -> contract evidence -> complete.
+;; The task action is a deterministic fixture script, so the demo needs
+;; no network or API key. A production worker would call an LLM here.
+(require "std/bus" all:)
+(require "std/process" all:)
+
+(define (env-int name fallback)
+  (let ((v (getenv name)))
+    (if (and (string? v) (number? (string->number v)))
+      (string->number v)
+      fallback)))
+
+(define WS (env-int "AURA_DEMO_WS" 5398))
+(define LEASE (env-int "AURA_DEMO_LEASE_MS" 600000))
+(define WORKER (let ((v (getenv "AURA_DEMO_WORKER_ID"))) (if (string? v) v "worker")))
+(define TASK_SH (let ((v (getenv "AURA_DEMO_TASK_SH"))) (if (string? v) v "")))
+
+(define a (bus:attach "" WS 5 255 255))
+(if (bus:error? a)
+  (begin
+    (display "worker-attach-error=")
+    (display WORKER)
+    (display ":")
+    (display (bus:message a))
+    (newline)
+    (exit 1)))
+
+(define SID (list-ref a 1))
+(display "worker-attached=") (display WORKER) (newline)
+
+(let loop ((done 0))
+  (let ((claim (bus:claim SID LEASE)))
+    (if (bus:error? claim)
+      (begin
+        (display "worker-idle=") (display WORKER)
+        (display " reason=") (display (bus:message claim))
+        (display " completed=") (display done)
+        (newline)
+        (bus:detach SID)
+        (exit 0))
+      (let* ((id (list-ref claim 1))
+             (ref (list-ref claim 7))
+             (cmd (string-append "bash " TASK_SH " " (number->string ref)))
+             (code (sh cmd))
+             (ok (= code 0)))
+        (display "worker-task=") (display WORKER)
+        (display " id=") (display id)
+        (display " ref=") (display ref)
+        (display " exit=") (display code)
+        (newline)
+        (if ok
+          (begin
+            (bus:heartbeat SID id LEASE)
+            (bus:contract-evidence SID id 1 100)
+            (bus:complete SID id (+ 100 id))
+            (display "worker-complete=") (display WORKER)
+            (display " id=") (display id) (newline)
+            (loop (+ done 1)))
+          (begin
+            (bus:contract-evidence SID id 0 0)
+            (bus:fail SID id code)
+            (display "worker-fail=") (display WORKER)
+            (display " id=") (display id) (newline)
+            (loop done))))))
+

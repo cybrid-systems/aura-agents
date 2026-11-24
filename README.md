@@ -13,6 +13,28 @@ export PATH="$(bash scripts/install-aura.sh):$PATH"
 aura --version
 ```
 
+## Real aura-redis delivery demo
+
+scripts/demo-redis.sh runs the target fixture from aura#5398 end to end:
+one requirement, an approved executable contract, four real bus worker
+processes, a task-board audit, and one aura-redis PR.
+
+    export AURA_BIN=/home/dev/aura/build/aura
+    export AURA_DEMO_TARGET=/home/dev/aura-redis
+    export GH_TOKEN=...                 # only needed to open the PR
+    export AURA_DEMO_BASELINE_BIN=/tmp/aura-baseline/aura_redis_server
+    export AURA_DEMO_BASELINE_LIB=/tmp/aura-baseline
+    bash scripts/demo-redis.sh
+
+The driver starts demo/agents/host.aura, posts four contract-gated tasks
+with planner.aura, records the human approval with approver.aura, runs four
+worker.aura processes (each claims, executes its task fixture, heartbeats,
+reports contract evidence and completes), verifies the board and audit replay
+with verify.aura, then builds, tests, compares p99 and opens the PR. The
+worker actions are deterministic fixtures (the mock-LLM discipline): the
+demo proves the bus workflow, not code synthesis. Set AURA_DEMO_WORKERS to
+4-6 and AURA_DEMO_TASKS to the matching task count.
+
 ## Quick start
 
 ```bash

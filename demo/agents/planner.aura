@@ -1,0 +1,53 @@
+;; Planner peer for the aura-redis delivery demo.
+;; Posts one task per implementation step, each with a contract and the
+;; approval flag. It prints "task=<id> ref=<n>" lines for the shell driver.
+(require "std/bus" all:)
+
+(define (env-int name fallback)
+  (let ((v (getenv name)))
+    (if (and (string? v) (number? (string->number v)))
+      (string->number v)
+      fallback)))
+
+(define WS (env-int "AURA_DEMO_WS" 5398))
+(define N (env-int "AURA_DEMO_TASKS" 4))
+
+(define a (bus:attach "" WS 4 255 255))
+(if (bus:error? a)
+  (begin
+    (display "planner-attach-error=")
+    (display (bus:message a))
+    (newline)
+    (exit 1)))
+
+(define SID (list-ref a 1))
+(display "planner-attached=1") (newline)
+
+(let loop ((ref 1))
+  (if (> ref N)
+    (begin (display "planner-posted=") (display N) (newline))
+    (let ((posted (bus:post-task SID 0 ref 1)))
+      (if (bus:error? posted)
+        (begin
+          (display "planner-post-error=")
+          (display (bus:message posted))
+          (newline)
+          (bus:detach SID)
+          (exit 1))
+        (let* ((id (list-ref posted 1))
+               (contract (bus:contract SID id 42 100)))
+          (if (bus:error? contract)
+            (begin
+              (display "planner-contract-error=")
+              (display (bus:message contract))
+              (newline)
+              (bus:detach SID)
+              (exit 1))
+            (begin
+              (display "task=") (display id)
+              (display " ref=") (display ref)
+              (newline)
+              (loop (+ ref 1)))))))))
+
+(bus:detach SID)
+

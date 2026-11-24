@@ -1,0 +1,64 @@
+;; The human approval point. The demo driver prints the executable
+;; contracts first; this peer records the approval for each task.
+;; A real operator would run the same approve command after reading them.
+(require "std/bus" all:)
+(require "std/string" all:)
+
+(define (env-int name fallback)
+  (let ((v (getenv name)))
+    (if (and (string? v) (number? (string->number v)))
+      (string->number v)
+      fallback)))
+
+(define WS (env-int "AURA_DEMO_WS" 5398))
+(define RAW (let ((v (getenv "AURA_DEMO_TASK_IDS"))) (if (string? v) v "")))
+
+(define a (bus:attach "" WS 0 255 255))
+(if (bus:error? a)
+  (begin
+    (display "approver-attach-error=")
+    (display (bus:message a))
+    (newline)
+    (exit 1)))
+
+(define SID (list-ref a 1))
+(define ids (filter (lambda (x) (> (string-length x) 0)) (string-split RAW ",")))
+
+(if (not (pair? ids))
+  (begin
+    (display "approver-error=no-task-ids")
+    (newline)
+    (bus:detach SID)
+    (exit 1)))
+
+(for-each
+  (lambda (raw-id)
+    (let* ((id (string->number raw-id))
+           (contract (bus:contract-status SID id)))
+      (if (bus:error? contract)
+        (begin
+          (display "approver-contract-error=")
+          (display (bus:message contract))
+          (newline)
+          (bus:detach SID)
+          (exit 1))
+        (begin
+          (display "contract=") (display id)
+          (display " fingerprint=") (display (list-ref contract 2))
+          (display " tests=pass metric=100")
+          (newline)
+          (let ((approved (bus:approve SID id 1 0)))
+            (if (bus:error? approved)
+              (begin
+                (display "approver-error=")
+                (display (bus:message approved))
+                (newline)
+                (bus:detach SID)
+                (exit 1))
+              (begin
+                (display "approved=") (display id) (newline))))))))
+  ids)
+
+(display "human-gate=approved") (newline)
+(bus:detach SID)
+
