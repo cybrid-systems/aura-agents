@@ -1,0 +1,34 @@
+;; Issue #15 — replay corpus, request framing, metrics and plan.
+;; Live protocol peers are exercised by scripts/replay-smoke.sh (exec is
+;; deliberately not granted inside the focused test runner).
+(require "std/string")
+(require "lib/replay/replay")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define train (replay:redis-corpus 7 5 ""))
+(line "train-count" (length train))
+(line "train-first" (car (car train)))
+(line "train-prefix" (string-prefix? (cadr (car train)) "train-"))
+(define held (replay:redis-corpus 7 4 "tok-abc"))
+(line "heldout-prefix" (string-prefix? (cadr (car held)) "heldout-tok-abc-"))
+
+(define framed (replay:command (list "SET" "k" "v")))
+(line "resp-array" (string-prefix? framed "*3\r\n"))
+(line "resp-bulk" (string-contains? framed "$1\r\nk\r\n"))
+
+(define m (replay:metrics (list 1 2 3 4 5) 0 0))
+(line "p50" (hash-ref m "p50_ms"))
+(line "p99" (hash-ref m "p99_ms"))
+(line "errors" (hash-ref m "errors"))
+
+(define plan (replay:plan "redis" (hash "host" "127.0.0.1" "port" 6399
+                                        "seed" 7 "token" "tok-abc"
+                                        "concurrency" 2 "duration_s" 5)))
+(line "plan-protocol" (hash-ref plan "protocol"))
+(line "plan-token" (hash-ref plan "token"))
+(line "plan-concurrency" (hash-ref plan "concurrency"))

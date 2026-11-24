@@ -1,0 +1,11 @@
+{
+  "name": "load-replay",
+  "version": "1.0.0",
+  "bus_role": 0,
+  "capabilities": ["load.replay", "evidence.emit"],
+  "target_kinds": ["aura-redis", "aura-runner", "service"],
+  "inputs": ["corpus", "seed", "token", "duration_s"],
+  "outputs": ["client-metrics", "heldout-evidence"],
+  "required_caps": ["read", "network"],
+  "cost": {"wall_ms": 60000, "tokens": 0, "cpu_pct": 10}
+}

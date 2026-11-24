@@ -1,0 +1,191 @@
+;; External load replay (#15): the generator lives in aura-agents and
+;; drives a real target over its normal protocol. No target hooks.
+
+(require "std/string")
+(require "std/list")
+(require "std/json")
+(require "std/socket")
+(require "std/process")
+(require "std/io")
+
+(export replay:plan replay:redis-corpus replay:redis-run replay:runner-run
+        replay:metrics replay:command replay:help)
+
+(define (replay:help)
+  "Replay: (replay:redis-run host port corpus); (replay:runner-run host port opts); (replay:plan protocol opts)")
+
+(define (rp-num x d)
+  (if (number? x) x d))
+
+(define (rp-ms) (monotonic-ms))
+
+; ── metrics ────────────────────────────────────────────────────
+
+(define (rp-percentile sorted p)
+  (if (not (pair? sorted))
+    #f
+    (let* ((n (length sorted))
+           (idx (quotient (* p (- n 1)) 100)))
+      (list-ref sorted (max 0 (min (- n 1) idx))))))
+
+(define (rp-metrics latencies errors reconnects)
+  (let ((sorted (sort latencies)))
+    (hash "count" (length latencies)
+          "errors" errors
+          "reconnects" reconnects
+          "p50_ms" (rp-percentile sorted 50)
+          "p95_ms" (rp-percentile sorted 95)
+          "p99_ms" (rp-percentile sorted 99))))
+
+; ── plan ───────────────────────────────────────────────────────
+
+(define (replay:plan protocol opts)
+  (let ((opts (if (hash? opts) opts (hash))))
+    (hash "kind" "replay-plan"
+          "protocol" protocol
+          "host" (hash-ref opts "host" "127.0.0.1")
+          "port" (hash-ref opts "port" 0)
+          "seed" (hash-ref opts "seed" 42)
+          "token" (hash-ref opts "token" "")
+          "concurrency" (hash-ref opts "concurrency" 1)
+          "duration_s" (hash-ref opts "duration_s" 10)
+          "corpus" (hash-ref opts "corpus" "train"))))
+
+; ── RESP corpus / client ───────────────────────────────────────
+
+(define (redis-bulk s)
+  (string-append "$" (number->string (string-length s)) "\r\n" s "\r\n"))
+
+(define (redis-command parts)
+  (let ((n (length parts)))
+    (string-append "*" (number->string n) "\r\n"
+                   (apply string-append
+                          (map (lambda (p) (redis-bulk p)) parts)))))
+
+(define (replay:redis-corpus seed count heldout-token)
+  (let ((prefix (if (and (string? heldout-token) (> (string-length heldout-token) 0))
+                  (string-append "heldout-" heldout-token "-")
+                  "train-")))
+    (let loop ((i 0) (acc '()))
+      (if (>= i count)
+        (reverse acc)
+        (let ((key (string-append prefix "k" (number->string (modulo (+ seed i) 97)))))
+          (loop (+ i 1)
+                (cons (cond
+                        ((= (modulo i 3) 0) (list "SET" key (string-append "v" (number->string i))))
+                        ((= (modulo i 3) 1) (list "GET" key))
+                        (else (list "PING")))
+                      acc)))))))
+
+(define (redis-error? reply)
+  (and (string? reply) (> (string-length reply) 0)
+       (= (string-ref reply 0) 45))) ; '-'
+
+(define (rp-corpus-kind corpus)
+  (let loop ((xs corpus))
+    (cond
+      ((not (pair? xs)) "train")
+      ((and (pair? (car xs)) (>= (length (car xs)) 2)
+            (string? (cadr (car xs)))
+            (string-contains? (cadr (car xs)) "heldout-"))
+       "heldout")
+      (else (loop (cdr xs))))))
+
+(define (replay:command parts) (redis-command parts))
+
+(define (replay:metrics latencies errors reconnects)
+  (rp-metrics latencies errors reconnects))
+
+(define (replay:redis-run host port corpus)
+  (let ((c (try (tcp-connect host port) (catch (e) #f))))
+    (if (not (number? c))
+      (hash "ok" #f "error" "connect-failed")
+      (let loop ((xs corpus) (lat '()) (err 0))
+        (if (not (pair? xs))
+          (begin
+            (tcp-close c)
+            (let ((m (rp-metrics lat err 0)))
+              (hash "ok" #t "kind" "redis-replay"
+                    "p50_ms" (hash-ref m "p50_ms")
+                    "p95_ms" (hash-ref m "p95_ms")
+                    "p99_ms" (hash-ref m "p99_ms")
+                    "count" (hash-ref m "count")
+                    "errors" (hash-ref m "errors")
+                    "reconnects" 0
+                    "corpus" (rp-corpus-kind corpus))))
+          (let* ((cmd (car xs))
+                 (t0 (rp-ms))
+                 (sent (try (tcp-send c (redis-command cmd)) (catch (e) #f)))
+                 (reply (if sent (try (tcp-recv c 4096) (catch (e) #f)) #f))
+                 (dt (- (rp-ms) t0)))
+            (if (or (not sent) (not (string? reply)) (redis-error? reply))
+              (loop (cdr xs) lat (+ err 1))
+              (loop (cdr xs) (cons dt lat) err))))))))
+
+; ── aura-runner headless session ───────────────────────────────
+
+(define *line-buf* (hash))
+
+; One line at a time, keeping bytes past the newline for the next call.
+(define (read-line c)
+  (let loop ((buf (hash-ref *line-buf* c "")))
+    (let ((i (string-find buf "\n")))
+      (if (>= i 0)
+        (let ((line (substring buf 0 i)))
+          (hash-set! *line-buf* c (substring buf (+ i 1) (string-length buf)))
+          (string-trim line))
+        (let ((r (try (tcp-recv c 8192) (catch (e) #f))))
+          (if (string? r)
+            (loop (string-append buf r))
+            (begin
+              (hash-set! *line-buf* c "")
+              (string-trim buf))))))))
+
+(define (send-json c h)
+  (try (tcp-send c (string-append (json-encode h) "\n")) (catch (e) #f)))
+
+(define (replay:runner-run host port opts)
+  (let* ((opts (if (hash? opts) opts (hash)))
+         (ticks (rp-num (hash-ref opts "ticks" 30) 30))
+         (wish-at (rp-num (hash-ref opts "wish_at" 10) 10))
+         (c (try (tcp-connect host port) (catch (e) #f))))
+    (if (not (number? c))
+      (hash "ok" #f "error" "connect-failed")
+      (begin
+        (send-json c (hash "op" "hello" "seed" (hash-ref opts "seed" 42)))
+        (read-line c) ; welcome
+        (read-line c) ; first state (fixture sends both)
+        (let loop ((i 0) (lat '()) (wish-ms #f) (errors 0) (over 0))
+          (if (>= i ticks)
+            (let* ((m (rp-metrics lat errors 0))
+                   (sorted lat))
+              (tcp-close c)
+              (hash "ok" #t "kind" "runner-replay"
+                    "ticks" ticks
+                    "first_wish_ms" wish-ms
+                    "tick_p50_ms" (hash-ref m "p50_ms")
+                    "tick_p99_ms" (hash-ref m "p99_ms")
+                    "over_budget_pct"
+                    (if (pair? lat) (/ (* 100.0 over) (length lat)) 0.0)
+                    "errors" errors))
+            (let* ((t0 (rp-ms))
+                   (sent (send-json c (hash "op" "tick"
+                                            "dt" 16
+                                            "jump" 0
+                                            "slide" 0
+                                            "lane" 0
+                                            "x" i)))
+                   (line (read-line c))
+                   (dt (- (rp-ms) t0))
+                   (wish (and (= i wish-at)
+                              (send-json c (hash "op" "wish"
+                                                 "text" "make the road brighter"
+                                                 "source" "replay"
+                                                 "lang" "en"))))
+                   (wish-line (if wish (read-line c) ""))
+                   (wish-now (if (and wish (= i wish-at)) (- (rp-ms) t0) wish-ms)))
+              (loop (+ i 1)
+                    (if sent (cons dt lat) lat)
+                    wish-now
+                    (if sent errors (+ errors 1))
+                    (if (> dt 50.0) (+ over 1) over)))))))))

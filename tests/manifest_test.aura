@@ -23,7 +23,8 @@
 (line "memory" (sel "memory.provenance" "anything"))
 (line "worker" (sel "patch.write" "workspace"))
 (line "static" (sel "check.static" "aura-redis"))
-(line "unknown" (sel "load.replay" "aura-redis"))
+(line "load-replay" (sel "load.replay" "aura-redis"))
+(line "unknown" (sel "report.render" "aura-redis"))
 
 ;; A sixth/fifth section needs only a manifest + peer; the selector reads
 ;; the registry, not hard-coded names.

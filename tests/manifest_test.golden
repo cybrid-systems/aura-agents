@@ -1,11 +1,12 @@
 load=ok
-count=5
-names=harness-judge,memory-curator,patch-worker,perf-observer,static-check
+count=6
+names=harness-judge,load-replay,memory-curator,patch-worker,perf-observer,static-check
 perf=perf-observer
 harness=harness-judge
 memory=memory-curator
 worker=patch-worker
 static=static-check
+load-replay=load-replay
 unknown=none
 extension=static-check
 register-extension=ok

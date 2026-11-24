@@ -1,0 +1,5 @@
+replay:plan: Any Any -> Any
+replay:redis-corpus: Any Any Any -> Any
+replay:redis-run: Any Any Any -> Any
+replay:runner-run: Any Any -> Any
+replay:help: -> Any

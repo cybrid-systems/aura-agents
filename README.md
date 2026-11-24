@@ -120,3 +120,14 @@ bash scripts/ab-redis.sh          # Track A now; Track B prints its blocker
 ```
 
 Set `AURA_AGENTS_GRAPH=on` (or pass `"graph": "on"` to `orchestrate:run`) to seed, ingest, prune and persist the graph after a run. The default is `graph=off`, so the baseline behavior and its goldens are unchanged.
+
+## External load replay (#15)
+
+`lib/replay/replay.aura` is the external load generator: deterministic
+RESP corpora with train/`heldout-<token>` separation for aura-redis, and
+a headless newline-JSON session for aura-runner (`hello` -> ticks ->
+`wish`) with `first_wish_ms`, tick p50/p99 and over-budget percentage.
+`instruments/load-replay.json` declares the section with
+`read`+`network` only. `aura test` covers corpus/framing/metrics;
+`bash scripts/replay-smoke.sh` drives both real TCP fixtures. Docs:
+`docs/replay.md`.

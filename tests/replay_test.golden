@@ -1,0 +1,12 @@
+train-count=5
+train-first=SET
+train-prefix=#t
+heldout-prefix=#t
+resp-array=#t
+resp-bulk=#t
+p50=3
+p99=4
+errors=0
+plan-protocol=redis
+plan-token=tok-abc
+plan-concurrency=2
