@@ -27,6 +27,7 @@ MCTS or GA.
 (strategy:capabilities)                 ; modules/kinds/gaps, missing = ()
 (strategy:propose ast n)                ; deterministic mutate candidates
 (strategy:rehearse ast root inputs ids n) ; proposals -> loop:rehearse-bounded
+(strategy:rehearse-ops ast ops root inputs ids n) ; caller-supplied operators
 (strategy:bandit-choose arms scores)    ; std/search bandit -> arm
 (strategy:beam-best root tree width scores gens)
 (strategy:archive)                      ; std/qd MAP-Elites

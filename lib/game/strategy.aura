@@ -25,7 +25,7 @@
         strategy:bandit-state strategy:bandit-choose
         strategy:beam-state strategy:beam-best
         strategy:archive strategy:insert! strategy:coverage strategy:elites
-        strategy:trial strategy:halving strategy:rehearse)
+        strategy:trial strategy:halving strategy:rehearse strategy:rehearse-ops)
 
 (define (strategy:help)
   "Strategy: (strategy:propose ast n); (strategy:bandit-choose arms scores); (strategy:beam-best root tree width scores gens); (strategy:halving members budget-ms)")
@@ -82,8 +82,8 @@
     (let ((n (if (number? limit) limit 1)))
       (mutate:candidates ast (st-take (strategy:ops) (max 0 n))))))
 
-(define (strategy:rehearse ast root inputs ids n)
-  (let* ((rows (strategy:propose ast n))
+(define (strategy:rehearse-ops ast ops root inputs ids n)
+  (let* ((rows (mutate:candidates ast ops))
          (candidates
            (map (lambda (r)
                   (let* ((r-ast (st-get r "ast" ast))
@@ -103,6 +103,10 @@
               "results" (st-list run "results")
               "candidates" (length candidates)
               "batches" (st-get run "batches" 1))))))
+
+(define (strategy:rehearse ast root inputs ids n)
+  (strategy:rehearse-ops ast (st-take (strategy:ops) (max 0 (if (number? n) n 1)))
+                         root inputs ids n))
 
 ; ── bandit operator/arm choice ────────────────────────────────
 

@@ -1,0 +1,285 @@
+;; Self-evolution meta layer (#32): std/evo-meta wraps the #31 search
+;; surface so the fork-compete loop can improve how it proposes and
+;; budgets, while the evaluator, gate, held-out scripts, assertions,
+;; contract and audit stay outside the evolvable genome.
+;;
+;; The layer is deliberately thin:
+;;   - inner search: strategy:rehearse-ops (mutate operators -> real
+;;     loop:rehearse-bounded) with the policy's operator set;
+;;   - evaluator: the same rehearsal on the inner / meta-holdout / canary
+;;     task sets; the sets are disjoint by construction;
+;;   - protection: std/evo-meta's five protected keys plus the game
+;;     sentinel (assertions, held-out inputs, contract, gate, audit);
+;;   - credit: std/hyper-heuristic FRRMAB over the same operator names;
+;;   - promotion: a data-free recipe to the #2 experience graph.
+;;
+;; The numbers this module returns are rehearsal outcomes and operator
+;; counts, never wall-clock claims. #30 owns measured speed.
+
+(require "std/string")
+(require "std/list")
+(require "std/evo-meta")
+(require "std/hyper-heuristic")
+(require "lib/game/mutate")
+(require "lib/game/arena")
+(require "lib/game/loop")
+(require "lib/game/assert")
+(require "lib/game/strategy")
+(require "lib/memory/curator")
+
+(export gmeta:help gmeta:arms gmeta:policy gmeta:protected
+        gmeta:assertions gmeta:assertion-hash gmeta:tasks
+        gmeta:new gmeta:inner gmeta:evaluate gmeta:guard gmeta:step!
+        gmeta:approve! gmeta:report gmeta:decision gmeta:tip
+        gmeta:hh gmeta:credit! gmeta:next gmeta:tune-n
+        gmeta:promote gmeta:review)
+
+(define (gmeta:help)
+  "Game meta (#32): (gmeta:new opts); (gmeta:guard loop genome); (gmeta:step! loop); (gmeta:credit! hh op reward); (gmeta:tune-n policy cap); (gmeta:promote graph policy)")
+
+(define (gm-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (gm-num h k d) (let ((v (gm-get h k d))) (if (number? v) v d)))
+(define (gm-list h k) (let ((v (gm-get h k '()))) (if (list? v) v '())))
+(define (gm-str h k d) (let ((v (gm-get h k d))) (if (string? v) v d)))
+
+; ── sentinel / protected surface ──────────────────────────────
+
+(define (gmeta:assertions)
+  (game:assertion-ids))
+
+(define (gmeta:protected)
+  (append (list "evaluate" "gate" "holdout-split" "constraints" "audit")
+          (list "assertions" "heldout" "held-out" "contract" "sentinel"
+                "frame-budget" "approval" "sandbox")))
+
+(define (gmeta:fnv text)
+  (let loop ((i 0) (h 2166136261))
+    (if (>= i (string-length text))
+      (number->string h)
+      (loop (+ i 1)
+            (bitwise-and (* (bitwise-xor h (char->integer (string-ref text i)))
+                            16777619)
+                         4294967295)))))
+
+(define (gmeta:assertion-hash)
+  (let* ((ids (gmeta:assertions))
+         (text (string-append (string-join ids ",")
+                              "|"
+                              (string-join (gmeta:heldout-inputs) ","))))
+    (gmeta:fnv text)))
+
+(define (gmeta:heldout-inputs)
+  (list "move:right" "move:left" "fire:true"))
+
+(define (gmeta-tasks-ids)
+  (list "state-advance" "score-lives" "frame-budget" "visual-keyframe"))
+
+(define (gmeta-tasks-inputs)
+  (list (hash "move" "right") (hash "move" "left")))
+
+(define (gmeta:tasks prefix count kind inputs ids)
+  (let loop ((i 0) (out '()))
+    (if (>= i count)
+      (reverse out)
+      (loop (+ i 1)
+            (cons (hash "id" (string-append prefix (number->string i))
+                        "kind" kind
+                        "offset" 0
+                        "inputs" inputs
+                        "ids" ids)
+                  out)))))
+
+; ── policy -> operators, rehearsal, evaluation ───────────────
+
+(define (gmeta:arms)
+  (list "rename" "tweak-literal" "wrap-conditional" "swap-operator"))
+
+(define (gmeta:policy)
+  (hash "propose-prompt" (list "e1" "e2" "m1" "m2" "m3")
+        "mutation-ops" (gmeta:arms)
+        "parent-policy" "best"
+        "budget-split" (hash "explore" 0.2 "exploit" 0.8)))
+
+(define (gmeta:op-for name)
+  (cond
+    ((equal? name "swap-operator")
+     (hash "op" "inc" "key" "enemy-score" "delta" 25))
+    ((equal? name "tweak-literal")
+     (hash "op" "set" "key" "player-speed" "value" 2))
+    ((equal? name "wrap-conditional")
+     (hash "op" "inc" "key" "fire-cooldown" "delta" 1))
+    ((equal? name "rename")
+     (hash "op" "set" "key" "bullet-speed" "value" 2))
+    (else
+     (hash "op" "inc" "key" "player-speed" "delta" 1))))
+
+(define (gmeta:ops policy)
+  (let ((names (gm-list policy "mutation-ops")))
+    (if (pair? names)
+      (map gmeta:op-for names)
+      (map gmeta:op-for (gmeta:arms)))))
+
+(define (gmeta:task-inputs task) (gm-list task "inputs"))
+(define (gmeta:task-ids task)
+  (let ((ids (gm-list task "ids")))
+    (if (pair? ids) ids (gmeta-tasks-ids))))
+
+(define (gmeta:run-score run)
+  (let ((state (gm-get run "state" (hash))))
+    (+ 1000 (gm-num state "score" 0))))
+
+(define (gmeta:rehearse-task policy task)
+  (let* ((ast (mutate:new))
+         (root (arena:new (hash "seed" 42 "players" 1)))
+         (run (strategy:rehearse-ops ast (gmeta:ops policy) root
+                                     (gmeta:task-inputs task)
+                                     (gmeta:task-ids task) 2)))
+    (hash "ok" (gm-get run "ok" #f)
+          "winner" (gm-get run "winner" #f)
+          "score" (gmeta:run-score run)
+          "task" (gm-str task "id" "")
+          "run" run)))
+
+(define (gmeta:inner ctx)
+  (let* ((policy (gm-get ctx "policy" (gmeta:policy)))
+         (tasks (gm-list ctx "tasks"))
+         (rows (map (lambda (t) (gmeta:rehearse-task policy t)) tasks))
+         (scores (map (lambda (r) (gm-num r "score" 0)) rows))
+         (n (max 1 (length rows)))
+         (avg (/ (foldl + 0 scores) n)))
+    (hash "kind" "meta-inner"
+          "layer" (gm-str ctx "layer" "inner")
+          "score" avg
+          "start" avg
+          "policy" policy
+          "evaluated" (length rows)
+          "history" scores
+          "rows" rows)))
+
+(define (gmeta:evaluate ctx)
+  (let ((r (gmeta:inner ctx)))
+    (gm-num r "score" 0)))
+
+; ── loop construction ─────────────────────────────────────────
+
+(define (gmeta:new opts)
+  (let* ((o (if (hash? opts) opts (hash)))
+         (inner (gm-get o "inner" gmeta:inner))
+         (evaluate (gm-get o "evaluate" gmeta:evaluate))
+         (canary-evaluate (gm-get o "canary-evaluate" evaluate))
+         (inner-tasks (gm-get o "inner-tasks"
+                              (gmeta:tasks "inner-" 1 "inner"
+                                           (gmeta-tasks-inputs) (gmeta-tasks-ids))))
+         (holdout (gm-get o "meta-holdout"
+                          (gmeta:tasks "holdout-" 2 "meta"
+                                       (gmeta-tasks-inputs) (gmeta-tasks-ids))))
+         (canary (gm-get o "canary"
+                         (gmeta:tasks "canary-" 1 "canary"
+                                      (gmeta-tasks-inputs) (gmeta-tasks-ids)))))
+    (meta:loop
+      (hash "inner" inner
+            "inner-tasks" inner-tasks
+            "meta-holdout" holdout
+            "canary" canary
+            "evolvable" (list "propose-prompt" "mutation-ops"
+                              "parent-policy" "budget-split")
+            "protected" (gmeta:protected)
+            "meta-evaluate" evaluate
+            "canary-evaluate" canary-evaluate
+            "approval" (gm-get o "approval" "auto")
+            "inner-budget" (gm-get o "inner-budget" 2)
+            "outer-budget" (gm-get o "outer-budget" 3)
+            "pop" (gm-get o "pop" 2)
+            "seed" (gm-get o "seed" 32)
+            "select" "cmp"
+            "canary-margin" (gm-get o "canary-margin" 0.0)
+            "apply" (gm-get o "apply" #f)
+            "live-target" (gm-get o "live-target" #f)
+            "live-name" (gm-get o "live-name" "gmeta-policy")))))
+
+(define (gmeta:guard loop genome)
+  (let ((reason (meta:check loop genome)))
+    (if reason
+      (hash "ok" #f "reason" reason "layer" "meta-check")
+      (let ((src (gm-str genome "source" "")))
+        (cond
+          ((and (string? src)
+                (or (string-contains? src "game:check")
+                    (string-contains? src "base-destroyed-lose")
+                    (string-contains? src "frame-budget")
+                    (string-contains? src "harness:judge")
+                    (string-contains? src "sentinel:")))
+           (hash "ok" #f "reason" "protected-ref: game-sentinel"
+                 "layer" "game-sentinel"))
+          (else (hash "ok" #t "reason" #f "layer" "game-sentinel")))))))
+
+(define (gmeta:step! loop) (meta:step! loop))
+(define (gmeta:approve! loop id) (meta:approve! loop id))
+(define (gmeta:decision loop) (meta:decision loop))
+(define (gmeta:tip loop) (meta:tip loop))
+
+(define (gmeta:report loop)
+  (let* ((r (meta:report loop))
+         (policy (meta:tip-policy loop))
+         (n (gmeta:tune-n policy 8)))
+    (hash "meta" r
+          "assertion-hash" (gmeta:assertion-hash)
+          "protected" (gmeta:protected)
+          "n" (gm-get n "n" 1)
+          "explore" (gm-get n "explore" 0.2)
+          "tip-policy" policy
+          "gate-required" #t)))
+
+; ── operator credit + adaptive width ─────────────────────────
+
+(define (gmeta:hh)
+  (hh:make (hash "low-level" (gmeta:arms)
+                 "credit" "frr"
+                 "window" 8
+                 "decay" 0.5
+                 "seed" 32)))
+
+(define (gmeta:credit! hh name reward)
+  (hh:credit! hh name reward))
+
+(define (gmeta:next hh)
+  (hh:next hh))
+
+(define (gmeta:tune-n policy cap)
+  (let* ((split (gm-get policy "budget-split" (hash)))
+         (explore (gm-num split "explore" 0.2))
+         (raw (+ 1.0 (* 4.0 (- 1.0 explore))))
+         (n (floor (+ raw 0.5)))
+         (bound (if (number? cap) (max 1 cap) 8)))
+    (hash "n" (max 1 (min bound (inexact->exact n)))
+          "explore" explore
+          "exploit" (- 1.0 explore)
+          "cap" bound)))
+
+; ── skill promotion (data-free) ──────────────────────────────
+
+(define (gmeta:promote graph policy)
+  (let* ((ops (gm-list policy "mutation-ops"))
+         (recipe (string-join ops ","))
+         (parent (gm-str policy "parent-policy" "best"))
+         (split (gm-get policy "budget-split" (hash)))
+         (pattern
+           (hash "summary" "operator recipe promoted from fork-compete"
+                 "contract" "operator-recipe-v1"
+                 "tags" (list "skill" "operator-recipe")
+                 "facts" (hash "recipe" recipe
+                               "parent_policy" parent
+                               "explore" (gm-num split "explore" 0.2)
+                               "gate" "required"))))
+    (let ((r (memory:pattern! graph pattern)))
+      (hash "ok" (gm-get r "ok" #f)
+            "id" (gm-get r "id" #f)
+            "result" r
+            "requires_gate" #t
+            "verdict" "candidate-only"
+            "assertion-hash" (gmeta:assertion-hash)))))
+
+(define (gmeta:review graph requirement)
+  (hash "hint" (memory:hint graph requirement)
+        "gate-required" #t
+        "assertion-hash" (gmeta:assertion-hash)))

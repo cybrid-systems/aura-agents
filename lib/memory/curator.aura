@@ -11,12 +11,12 @@
 (require "lib/graph/invalidate")
 (require "lib/graph/prune")
 
-(export memory:provenance memory:record! memory:hint memory:negative?
-        memory:invalidate! memory:prune! memory:policy memory:backend
-        memory:use-backend! memory:help)
+(export memory:provenance memory:record! memory:pattern! memory:hint
+        memory:negative? memory:invalidate! memory:prune! memory:policy
+        memory:backend memory:use-backend! memory:help)
 
 (define (memory:help)
-  "Memory: (memory:record! graph outcome); (memory:hint graph requirement); (memory:invalidate! graph worldline seq reason); backend is aura-native")
+  "Memory: (memory:record! graph outcome); (memory:pattern! graph pattern); (memory:hint graph requirement); (memory:invalidate! graph worldline seq reason); backend is aura-native")
 
 (define (memory:backend) "aura-native")
 
@@ -93,6 +93,53 @@
             "provenance" p
             "event" ev
             "ingest" ingested))))
+
+; ── data-free pattern promotion (#32/#35) ─────────────────────
+;
+; A promoted skill/pattern is an abstraction, not a transcript: facts are
+; flat scalars and the graph's own privacy gate rejects paths, URLs,
+; source text and credentials. worldline 0 is allowed only for "pattern".
+
+(define (memory:pattern! g pattern)
+  (cond
+    ((not (graph:graph? g))
+     (hash "ok" #f "error" "not-a-graph"))
+    ((not (hash? pattern))
+     (hash "ok" #f "error" "not-a-pattern"))
+    (else
+     (let* ((summary (let ((s (hash-ref pattern "summary" "")))
+                       (if (string? s) s "promoted pattern")))
+            (facts (let ((f (hash-ref pattern "facts" #f)))
+                     (if (hash? f) f (hash))))
+            (tags (let ((t (hash-ref pattern "tags" #f)))
+                    (if (list? t) t (list "pattern"))))
+            (contract (let ((c (hash-ref pattern "contract" "")))
+                        (if (string? c) c "pattern-v1")))
+            (seq (max (+ 1 (memory:max-seq g)) (graph:next-seq! g)))
+            (made (graph:make-node
+                    (hash "type" "pattern"
+                          "workspace_id" (graph:workspace g)
+                          "worldline" 0
+                          "candidate_hash" ""
+                          "contract_hash" contract
+                          "caps_mask" 0
+                          "budget_snapshot" (hash "pattern" 1)
+                          "seq" seq
+                          "timestamp_ms" (current-time-ms)
+                          "status" "valid"
+                          "reason" "promoted-pattern"
+                          "origin" "cross-workspace-pattern"
+                          "facts" facts
+                          "tags" tags
+                          "summary" summary))))
+       (if (not (graph:node-ok? made))
+         (hash "ok" #f "error" "pattern-refused" "validation" made)
+         (let* ((node (cadr made))
+                (id (hash-ref node "node_id"))
+                (added (graph:add-node! g node)))
+           (if (not (graph:node-ok? added))
+             (hash "ok" #f "error" "add-refused" "validation" added)
+             (hash "ok" #t "id" id "node" node "seq" seq))))))))
 
 ; ── read-only planner hint ────────────────────────────────────
 

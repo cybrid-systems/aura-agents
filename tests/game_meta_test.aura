@@ -1,0 +1,89 @@
+;; Issue #32 — std/evo-meta over the #31 search surface: protected
+;; genomes, operator credit, adaptive width, canary ROLLBACK and a
+;; data-free skill that is retrievable but still gate-required.
+(require "std/string")
+(require "std/list")
+(require "lib/game/meta")
+(require "lib/graph/store")
+(require "lib/memory/curator")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (with h key value)
+  (let ((c (hash)))
+    (for-each (lambda (k) (hash-set! c k (hash-ref h k))) (hash-keys h))
+    (hash-set! c key value)
+    c))
+
+(line "arms" (string-join (gmeta:arms) ","))
+(line "assertions" (length (gmeta:assertions)))
+(line "assertion-hash" (gmeta:assertion-hash))
+(line "protected" (length (gmeta:protected)))
+
+; protected names can never be evolvable
+(define loop (gmeta:new (hash "outer-budget" 1 "pop" 1 "inner-budget" 1)))
+(line "loop-ok" (meta:loop? loop))
+(line "guard-assertions" (hash-ref (gmeta:guard loop (hash "assertions" (list "x"))) "ok"))
+(line "guard-frame-budget" (hash-ref (gmeta:guard loop (hash "frame-budget" 100)) "ok"))
+(line "guard-source" (hash-ref (gmeta:guard loop (hash "source" "(game:check a b c d \"base-destroyed-lose\")")) "ok"))
+(line "guard-reason" (hash-ref (gmeta:guard loop (hash "mutation-ops" (list "rename"))) "ok"))
+
+; a real outer step over real rehearsal; it must audit even when no
+; candidate improves the score
+(gmeta:step! loop)
+(line "step-decision" (gmeta:decision loop))
+(line "audit-positive" (> (meta:audit-count loop) 0))
+(line "assertion-hash-unchanged" (string=? (gmeta:assertion-hash)
+                                           (hash-ref (gmeta:report loop) "assertion-hash")))
+
+; canary drop is a ROLLBACK, never an applied policy
+(define (strict-canary ctx)
+  (if (equal? (hash-ref (hash-ref ctx "policy") "mutation-ops") (gmeta:arms)) 1 0))
+(define (mutating-inner ctx)
+  (hash "kind" "meta-inner" "score" 1
+        "policy" (with (hash-ref ctx "policy") "mutation-ops" (list "rename"))))
+(define canary-loop
+  (gmeta:new (hash "outer-budget" 1 "pop" 1 "inner-budget" 1
+                   "inner" mutating-inner
+                   "canary-evaluate" strict-canary)))
+(gmeta:step! canary-loop)
+(line "canary-decision" (gmeta:decision canary-loop))
+(line "canary-rollbacks" (hash-ref (hash-ref (gmeta:report canary-loop) "meta") "rollbacks"))
+(line "canary-tip" (gmeta:tip canary-loop))
+
+; operator credit: warm every arm, then reward one; next must pick it
+(define hh (gmeta:hh))
+(define warmed
+  (let loop ((h hh) (i 0))
+    (if (>= i 4)
+      h
+      (let ((step (gmeta:next h)))
+        (loop (gmeta:credit! (cdr step) (car step) 0.1) (+ i 1))))))
+(define credited
+  (let loop ((h warmed) (i 0))
+    (if (>= i 8)
+      h
+      (loop (gmeta:credit! h "swap-operator" 1.0) (+ i 1)))))
+(define chosen (gmeta:next credited))
+(line "credited-arm" (car chosen))
+
+(define tuned (gmeta:tune-n (hash "budget-split" (hash "explore" 0.2)) 8))
+(line "n-default" (hash-ref tuned "n"))
+(line "n-cap" (hash-ref (gmeta:tune-n (hash "budget-split" (hash "explore" 0.0)) 3) "n"))
+(line "n-explore" (hash-ref (gmeta:tune-n (hash "budget-split" (hash "explore" 0.9)) 8) "n"))
+
+; promotion is data-free and still requires the gate
+(define graph (graph:new 9001))
+(define promoted (gmeta:promote graph (gmeta:policy)))
+(line "promote-ok" (hash-ref promoted "ok"))
+(line "promote-gate" (hash-ref promoted "requires_gate"))
+(line "promote-verdict" (hash-ref promoted "verdict"))
+(define reviewed (gmeta:review graph "operator recipe"))
+(line "hint-hit" (string-contains? (hash-ref reviewed "hint") "operator"))
+(line "review-gate" (hash-ref reviewed "gate-required"))
+(line "hash-after-promote" (string=? (gmeta:assertion-hash)
+                                     (hash-ref promoted "assertion-hash")))
