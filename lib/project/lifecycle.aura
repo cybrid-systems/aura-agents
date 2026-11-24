@@ -1,0 +1,415 @@
+;; Project termination and budget (#26): Definition of Done, quota
+;; fail-closed behavior, the #18 Kill Switch, and the Aura-defect intake
+;; protocol (dedupe + Chinese issue action only; never a kernel fix PR).
+;;
+;; Pure policy/data. It does not create a GitHub issue, PR or release; it
+;; returns the exact action an adapter may execute.
+
+(require "std/string")
+(require "std/list")
+(require "lib/score")
+(require "std/json")
+(require "lib/project/milestone")
+
+(export lifecycle:policy lifecycle:new-state lifecycle:spend lifecycle:fail!
+        lifecycle:kill! lifecycle:frozen? lifecycle:dispatch lifecycle:merge-gate
+        lifecycle:done? lifecycle:report lifecycle:report-action lifecycle:terminate
+        lifecycle:aura-defect lifecycle:defect-decision lifecycle:record-defect!
+        lifecycle:help)
+
+(define (lifecycle:help)
+  "Lifecycle: (lifecycle:new-state); (lifecycle:spend s \"wall_ms\" n stage); (lifecycle:fail! s stage reason); (lifecycle:kill! s #t); (lifecycle:done? ms lc); (lifecycle:report ms lc ctx)")
+
+(define (lc-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (lc-num h k d) (let ((v (lc-get h k d))) (if (number? v) v d)))
+(define (lc-copy h)
+  (let ((out (hash)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
+    out))
+
+(define (lc-find xs id)
+  (let loop ((rest xs))
+    (cond ((not (pair? rest)) #f)
+          ((equal? (lc-get (car rest) "id" "") id) (car rest))
+          (else (loop (cdr rest))))))
+
+(define (lc-find-issue xs fp)
+  (let loop ((rest xs))
+    (cond ((not (pair? rest)) #f)
+          ((equal? (lc-get (car rest) "fingerprint" "") fp) (car rest))
+          (else (loop (cdr rest))))))
+
+; ── policy and state ───────────────────────────────────────────
+
+(define (lifecycle:policy)
+  (hash "wall_ms" 3600000
+        "tokens" 2000000
+        "failures" 5
+        "prs" 20
+        "stage" (hash "wall_ms" 600000
+                      "tokens" 400000
+                      "failures" 2
+                      "prs" 5)))
+
+(define (lifecycle:new-state)
+  (hash "wall_ms" 0
+        "tokens" 0
+        "failures" 0
+        "prs" 0
+        "stage" (hash)
+        "frozen" #f
+        "freeze_reason" #f
+        "kill" #f
+        "audit" '()))
+
+(define (lc-stage-state lc stage)
+  (let ((tbl (lc-get lc "stage" (hash))))
+    (let ((s (hash-ref tbl stage #f)))
+      (if (hash? s)
+        s
+        (hash "wall_ms" 0 "tokens" 0 "failures" 0 "prs" 0)))))
+
+(define (lc-stage-set! lc stage s)
+  (let ((tbl (lc-copy (lc-get lc "stage" (hash)))))
+    (hash-set! tbl stage s)
+    (hash-set! lc "stage" tbl)))
+
+(define (lc-audit! lc event)
+  (hash-set! lc "audit" (cons event (lc-get lc "audit" '())))
+  lc)
+
+(define (lc-freeze! lc reason)
+  (hash-set! lc "frozen" #t)
+  (hash-set! lc "freeze_reason" reason)
+  (lc-audit! lc (hash "event" "freeze" "reason" reason)))
+
+(define (lc-exceeded? kind used limit)
+  (and (number? used) (number? limit)
+       (if (equal? kind "failures") (>= used limit) (> used limit))))
+
+(define (lc-bad-global lc policy)
+  (let loop ((ks '("wall_ms" "tokens" "failures" "prs")))
+    (cond ((not (pair? ks)) #f)
+          ((lc-exceeded? (car ks) (lc-num lc (car ks) 0)
+                         (lc-num policy (car ks) 0))
+           (car ks))
+          (else (loop (cdr ks))))))
+
+(define (lc-bad-stage stage-state stage-policy)
+  (let loop ((ms '("wall_ms" "tokens" "failures" "prs")))
+    (cond ((not (pair? ms)) #f)
+          ((lc-exceeded? (car ms) (lc-num stage-state (car ms) 0)
+                         (lc-num stage-policy (car ms) 0))
+           (car ms))
+          (else (loop (cdr ms))))))
+
+(define (lc-bad-stages lc stage-policy)
+  (let ((tbl (lc-get lc "stage" (hash))))
+    (let loop ((ks (hash-keys tbl)))
+      (cond ((not (pair? ks)) #f)
+            (else
+             (let ((bad (lc-bad-stage (hash-ref tbl (car ks) (hash))
+                                      stage-policy)))
+               (if bad bad (loop (cdr ks)))))))))
+
+(define (lc-check-budget lc)
+  (let* ((policy (lifecycle:policy))
+         (stage-policy (lc-get policy "stage" (hash)))
+         (bad (or (lc-bad-global lc policy)
+                  (lc-bad-stages lc stage-policy))))
+    (if bad
+      (begin
+        (lc-freeze! lc (string-append "budget:" bad))
+        (hash "frozen" #t "reason" (lc-get lc "freeze_reason" "")))
+      (hash "frozen" #f "reason" #f))))
+
+(define (lifecycle:spend lc kind amount stage)
+  (cond
+    ((not (hash? lc)) (hash "ok" #f "error" "not-a-state"))
+    ((not (member? kind '("wall_ms" "tokens" "prs")))
+     (hash "ok" #f "error" "bad-kind"))
+    ((not (number? amount)) (hash "ok" #f "error" "bad-amount"))
+    (else
+     (let* ((s (lc-stage-state lc stage))
+            (s (lc-copy s)))
+       (hash-set! lc kind (+ (lc-num lc kind 0) amount))
+       (hash-set! s kind (+ (lc-num s kind 0) amount))
+       (lc-stage-set! lc stage s)
+       (lc-audit! lc (hash "event" "spend" "kind" kind "amount" amount
+                           "stage" stage))
+       (let ((b (lc-check-budget lc)))
+         (hash "ok" #t
+               "kind" kind
+               "amount" amount
+               "stage" stage
+               "frozen" (lc-get b "frozen" #f)
+               "reason" (lc-get b "reason" #f)
+               "used" (lc-num lc kind 0)))))))
+
+(define (lifecycle:fail! lc stage reason)
+  (cond
+    ((not (hash? lc)) (hash "ok" #f "error" "not-a-state"))
+    (else
+     (let* ((s (lc-stage-state lc stage))
+            (s (lc-copy s)))
+       (hash-set! lc "failures" (+ 1 (lc-num lc "failures" 0)))
+       (hash-set! s "failures" (+ 1 (lc-num s "failures" 0)))
+       (lc-stage-set! lc stage s)
+       (lc-audit! lc (hash "event" "failure" "stage" stage "reason" reason))
+       (let ((b (lc-check-budget lc)))
+         (hash "ok" #t
+               "failures" (lc-num lc "failures" 0)
+               "frozen" (lc-get b "frozen" #f)
+               "reason" (lc-get b "reason" #f)))))))
+
+(define (lifecycle:kill! lc on?)
+  (if (not (hash? lc))
+    (hash "ok" #f "error" "not-a-state")
+    (begin
+      (hash-set! lc "kill" (equal? on? #t))
+      (lc-audit! lc (hash "event" (if on? "kill-on" "kill-off")))
+      (hash "ok" #t "kill" (equal? on? #t)))))
+
+(define (lifecycle:frozen? lc)
+  (if (not (hash? lc))
+    (hash "frozen" #t "reason" "not-a-state")
+    (hash "frozen" (or (equal? (lc-get lc "frozen" #f) #t)
+                       (equal? (lc-get lc "kill" #f) #t))
+          "budget_frozen" (equal? (lc-get lc "frozen" #f) #t)
+          "kill" (equal? (lc-get lc "kill" #f) #t)
+          "reason" (cond ((equal? (lc-get lc "kill" #f) #t) "kill-switch")
+                         ((equal? (lc-get lc "frozen" #f) #t)
+                          (lc-get lc "freeze_reason" "budget"))
+                         (else #f)))))
+
+(define (lifecycle:dispatch lc action)
+  (cond
+    ((not (hash? lc)) (hash "ok" #f "allowed" #f "error" "not-a-state"))
+    ((equal? action "create-repo")
+     (hash "ok" #t "allowed" #t "action" action))
+    ((equal? (lc-get lc "kill" #f) #t)
+     (hash "ok" #f "allowed" #f "action" action "error" "kill-switch"))
+    ((equal? (lc-get lc "frozen" #f) #t)
+     (hash "ok" #f "allowed" #f "action" action
+           "error" (lc-get lc "freeze_reason" "budget")))
+    (else (hash "ok" #t "allowed" #t "action" action))))
+
+(define (lifecycle:merge-gate lc)
+  (lifecycle:dispatch lc "merge"))
+
+; ── Definition of Done and report ──────────────────────────────
+
+(define (lc-stage-proven? stage rounds)
+  (let ((rid (lc-get stage "passed_round" #f)))
+    (if (not rid)
+      #f
+      (let ((r (lc-find rounds rid)))
+        (and r
+             (equal? (lc-get r "ok" #f) #t)
+             (equal? (lc-get r "assertions_ok" #f) #t)
+             (equal? (lc-get (lc-get r "harness" (hash)) "verdict" "") "keep"))))))
+
+(define (lc-all-proven? stages rounds)
+  (let loop ((xs stages))
+    (cond ((not (pair? xs)) #t)
+          ((lc-stage-proven? (car xs) rounds) (loop (cdr xs)))
+          (else #f))))
+
+(define (lifecycle:done? ms lc)
+  (if (not (hash? ms))
+    (hash "ok" #f "done" #f "reasons" (list "not-a-state"))
+    (let* ((stages (lc-get ms "stages" '()))
+           (rounds (lc-get ms "rounds" '()))
+           (status (milestone:status ms))
+           (verify (milestone:verify ms))
+           (inflight (hash? (lc-get ms "inflight" #f)))
+           (reasons
+             (append
+               (if (lc-get status "done" #f) '() (list "ladder-incomplete"))
+               (if (lc-get verify "ok" #f) '() (list "audit-invalid"))
+               (if inflight (list "inflight-pr") '())
+               (if (lc-all-proven? stages rounds) '() (list "contract-failure"))
+               (if (and (hash? lc) (equal? (lc-get lc "kill" #f) #t))
+                 (list "kill-switch") '())
+               (if (and (hash? lc) (equal? (lc-get lc "frozen" #f) #t))
+                 (list (lc-get lc "freeze_reason" "budget")) '()))))
+      (hash "ok" #t
+            "done" (not (pair? reasons))
+            "reasons" reasons
+            "passed" (length (filter (lambda (st)
+                                       (equal? (lc-get st "status" "") "passed"))
+                                     stages))
+            "stages" (length stages)))))
+
+(define (lc-remaining policy used)
+  (let loop ((ks '("wall_ms" "tokens" "failures" "prs")) (out (hash)))
+    (cond ((not (pair? ks)) out)
+          (else
+           (hash-set! out (car ks)
+                      (max 0 (- (lc-num policy (car ks) 0)
+                                (lc-num used (car ks) 0))))
+           (loop (cdr ks) out)))))
+
+(define (lifecycle:report ms lc context)
+  (let* ((d (lifecycle:done? ms lc))
+         (ctx (if (hash? context) context (hash)))
+         (stages (lc-get ms "stages" '()))
+         (history (lc-get ms "history" '()))
+         (policy (lifecycle:policy))
+         (used (hash "wall_ms" (lc-num lc "wall_ms" 0)
+                     "tokens" (lc-num lc "tokens" 0)
+                     "failures" (lc-num lc "failures" 0)
+                     "prs" (lc-num lc "prs" 0)))
+         (reason (cond
+                   ((lc-get ctx "reason" #f) (lc-get ctx "reason" ""))
+                   ((lc-get d "done" #f) "done")
+                   ((and (hash? lc) (equal? (lc-get lc "kill" #f) #t)) "kill-switch")
+                   ((and (hash? lc) (equal? (lc-get lc "frozen" #f) #t))
+                    (lc-get lc "freeze_reason" "budget"))
+                   (else "in-progress"))))
+    (hash "kind" "termination-report"
+          "project" (lc-get ms "workspace" 0)
+          "spec_fingerprint" (lc-get ms "spec_fingerprint" "")
+          "revision" (lc-get ms "revision" 0)
+          "reason" reason
+          "done" (lc-get d "done" #f)
+          "reasons" (lc-get d "reasons" '())
+          "ladder" (map (lambda (st)
+                          (hash "id" (lc-get st "id" "")
+                                "name" (lc-get st "name" "")
+                                "status" (lc-get st "status" "")
+                                "round" (lc-get st "passed_round" #f)
+                                "worldline" (lc-get st "passed_worldline" #f)
+                                "pr" (lc-get st "passed_pr" #f)
+                                "commit" (lc-get st "passed_commit" #f)))
+                        stages)
+          "passed" (lc-get d "passed" 0)
+          "merged_prs" (map (lambda (h)
+                              (hash "stage" (lc-get h "stage" "")
+                                    "round" (lc-get h "round" "")
+                                    "worldline" (lc-get h "worldline" 0)
+                                    "pr" (lc-get h "pr" 0)
+                                    "commit" (lc-get h "commit" "")))
+                            history)
+          "budget" (hash "policy" policy
+                         "used" used
+                         "remaining" (lc-remaining policy used)
+                         "frozen" (and (hash? lc) (equal? (lc-get lc "frozen" #f) #t))
+                         "kill" (and (hash? lc) (equal? (lc-get lc "kill" #f) #t)))
+          "unadopted" (lc-get ctx "unadopted" '())
+          "aura_issues" (lc-get ctx "aura_issues" '())
+          "release" (hash "tag" #f "release" #f)
+          "status" (if (lc-get d "done" #f) "done" "not-done"))))
+
+(define (lc-with ctx key value)
+  (let ((c (lc-copy (if (hash? ctx) ctx (hash)))))
+    (hash-set! c key value)
+    c))
+
+(define (lifecycle:report-action report)
+  (hash "action" "comment-issue"
+        "repo" "cybrid-systems/aura"
+        "issue" 5405
+        "body" (json-encode report)
+        "tag" #f
+        "release" #f))
+
+(define (lifecycle:terminate ms lc reason context)
+  (if (hash? lc)
+    (lc-freeze! lc reason))
+  (let ((report (lifecycle:report ms lc
+                                  (lc-with (lc-with context "reason" reason)
+                                           "terminated" #t))))
+    (hash-set! report "terminated" #t)
+    report))
+
+; ── Aura defect intake ─────────────────────────────────────────
+
+(define (lc-defect-fingerprint defect)
+  (let ((given (lc-get defect "fingerprint" #f)))
+    (if (and (string? given) (> (string-length given) 0))
+      given
+      (score:contract-fingerprint
+        "aura-defect"
+        (list (list "kind" (lc-get defect "kind" ""))
+              (list "version" (lc-get defect "version" ""))
+              (list "summary" (lc-get defect "summary" ""))
+              (list "repro" (lc-get defect "repro" "")))))))
+
+(define (lc-defect-valid? defect)
+  (and (hash? defect)
+       (member? (lc-get defect "kind" "")
+                '("compiler" "runtime" "stdlib" "toolchain"))
+       (string? (lc-get defect "summary" ""))
+       (> (string-length (lc-get defect "summary" "")) 0)
+       (string? (lc-get defect "version" ""))
+       (> (string-length (lc-get defect "version" "")) 0)
+       (string? (lc-get defect "repro" ""))))
+
+(define (lc-defect-body defect)
+  (string-append
+    "## 现象\n" (lc-get defect "summary" "") "\n\n"
+    "## 复现\n" (lc-get defect "repro" "") "\n\n"
+    "## 版本\n" (lc-get defect "version" "") "\n\n"
+    "## 日志\n" (lc-get defect "logs" "") "\n\n"
+    "## 约束\n本单只记录 Aura 缺陷；游戏闭环不修内核、不开修复 PR，"
+    "只做绕行、降级或终止。\n"))
+
+(define (lifecycle:aura-defect defect existing)
+  (cond
+    ((not (lc-defect-valid? defect))
+     (hash "ok" #f "error" "bad-defect"))
+    (else
+     (let* ((fp (lc-defect-fingerprint defect))
+            (hit (lc-find-issue (if (pair? existing) existing '()) fp)))
+       (if hit
+         (hash "ok" #t
+               "action" "existing"
+               "issue" (lc-get hit "number" 0)
+               "fingerprint" fp
+               "fix_pr" #f
+               "kernel_patch" #f)
+         (hash "ok" #t
+               "action" "create-issue"
+               "repo" "cybrid-systems/aura"
+               "language" "zh"
+               "title" (string-append "[缺陷]["
+                                      (lc-get defect "kind" "")
+                                      "] " (lc-get defect "summary" ""))
+               "body" (lc-defect-body defect)
+               "labels" (list "bug")
+               "fingerprint" fp
+               "allowed_actions" (list "create-issue" "link-issue" "record-evidence")
+               "forbidden_actions" (list "fix-pr" "kernel-patch" "tag" "release")
+               "fix_pr" #f
+               "kernel_patch" #f))))))
+
+(define (lifecycle:record-defect! lc decision)
+  (cond
+    ((not (hash? lc)) (hash "ok" #f "error" "not-a-state"))
+    ((not (hash? decision)) (hash "ok" #f "error" "bad-decision"))
+    (else
+     (lc-audit! lc (hash "event" "aura-defect"
+                         "strategy" (lc-get decision "strategy" "")
+                         "reason" (lc-get decision "reason" "")
+                         "aura_issue" (lc-get decision "aura_issue" "")))
+     (hash "ok" #t
+           "strategy" (lc-get decision "strategy" "")
+           "audit" (length (lc-get lc "audit" '()))))))
+
+(define (lifecycle:defect-decision defect strategy)
+  (cond
+    ((not (lc-defect-valid? defect))
+     (hash "ok" #f "error" "bad-defect"))
+    ((not (member? strategy '("workaround" "degrade" "terminate")))
+     (hash "ok" #f "error" "bad-strategy"))
+    (else
+     (hash "ok" #t
+           "strategy" strategy
+           "terminate_project" (equal? strategy "terminate")
+           "reason" (cond ((equal? strategy "terminate") "aura-defect")
+                          ((equal? strategy "degrade") "degraded")
+                          (else "workaround"))
+           "aura_issue" (lc-defect-fingerprint defect)
+           "fix_pr" #f
+           "kernel_patch" #f))))

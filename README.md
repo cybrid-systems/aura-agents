@@ -123,7 +123,16 @@ running ladder without losing passed rounds, rejects removed or altered
 frozen stages, and re-queues the new stage (after a finished project it
 moves the new stage to the end). Docs: `docs/requirements.md`.
 
-`lib/project/scaffold.aura` is the #22 dry-run half: from the spec it
+`lib/project/lifecycle.aura` is the #26 termination layer: Definition
+of Done (all stages + valid audit + proven rounds + no inflight),
+project/stage quota freezes, fail-closed dispatch, the #18 Kill Switch
+(only `create-repo` stays open), and the Aura-defect intake protocol
+(dedupe by fingerprint; create a Chinese `cybrid-systems/aura` issue
+action, never a kernel fix PR). Reports include ladder/PRs/budget/
+unadopted requirements and always set `tag`/`release` to `#f`. Docs:
+`docs/lifecycle.md`.
+
+`lib/project/scaffold.aura` is the #22 dry-run helper: from the spec it
 returns the repo name, the pinned-baseline `aura.toml` and `aura-ci` CI
 workflow, README/.gitignore/game skeleton, the files to copy from this
 checkout, branch protection (required `ci`, no direct `main`, no admin

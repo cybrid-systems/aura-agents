@@ -1,0 +1,187 @@
+;; Issue #26 — Definition of Done, fail-closed quotas, Kill Switch and the
+;; Aura-defect intake protocol.
+(require "std/string")
+(require "std/list")
+(require "lib/project/spec")
+(require "lib/project/milestone")
+(require "lib/project/lifecycle")
+(require "lib/pipeline/pipeline")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (with h key value)
+  (let ((c (hash)))
+    (for-each (lambda (k) (hash-set! c k (hash-ref h k))) (hash-keys h))
+    (hash-set! c key value)
+    c))
+
+(define (stage-assertions spec stage)
+  (hash-ref (project:milestone spec stage) "assertions" '()))
+
+(define (round-for spec stage id wl)
+  (hash "id" id
+        "stage" stage
+        "worldline" wl
+        "winner" "cand-fast"
+        "candidates" 2
+        "batches" 2
+        "early_stop" 1
+        "score" 1000
+        "ok" #t
+        "assertions" (stage-assertions spec stage)
+        "assertions_ok" #t
+        "harness" (hash "verdict" "keep"
+                        "fingerprint" (string-append "fp-" stage)
+                        "package_valid" #t)
+        "root_in" (string-append "root-" stage "-in")
+        "root_out" (string-append "root-" stage "-out")
+        "files_written" 0
+        "per_candidate_ci" 0
+        "perf" (hash "ok" #t "degraded" #t)
+        "source" (string-append "(tuning (" stage " 1))")
+        "fork_tree" (list (hash "id" "cand-fast" "ok" #t "score" 1000))))
+
+(define (pass-stage-on state spec stage prn commit wl)
+  (let* ((r (round-for spec stage (string-append stage "-r1") wl))
+         (rec (milestone:record-round! state r))
+         (o (milestone:outer-request state))
+         (pl (pipeline:plan-pr (hash-ref o "request")
+                               (pipeline:policy) (pipeline:new-state)))
+         (p (milestone:record-pr! state prn
+                                  (string-append "https://example.invalid/pr/"
+                                                 (number->string prn))
+                                  pl))
+         (m (hash "pr" prn "merged" #t "commit" commit
+                  "branch_protected" #t "force" #f "admin" #f
+                  "post_merge" (hash "ok" #t "assertions_ok" #t "perf_ok" #t)
+                  "evidence_digest" (hash-ref p "evidence_digest"))))
+    (milestone:land! state m)))
+
+(define (pass-stage spec stage prn commit wl)
+  (pass-stage-on ms spec stage prn commit wl))
+
+; ── a finished project ─────────────────────────────────────────
+
+(define spec (cadr (project:compile "用aura写一个坦克大战游戏")))
+(define ms (hash-ref (milestone:new spec (hash "workspace" 12 "issue" 26
+                                                "repo" "cybrid-systems/tank-battle"))
+                     "state"))
+(pass-stage spec "move" 101 "commit-1" 11)
+(pass-stage spec "fight" 102 "commit-2" 21)
+(pass-stage spec "levels" 103 "commit-3" 31)
+(pass-stage spec "fun" 104 "commit-4" 41)
+
+(define lc (lifecycle:new-state))
+(lifecycle:spend lc "wall_ms" 120000 "move")
+(lifecycle:spend lc "tokens" 5000 "move")
+(lifecycle:spend lc "prs" 4 "move")
+
+(define done (lifecycle:done? ms lc))
+(line "done" (hash-ref done "done"))
+(line "done-reasons" (length (hash-ref done "reasons" '())))
+(line "done-passed" (hash-ref done "passed"))
+(line "done-stages" (hash-ref done "stages"))
+
+(define report (lifecycle:report ms lc
+                  (hash "unadopted" (list (hash "requirement" "三人模式"
+                                                   "status" "not-adopted")))))
+(line "report-kind" (hash-ref report "kind"))
+(line "report-reason" (hash-ref report "reason"))
+(line "report-status" (hash-ref report "status"))
+(line "report-ladder" (length (hash-ref report "ladder" '())))
+(line "report-passed" (hash-ref report "passed"))
+(line "report-merged" (length (hash-ref report "merged_prs" '())))
+(line "report-remaining-wall" (hash-ref (hash-ref (hash-ref report "budget") "remaining") "wall_ms"))
+(line "report-remaining-tokens" (hash-ref (hash-ref (hash-ref report "budget") "remaining") "tokens"))
+(line "report-unadopted" (length (hash-ref report "unadopted" '())))
+(line "report-release-tag" (hash-ref (hash-ref report "release") "tag"))
+(line "report-release" (hash-ref (hash-ref report "release") "release"))
+(define publish (lifecycle:report-action report))
+(line "report-action" (hash-ref publish "action"))
+(line "report-action-issue" (hash-ref publish "issue"))
+(line "report-action-body" (> (string-length (hash-ref publish "body" "")) 0))
+
+; ── incomplete ladder ──────────────────────────────────────────
+
+(define ms2 (hash-ref (milestone:new spec (hash "workspace" 13 "issue" 26))
+                      "state"))
+(pass-stage-on ms2 spec "move" 201 "commit-21" 51)
+(pass-stage-on ms2 spec "fight" 202 "commit-22" 52)
+(define done2 (lifecycle:done? ms2 #f))
+(line "incomplete-done" (hash-ref done2 "done"))
+(line "incomplete-ladder" (member? "ladder-incomplete" (hash-ref done2 "reasons" '())))
+(line "incomplete-contract" (member? "contract-failure" (hash-ref done2 "reasons" '())))
+(define report2 (lifecycle:report ms2 #f (hash)))
+(line "incomplete-reason" (hash-ref report2 "reason"))
+
+; ── quota exhaustion and fail-closed dispatch ──────────────────
+
+(define lc2 (lifecycle:new-state))
+(line "fail1-frozen" (hash-ref (lifecycle:fail! lc2 "move" "assertion") "frozen"))
+(line "fail2-frozen" (hash-ref (lifecycle:fail! lc2 "move" "assertion") "frozen"))
+(line "fail2-reason" (hash-ref (lifecycle:fail! lc2 "move" "third") "reason"))
+(line "budget-patch" (hash-ref (lifecycle:dispatch lc2 "patch") "error"))
+(line "budget-merge" (hash-ref (lifecycle:merge-gate lc2) "error"))
+(line "budget-create-repo" (hash-ref (lifecycle:dispatch lc2 "create-repo") "allowed"))
+(define term2 (lifecycle:terminate ms lc2 "failures" (hash)))
+(line "terminate-reason" (hash-ref term2 "reason"))
+(line "terminate-flag" (hash-ref term2 "terminated"))
+(line "terminate-release" (hash-ref (hash-ref term2 "release") "release"))
+
+(define lc3 (lifecycle:new-state))
+(line "wall-frozen" (hash-ref (lifecycle:spend lc3 "wall_ms" 600001 "move") "frozen"))
+(line "wall-reason" (hash-ref (lifecycle:spend lc3 "tokens" 1 "move") "reason"))
+
+; ── Kill Switch ────────────────────────────────────────────────
+
+(define lc4 (lifecycle:new-state))
+(lifecycle:kill! lc4 #t)
+(line "kill-dispatch" (hash-ref (lifecycle:dispatch lc4 "patch") "error"))
+(line "kill-merge" (hash-ref (lifecycle:merge-gate lc4) "error"))
+(line "kill-create-repo" (hash-ref (lifecycle:dispatch lc4 "create-repo") "allowed"))
+(line "kill-frozen-reason" (hash-ref (lifecycle:frozen? lc4) "reason"))
+(define done-kill (lifecycle:done? ms lc4))
+(line "done-kill" (hash-ref done-kill "done"))
+(line "done-kill-reason" (member? "kill-switch" (hash-ref done-kill "reasons" '())))
+(define term4 (lifecycle:terminate ms lc4 "kill-switch" (hash)))
+(line "kill-report" (hash-ref term4 "reason"))
+
+; ── Aura defect intake ────────────────────────────────────────
+
+(define defect (hash "kind" "runtime"
+                     "version" "c13a149c7"
+                     "summary" "std/hot-strategy choose-fn 返回被污染"
+                     "repro" "aura test std/hot-strategy"
+                     "logs" "EVICT target contains INFO fragments"))
+(define newdef (lifecycle:aura-defect defect '()))
+(line "defect-action" (hash-ref newdef "action"))
+(line "defect-repo" (hash-ref newdef "repo"))
+(line "defect-language" (hash-ref newdef "language"))
+(line "defect-fix-pr" (hash-ref newdef "fix_pr"))
+(line "defect-kernel-patch" (hash-ref newdef "kernel_patch"))
+(line "defect-forbidden" (length (hash-ref newdef "forbidden_actions" '())))
+(line "defect-body" (string-contains? (hash-ref newdef "body") "复现"))
+(define existing (list (hash "number" 5431
+                             "fingerprint" (hash-ref newdef "fingerprint"))))
+(define hit (lifecycle:aura-defect defect existing))
+(line "defect-existing" (hash-ref hit "action"))
+(line "defect-existing-number" (hash-ref hit "issue"))
+(line "defect-bad-kind" (hash-ref (lifecycle:aura-defect (with defect "kind" "ui") '()) "error"))
+(define decision (lifecycle:defect-decision defect "workaround"))
+(line "defect-decision" (hash-ref decision "strategy"))
+(line "defect-decision-fix" (hash-ref decision "fix_pr"))
+(line "defect-degrade-reason" (hash-ref (lifecycle:defect-decision defect "degrade") "reason"))
+(line "defect-terminate" (hash-ref (lifecycle:defect-decision defect "terminate") "terminate_project"))
+(line "defect-bad-strategy" (hash-ref (lifecycle:defect-decision defect "rewrite-kernel") "error"))
+(line "defect-audit" (hash-ref (lifecycle:record-defect! lc decision) "ok"))
+(line "defect-audit-count" (hash-ref (lifecycle:record-defect! lc decision) "audit"))
+
+(define report-defect (lifecycle:report ms lc
+                         (hash "unadopted" '()
+                               "aura_issues" (list (hash "number" 5431
+                                                         "fingerprint" (hash-ref newdef "fingerprint"))))))
+(line "report-aura-issues" (length (hash-ref report-defect "aura_issues" '())))
