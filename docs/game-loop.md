@@ -10,7 +10,9 @@ file; the caller decides whether to commit the winner.
 ;; => {ok, winner, results, state}
 ```
 
-A candidate is `{id, step}`. `results` keeps per-candidate `ok`,
+A candidate is `{id, step}` and may also carry its own `root` state;
+`loop:run-one` deep-copies that root instead of the shared one. This is
+how tuning ASTs become different candidates. `results` keeps per-candidate `ok`,
 `frames`, `failures`, `score` and final `state`. The score prefers a
 candidate that satisfies the contract, then its game score; a failing
 candidate gets a negative score from its failure count. The best result

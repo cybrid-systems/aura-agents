@@ -31,10 +31,13 @@
 (define (loop:run-one root candidate inputs ids)
   (let* ((id (l-get candidate "id" "candidate"))
          (step (l-get candidate "step" #f))
+         (start (if (hash? (l-get candidate "root" #f))
+                  (loop:copy (l-get candidate "root" #f))
+                  (loop:copy root)))
          (run (if step
-                (game:run (loop:copy root) step inputs ids)
+                (game:run start step inputs ids)
                 (hash "ok" #f "frames" 0 "failures" (list (hash "id" "missing-step"))
-                      "state" root))))
+                      "state" start))))
     (hash "id" id
           "ok" (l-get run "ok" #f)
           "frames" (l-get run "frames" 0)

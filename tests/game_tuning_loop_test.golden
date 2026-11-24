@@ -1,0 +1,8 @@
+winner=score-200
+results=2
+score-100=100
+score-200=200
+ok-100=#t
+ok-200=#t
+tuned-source=(tuning (bullet-speed 1) (enemy-score 200) (fire-cooldown 3) (player-speed 1))
+tuned-enemy-score=200

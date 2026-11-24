@@ -8,7 +8,8 @@
 (require "lib/score")
 
 (export mutate:new mutate:apply mutate:candidates mutate:to-source
-        mutate:from-source mutate:fingerprint mutate:params mutate:help)
+        mutate:from-source mutate:fingerprint mutate:params mutate:tuning
+        mutate:arena-opts mutate:help)
 
 (define (mutate:help)
   "Mutate: (mutate:new); (mutate:candidates ast ops); (mutate:to-source ast); (mutate:from-source text)")
@@ -99,6 +100,17 @@
        (hash "kind" "tuning"
              "params" (m-sort (filter (lambda (p) (not (equal? (m-get p "key" "") key))) params))))
       (else ast))))
+
+(define (mutate:tuning ast)
+  (let loop ((xs (mutate:params ast)) (out (hash)))
+    (if (not (pair? xs))
+      out
+      (begin
+        (hash-set! out (m-get (car xs) "key" "") (m-get (car xs) "value" #f))
+        (loop (cdr xs) out)))))
+
+(define (mutate:arena-opts ast)
+  (hash "tuning" (mutate:tuning ast)))
 
 (define (mutate:fingerprint ast)
   (score:contract-fingerprint "tuning" (list (list "source" (mutate:to-source ast)))))

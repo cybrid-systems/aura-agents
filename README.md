@@ -146,8 +146,11 @@ for `mutate :rebind`; no candidate writes a file. Docs: `docs/game-loop.md`.
 
 `lib/game/mutate.aura` is the structured candidate generator: a typed
 `(tuning ...)` AST with `set`/`add`/`inc`/`remove` ops, canonical source
-rendering, read-back round trip and fingerprints. `mutate:candidates`
-feeds the loop; no arbitrary source is evaluated. Docs: `docs/game-mutate.md`.
+rendering, read-back round trip and fingerprints. `mutate:arena-opts`
+binds a tuning AST into `arena:new` (player speed, fire cooldown, enemy
+score); `tests/game_tuning_loop_test.aura` rehearses two ASTs in parallel
+and picks the higher-scoring one. No arbitrary source is evaluated.
+Docs: `docs/game-mutate.md`.
 
 COW snapshot/restore and the live hot swap itself are #24/#28/#29 work;
 this is the per-frame contract, single-worldline state machine, the

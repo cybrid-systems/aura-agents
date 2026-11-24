@@ -5,4 +5,6 @@ mutate:to-source: Any -> Any
 mutate:from-source: Any -> Any
 mutate:fingerprint: Any -> Any
 mutate:params: Any -> Any
+mutate:tuning: Any -> Any
+mutate:arena-opts: Any -> Any
 mutate:help: -> Any

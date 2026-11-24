@@ -1,0 +1,63 @@
+;; Issue #28 + #29 — tuning AST -> arena root -> N-fiber rehearsal.
+(require "std/string")
+(require "std/list")
+(require "lib/game/arena")
+(require "lib/game/assert")
+(require "lib/game/loop")
+(require "lib/game/mutate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (hash-copy h)
+  (let ((out (hash)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
+    out))
+
+(define (with h k v)
+  (let ((c (hash-copy h))) (hash-set! c k v) c))
+
+(define (merge a b)
+  (let ((out (hash-copy a)))
+    (for-each (lambda (k) (hash-set! out k (hash-ref b k))) (hash-keys b))
+    out))
+
+(define (find-result results id)
+  (let loop ((xs results))
+    (cond ((not (pair? xs)) #f)
+          ((equal? (hash-ref (car xs) "id" "") id) (car xs))
+          (else (loop (cdr xs))))))
+
+(define base-ast (mutate:new))
+(define high-ast (mutate:apply base-ast (hash "op" "set" "key" "enemy-score" "value" 200)))
+
+(define (tuned-root ast)
+  (with (with (with
+                (arena:new (merge (mutate:arena-opts ast)
+                                  (hash "players" 1 "levels" 1)))
+                "player" (hash "x" 5 "y" 11 "dir" "up"))
+                "bricks" '())
+        "enemies" (list (hash "x" 5 "y" 9))))
+
+(define root (arena:new (hash "players" 1 "levels" 1)))
+(define candidates
+  (list (hash "id" "score-100" "root" (tuned-root base-ast) "step" arena:step)
+        (hash "id" "score-200" "root" (tuned-root high-ast) "step" arena:step)))
+(define ids (list "state-advance" "score-lives" "frame-budget"
+                  "visual-keyframe" "enemy-destroy"))
+(define run (loop:rehearse root candidates (list (hash "fire" #t)) ids))
+
+(line "winner" (hash-ref run "winner"))
+(line "results" (length (hash-ref run "results" '())))
+(define a (find-result (hash-ref run "results" '()) "score-100"))
+(define b (find-result (hash-ref run "results" '()) "score-200"))
+(line "score-100" (hash-ref (hash-ref a "state") "score"))
+(line "score-200" (hash-ref (hash-ref b "state") "score"))
+(line "ok-100" (hash-ref a "ok"))
+(line "ok-200" (hash-ref b "ok"))
+
+(line "tuned-source" (mutate:to-source high-ast))
+(line "tuned-enemy-score" (hash-ref (mutate:tuning high-ast) "enemy-score"))

@@ -19,8 +19,12 @@ trip preserves the fingerprint. Invalid non-`tuning` source returns
 `(error bad-tuning)`. The module never evaluates arbitrary source, never
 writes a file and never touches a target branch.
 
+`mutate:tuning` returns the flat key/value hash and `mutate:arena-opts`
+wraps it for `arena:new`; the state machine reads `player-speed`,
+`fire-cooldown` and `enemy-score` from it.
+
 `tests/game_mutate_test.aura` covers default source, set/inc/remove/add,
 round-trip fidelity, three generated candidates and rejection of a
-non-tuning form. Binding the parsed AST into a live game step is the
-#24/#29 adapter work; this module owns the structured mutation and
-AST-to-source fidelity.
+non-tuning form. `tests/game_tuning_loop_test.aura` binds two ASTs into
+two arena roots, rehearses both in parallel and selects the one with the
+higher enemy score. Live `mutate :rebind` remains #29 work.

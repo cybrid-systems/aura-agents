@@ -70,22 +70,27 @@
 (define (a-water? st x y)
   (a-tile? (a-get st "water" '()) x y))
 
+(define (a-move-step st move)
+  (let* ((x (a-player-x st)) (y (a-player-y st))
+         (nx (cond ((equal? move "right") (+ x 1))
+                   ((equal? move "left") (- x 1)) (else x)))
+         (ny (cond ((equal? move "down") (+ y 1))
+                   ((equal? move "up") (- y 1)) (else y))))
+    (cond
+      ((a-out? nx ny) (a-event st "blocked"))
+      ((a-water? st nx ny) (a-event st "blocked-water"))
+      ((a-blocked? st nx ny) (a-event st "blocked"))
+      (else (a-with st "player" (hash "x" nx "y" ny "dir" move))))))
+
 (define (a-move st input)
   (if (not (equal? (a-get st "status" "") "playing"))
     st
     (let ((move (a-get input "move" #f)))
       (if (not (and (string? move) (> (string-length move) 0)))
         st
-        (let* ((x (a-player-x st)) (y (a-player-y st))
-               (nx (cond ((equal? move "right") (+ x 1))
-                         ((equal? move "left") (- x 1)) (else x)))
-               (ny (cond ((equal? move "down") (+ y 1))
-                         ((equal? move "up") (- y 1)) (else y))))
-          (cond
-            ((a-out? nx ny) (a-event st "blocked"))
-            ((a-water? st nx ny) (a-event st "blocked-water"))
-            ((a-blocked? st nx ny) (a-event st "blocked"))
-            (else (a-with st "player" (hash "x" nx "y" ny "dir" move)))))))))
+        (let ((speed (max 1 (a-num (a-get st "tuning" (hash)) "player-speed" 1))))
+          (let loop ((k speed) (s st))
+            (if (<= k 0) s (loop (- k 1) (a-move-step s move)))))))))
 
 (define (a-fire st input)
   (if (not (equal? (a-get st "status" "") "playing"))
@@ -99,7 +104,7 @@
                                 "dir" "up" "owner" "player")
                           (a-get st "bullets" '())))
             "fired")
-          "cooldown" 3)
+          "cooldown" (a-num (a-get st "tuning" (hash)) "fire-cooldown" 3))
         (a-with st "cooldown" (max 0 (- cool 1)))))))
 
 (define (a-step-bullet st b)
@@ -122,7 +127,8 @@
       ((a-enemy-at? (a-get st "enemies" '()) nx ny)
        (a-event (a-with (a-with st "enemies"
                                 (a-remove-enemy (a-get st "enemies" '()) nx ny))
-                        "score" (+ 100 (a-num st "score" 0)))
+                        "score" (+ (a-num (a-get st "tuning" (hash)) "enemy-score" 100)
+                                   (a-num st "score" 0)))
                 "enemy-destroy"))
       ((and (equal? owner "enemy")
             (= nx (a-player-x st)) (= ny (a-player-y st)))
@@ -158,6 +164,7 @@
   (let ((players (a-num opts "players" 1))
         (levels (a-num opts "levels" 2)))
     (hash "player" (hash "x" 4 "y" 12 "dir" "up")
+          "tuning" (a-get opts "tuning" (hash))
           "tick" 0 "bullets" '() "cooldown" 0
           "bricks" (list (hash "x" 5 "y" 10) (hash "x" 6 "y" 10)
                          (hash "x" 7 "y" 10) (hash "x" 5 "y" 11)
