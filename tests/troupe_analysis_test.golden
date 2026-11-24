@@ -1,0 +1,8 @@
+count=3
+tracks=performance,quality,experience
+gate-required=3
+quality-degraded=#t
+quality-missing=(image_url:aura#5418)
+review-keep=0
+review-verdict=candidate-only
+perf-reason=#t

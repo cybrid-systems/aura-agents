@@ -1,0 +1,21 @@
+;; #45 — three analysis tracks produce candidate-only proposals.
+(require "std/string")
+(require "std/list")
+(require "lib/troupe/analysis")
+
+(define (line k v) (display k) (display "=") (display v) (newline))
+
+(define evidence
+  (hash "performance" (hash "tick_p99_ms" 18 "boot_ms" 40 "gc_ms" 12)
+        "quality" (hash "frames" 120 "dropped" 2)
+        "experience" (hash "first_wish_ms" 37 "timeouts" 1)))
+(define cs (analysis:candidates evidence))
+(line "count" (length cs))
+(line "tracks" (string-join (map (lambda (c) (hash-ref c "track")) cs) ","))
+(line "gate-required" (length (filter (lambda (c) (hash-ref c "requires_gate" #f)) cs)))
+(line "quality-degraded" (hash-ref (car (filter (lambda (c) (equal? (hash-ref c "track") "quality")) cs)) "degraded"))
+(line "quality-missing" (hash-ref (car (filter (lambda (c) (equal? (hash-ref c "track") "quality")) cs)) "missing"))
+(define r (analysis:review cs))
+(line "review-keep" (hash-ref r "keep"))
+(line "review-verdict" (hash-ref r "verdict"))
+(line "perf-reason" (string-contains? (hash-ref (car cs) "reason") "tick-p99"))

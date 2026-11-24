@@ -1,0 +1,62 @@
+;; Resident analysis tracks (#45): performance, quality and experience
+;; evidence turned into proposals. The analysis never holds a verdict:
+;; every proposal is candidate-only and must pass the #16 judge. The
+;; quality track reports degraded until aura#5418 adds image_url.
+
+(require "std/string")
+(require "std/list")
+
+(export analysis:performance analysis:quality analysis:experience
+        analysis:candidates analysis:review analysis:help)
+
+(define (an-get h k d) (if (hash? h) (hash-ref h k d) d))
+(define (an-num h k d) (let ((v (an-get h k d))) (if (number? v) v d)))
+(define (an-str h k d) (let ((v (an-get h k d))) (if (string? v) v d)))
+
+(define (analysis:help)
+  "Analysis: (analysis:candidates evidence); three tracks, all candidate-only and gate-required")
+
+(define (analysis:performance metrics)
+  (hash "track" "performance"
+        "proposal" "inspect the p99/boot/GC rows and try the lowest-risk hotspot candidate"
+        "reason" (string-append "tick-p99=" (number->string (an-num metrics "tick_p99_ms" 0))
+                                " boot-ms=" (number->string (an-num metrics "boot_ms" 0))
+                                " gc-ms=" (number->string (an-num metrics "gc_ms" 0)))
+        "source" "llm:mock"
+        "degraded" #f
+        "requires_gate" #t
+        "verdict" "candidate-only"))
+
+(define (analysis:quality frames)
+  (hash "track" "quality"
+        "proposal" "compare the keyframe layout and flag unreadable HUD/contrast"
+        "reason" (string-append "frames=" (number->string (an-num frames "frames" 0))
+                                " dropped=" (number->string (an-num frames "dropped" 0)))
+        "source" "image:unavailable"
+        "degraded" #t
+        "missing" (list "image_url:aura#5418")
+        "requires_gate" #t
+        "verdict" "candidate-only"))
+
+(define (analysis:experience replay)
+  (hash "track" "experience"
+        "proposal" "reduce first-wish/timeout friction; keep the feedback visible"
+        "reason" (string-append "first-wish-ms=" (number->string (an-num replay "first_wish_ms" 0))
+                                " timeouts=" (number->string (an-num replay "timeouts" 0)))
+        "source" "llm:mock"
+        "degraded" #f
+        "requires_gate" #t
+        "verdict" "candidate-only"))
+
+(define (analysis:candidates evidence)
+  (list (analysis:performance (an-get evidence "performance" (hash)))
+        (analysis:quality (an-get evidence "quality" (hash)))
+        (analysis:experience (an-get evidence "experience" (hash)))))
+
+(define (analysis:review proposals)
+  ;; The analysis layer is read-only advice. It cannot return keep; the
+  ;; caller must send each candidate to the Harness judge.
+  (hash "count" (length proposals)
+        "keep" 0
+        "verdict" "candidate-only"
+        "requires_gate" #t))
