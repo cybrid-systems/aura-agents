@@ -34,9 +34,11 @@ Each payload contains the target repo, `orchestra/baseline-<sha9>` branch,
 pointer, and `force-push/admin-merge/tag/release` in
 `forbidden_actions`.
 
-## Remaining rollout
+## Rollout
 
-The generator and aura-agents gate are live. Aligning
-`aura-perf`, `aura-harness`, `aura-memory`, `aura-memory-runtime`,
-`aura-runner` and `aura-redis` to the same digest is the next cross-repo
-step; the payloads are ready for review.
+The generator and aura-agents gate are live. The cross-repo bump branches
+`orchestra/baseline-<sha9>` carry the same Aura commit, nightly archive
+digests and `aura-ci` digest into `aura-perf`, `aura-harness`,
+`aura-memory`, `aura-memory-runtime`, `aura-runner` and `aura-redis`.
+Each branch is a normal reviewed PR; a failed target CI is a real
+compatibility signal, not something the generator hides.
