@@ -56,6 +56,23 @@ the actual hardware is recorded in the JSON). Same host both sides.
   work, the generic side starts from an existing project. These are
   measurements, not promises; the target statuses are in the JSON.
 
+## Aura side on the v0.3.4 nightly
+
+Host: 12 CPU / 29.3 GiB, aarch64; Aura nightly `cb7d55e7d`; Aura side
+only (`scripts/kpi_inner.aura`, three runs each), before and after the
+self-target run in `docs/perf.md`:
+
+- candidates/min 53 333 / 53 631 / 53 333 -> 79 338 / 72 727 / 81 355;
+- wall of the 40 rounds 179 / 180 / 180 ms -> 118 / 121 / 132 ms, so
+  4 -> 2-3 ms/round at the clock's resolution;
+- first playable 15 / 16 / 16 ms -> 14 / 14 / 15 ms; phase cumulative
+  move/fight/levels/fun 16/65/113/166 ms -> 14/52/84/119 ms (one run
+  each, the third).
+
+The gain is one native hash copy per arena frame instead of five and
+one call per numeric field read. The generic side was not re-run; the
+ratio against it is not restated here.
+
 ## Tests
 
 `tests/kpi_test.aura` pins the aggregation, target/label/status output,

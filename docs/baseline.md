@@ -46,3 +46,7 @@ digests and `aura-ci` digest into `aura-perf`, `aura-harness`,
 `aura-memory`, `aura-memory-runtime`, `aura-runner` and `aura-redis`.
 Each branch is a normal reviewed PR; a failed target CI is a real
 compatibility signal, not something the generator hides.
+
+aura-agents is pinned at `cb7d55e7d` (v0.3.4); `bump-baseline.py --check`
+prints the member and stage payloads for that commit, and they were not
+pushed with the aura-agents pin.

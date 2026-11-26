@@ -163,3 +163,122 @@ stack-level off-CPU artifacts.
 `mode`, `degraded`, `missing_probes` and `caps` = `read,publish`.
 The Perf section has no `keep`/`rollback` path and never writes a target
 branch.
+
+## Self-target run on v0.3.4
+
+The Perf section was turned on this repository itself: the target is
+aura-agents at the pinned nightly, observed from the outside the same
+way as aura-runner and aura-redis. Nothing was added to the libraries to
+measure them.
+
+Host: 12 CPU / 29.3 GiB, aarch64; Aura nightly `cb7d55e7d` (v0.3.4).
+
+### Method
+
+- `aura test`, reading the per-test times.
+- `perf record -F 4000 -g` on the five heaviest tests. A test is too
+  short for the JIT to compile anything, so the profile is the
+  interpreter's C++ frames: it says which runtime path a workload
+  leans on, not which Aura function is hot.
+- Scratch microbenchmarks of the experience store at 100, 400 and
+  1 600 nodes, timing each verb alone.
+- A scratch copy of the libraries with every top-level function wrapped
+  in a counter (the wrapper's own cost inflates its times, so the call
+  counts rank the functions and the times are not used).
+
+### Target findings
+
+The experience store grew quadratically with its own history, on every
+runtime, and the milestone and game loops paid per call for work a
+native primitive does in one step.
+
+Experience store (`lib/graph/store.aura`, `schema.aura`, `prune.aura`):
+
+- every record copied the whole event log to append to its end;
+- every drop rebuilt the whole node table key by key, so a prune was
+  quadratic in the nodes it dropped;
+- `graph:node-count` built the key list to take its length;
+- a load re-applied every event the snapshot already held, including the
+  nodes a prune had dropped;
+- each text was scanned with thirteen needles, each through the
+  `string-contains?` closure, and an id was built by prepending one
+  string per hex digit.
+
+| store verb | N | before | after |
+|---|---:|---:|---:|
+| `graph:add-node!` x N | 100 | 89 ms | 52 ms |
+| | 400 | 315 ms | 184 ms |
+| | 1 600 | 1 346 ms | 705 ms |
+| `graph:node-count` x N | 1 600 | 77 ms | 9 ms |
+| `prune:run!`, `max-nodes` N/2 | 100 | 51 ms | 29 ms |
+| | 400 | 431 ms | 103 ms |
+| | 1 600 | 6 062 ms | 421 ms |
+| `graph:load` after a prune and a save | 100 | 214 ms | 6 ms |
+| | 400 | 1 434 ms | 22 ms |
+| | 1 600 | 15 119 ms | 91 ms |
+| `ingest:events` x N | 100 | 216 ms | 127 ms |
+| | 400 | 913 ms | 487 ms |
+| | 1 600 | 5 227 ms | 2 015 ms |
+
+What changed, with the outputs byte for byte as they were (ids, the
+log file, the snapshot, every golden):
+
+- The log is kept newest first, so a record is one cons; the snapshot
+  and the log file still carry it oldest first.
+- A drop is `hash-remove!`, a count is `hash-length`.
+- A load replays only the events logged after the snapshot, which is
+  the rest of the log file.
+- `prune:run!` takes one sorted pass over the table and derives every
+  list from it.
+- The privacy scan calls the native `string-index`, the id is
+  `number->string` in base 16, and the bounds are `hash-length`.
+
+Test: `tests/experience_store_test.aura` pins the order of the log in
+memory and on disk, what a load replays (also a log shorter than the
+snapshot) and what a drop removes.
+
+Game loop and copies:
+
+- `arena:step` opened a frame with five copies of the state; it is one
+  native `hash-copy` now. `lib/game/arena.aura` and the copy helpers of
+  `project/kpi`, `project/lifecycle`, `project/milestone` and
+  `project/requirements` copied a hash key by key in Aura.
+- `score:contract-fingerprint` walked the text by index; the same FNV-1a
+  over the code points is a `foldl` over the characters, 332 → 185 µs
+  for a 123-character contract. It is the hot path of every milestone
+  chain check, where each event is digested again on every verify.
+
+| workload (official nightly) | before | after |
+|---|---:|---:|
+| KPI inner loop, candidates per minute (three runs) | 53 333 / 53 631 / 53 333 | 79 338 / 72 727 / 81 355 |
+| KPI inner loop, wall ms of the 40 rounds | 179 / 180 / 180 | 118 / 121 / 132 |
+| KPI first playable | 15 / 16 / 16 ms | 14 / 14 / 15 ms |
+| `aura test`, sum of the 44 shared test times | 5 514 ms | 5 015 ms |
+| `experience_prune_test` | 754 ms | 526 ms |
+| `orchestrate_graph_test` | 497 ms | 347 ms |
+| mock demo with `AURA_AGENTS_GRAPH=on` (local build of the same commit) | 296 / 361 / 362 ms | 241 / 310 / 322 ms |
+
+### Runtime findings (not target patches)
+
+What the C++ profiles showed on v0.3.4 while the tests ran; each is an
+Aura path, so it belongs to the runtime and not to a library here.
+
+- 26% of `experience_prune_test` was `enforce_linear_boundary_consistency`
+  on the exit of the outermost mutation boundary: with no linear state
+  anywhere it still runs the root audit, which walks every registered
+  closure (`collect_compiler_managed_gc_roots`) and takes a shard lock
+  per environment root. The cost grows with the closures a process has
+  created, once per boundary.
+- `Env::lookup_cell_index` from `eval_flat_on_set` is 13% of three heavy
+  tests.
+- `reclaim_tw_unreachable` with `file_reclaim_mark_value` is 12-14% of
+  `orchestrate_graph_test`: the tree-walker's reclaim marks the live
+  values, so a process with a large live graph pays for it at every
+  pass.
+- There is no native FNV-1a over code points (`string-fnv1-32` is
+  FNV-1), so every digest that must keep its value stays an Aura loop;
+  `std/evo-core` met the same wall (#5339 follow-up).
+- A primitive call costs about 2 µs on the tree-walker and a script as
+  short as a test never reaches the JIT: the remaining weight of
+  `project_requirements_test`, `lifecycle_test` and `game_milestone_test`
+  is thousands of small calls, not any one algorithm.
