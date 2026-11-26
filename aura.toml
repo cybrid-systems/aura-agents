@@ -8,7 +8,7 @@ out = "out"
 # digest as baseline/aura-baseline.json. CI fails when they drift.
 [dependencies]
 aura = "nightly"
-aura_commit = "c13a149c7c8fc947dbe86a5ab615e9b301c9aa4a"
-aura_sha256_linux_x86_64 = "8895e97f8e5db738ccb2375585f6ff3d8fd3700a8ea85299839b6429e40a776b"
-aura_sha256_linux_arm64 = "5dc443edd950e7f1b74bbf1bdf3f0aa40c67d26b784f34bfed16ab7a28ebb24f"
+aura_commit = "cb7d55e7dea2b0ffad25e495592f56210ce5c96f"
+aura_sha256_linux_x86_64 = "37a38d22bcb6e65e3d2e13dd17b269cde0c1a3a8d1bba89cf1499cdefeb2f635"
+aura_sha256_linux_arm64 = "07926c34348a58f9b2d8a04cedc76118cbf514f62f8144cad1b6ddab74404706"
 aura_ci_digest = "sha256:66392ce2a5f24668fb923d1c900c545435f6b453f3df585dc4668402c07042d5"
