@@ -1,0 +1,102 @@
+;; Experience graph store: where the event log is newest first and where
+;; it is oldest first, what a load replays, and what a drop removes.
+(require "std/string")
+(require "std/json")
+(require "lib/graph/store")
+
+(define ws 9180)
+(graph:reset! ws)
+(define g (graph:new ws))
+
+(define (node type seq summary)
+  (cadr (graph:make-node
+          (hash "type" type "workspace_id" ws "worldline" seq
+                "candidate_hash" (string-append "c" (number->string seq))
+                "contract_hash" "contract"
+                "caps_mask" 1 "budget_snapshot" (hash "tokens" 100)
+                "seq" seq "timestamp_ms" seq "summary" summary "tags" (list type)))))
+
+(define (event-node line)
+  (hash-ref (hash-ref line "value") "node_id"))
+
+(define n1 (node "keep-evidence" 1 "first"))
+(define n2 (node "keep-evidence" 2 "second"))
+(define n3 (node "constraint-rejection" 3 "third"))
+(graph:add-node! g n1)
+(graph:add-node! g n2)
+(graph:add-node! g n3)
+
+;; In memory the log is newest first, so a record is one cons.
+(display "newest-first=")
+(display (equal? (event-node (car (hash-ref g "events"))) (hash-ref n3 "node_id")))
+(newline)
+(display "oldest-last=")
+(display (equal? (event-node (car (reverse (hash-ref g "events"))))
+                 (hash-ref n1 "node_id")))
+(newline)
+
+;; On disk it is oldest first: the snapshot's array and the log file.
+(display "save=") (display (car (graph:save! g))) (newline)
+(define lines (string-split (file-read (graph:log-path ws)) "\n"))
+(display "log-count=") (display (length lines)) (newline)
+(display "log-oldest-first=")
+(display (equal? (event-node (json-parse (car lines))) (hash-ref n1 "node_id")))
+(newline)
+(display "log-newest-last=")
+(display (equal? (event-node (json-parse (car (reverse lines))))
+                 (hash-ref n3 "node_id")))
+(newline)
+(define snap (json-parse (file-read (graph:snapshot-path ws))))
+(display "snapshot-count=") (display (length (hash-ref snap "events"))) (newline)
+(display "snapshot-oldest-first=")
+(display (equal? (event-node (car (hash-ref snap "events"))) (hash-ref n1 "node_id")))
+(newline)
+
+;; A load takes what the snapshot holds and replays only the events
+;; logged after it.
+(define n4 (node "keep-evidence" 4 "logged after the snapshot"))
+(file-write (graph:log-path ws)
+            (string-append (file-read (graph:log-path ws)) "\n"
+                           (json-encode (hash "op" "add-node" "value" n4 "at_ms" 4))))
+(define loaded (graph:load ws))
+(display "loaded-nodes=") (display (graph:node-count loaded)) (newline)
+(display "loaded-late=")
+(display (if (graph:get-node loaded (hash-ref n4 "node_id")) 1 0))
+(newline)
+(display "loaded-held=")
+(display (if (graph:get-node loaded (hash-ref n1 "node_id")) 1 0))
+(newline)
+
+;; A log shorter than what the snapshot holds leaves the snapshot's state.
+(file-write (graph:log-path ws) (car lines))
+(define short (graph:load ws))
+(display "short-nodes=") (display (graph:node-count short)) (newline)
+(display "short-late=")
+(display (if (graph:get-node short (hash-ref n4 "node_id")) 1 0))
+(newline)
+
+;; A drop removes the key; the table is not rebuilt.
+(graph:drop-node! short (hash-ref n2 "node_id"))
+(display "dropped-count=") (display (graph:node-count short)) (newline)
+(display "dropped-gone=")
+(display (if (graph:get-node short (hash-ref n2 "node_id")) 0 1))
+(newline)
+(display "dropped-listed=") (display (length (graph:all-nodes short))) (newline)
+(display "drop-missing=") (display (car (graph:drop-node! short "no-such-node"))) (newline)
+
+(define made-edge
+  (graph:make-edge (hash "type" "precedes"
+                         "from" (hash-ref n1 "node_id")
+                         "to" (hash-ref n3 "node_id")
+                         "workspace_id" ws "worldline" 1 "event_seq" 5 "task_id" 1)))
+(define edge (cadr made-edge))
+(graph:add-edge! short edge)
+(display "edges=") (display (graph:edge-count short)) (newline)
+(graph:drop-edge! short (hash-ref edge "edge_id"))
+(display "edges-after-drop=") (display (graph:edge-count short)) (newline)
+(display "edge-gone=") (display (if (graph:get-edge short (hash-ref edge "edge_id")) 0 1)) (newline)
+
+(graph:reset! ws)
+(display "reset-count=") (display (graph:node-count (graph:load ws))) (newline)
+(graph:reset! ws)
+(display "ok") (newline)

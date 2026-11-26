@@ -56,10 +56,10 @@
 (define (graph:edge-table g) (hash-ref g "edges" (hash)))
 
 (define (graph:node-count g)
-  (length (hash-keys (graph:node-table g))))
+  (hash-length (graph:node-table g)))
 
 (define (graph:edge-count g)
-  (length (hash-keys (graph:edge-table g))))
+  (hash-length (graph:edge-table g)))
 
 (define (graph:get-node g id)
   (hash-ref (graph:node-table g) id #f))
@@ -110,9 +110,11 @@
     (hash-set! g "seq" n)
     n))
 
+;; The log is kept newest first, so a record is one cons. The snapshot
+;; and the log file still carry it oldest first (graph:save!).
 (define (graph:record! g op value)
   (let ((ev (hash "op" op "value" value "at_ms" (current-time-ms))))
-    (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+    (hash-set! g "events" (cons ev (hash-ref g "events" '())))
     ev))
 
 (define (graph:add-node! g node)
@@ -195,15 +197,7 @@
     (if (not (hash-ref tbl id #f))
       (list "error" "missing" (string-append "no node " id))
       (begin
-        (hash-set! tbl id #f)
-        ;; Aura hashes cannot delete a key; rebuild without it.
-        (hash-set! g "nodes"
-                   (let loop ((ks (hash-keys tbl)) (out (hash)))
-                     (if (not (pair? ks))
-                       out
-                       (let ((v (hash-ref tbl (car ks) #f)))
-                         (if v (hash-set! out (car ks) v) #f)
-                         (loop (cdr ks) out)))))
+        (hash-remove! tbl id)
         (graph:record! g "drop-node" (hash "node_id" id))
         (graph:touch! g)
         (list "ok" id)))))
@@ -213,15 +207,7 @@
     (if (not (hash-ref tbl id #f))
       (list "error" "missing" (string-append "no edge " id))
       (begin
-        (hash-set! g "edges"
-                   (let loop ((ks (hash-keys tbl)) (out (hash)))
-                     (if (not (pair? ks))
-                       out
-                       (let ((v (hash-ref tbl (car ks) #f)))
-                         (if (and v (not (equal? (car ks) id)))
-                           (hash-set! out (car ks) v)
-                           #f)
-                         (loop (cdr ks) out)))))
+        (hash-remove! tbl id)
         (graph:record! g "drop-edge" (hash "edge_id" id))
         (graph:touch! g)
         (list "ok" id)))))
@@ -236,7 +222,7 @@
            (let ((tbl (graph:node-table g)))
              (hash-set! tbl (hash-ref v "node_id") v)
              (hash-set! g "nodes" tbl))
-           (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+           (hash-set! g "events" (cons ev (hash-ref g "events" '())))
            #t)
          #f))
       ((equal? op "add-edge")
@@ -245,7 +231,7 @@
            (let ((tbl (graph:edge-table g)))
              (hash-set! tbl (hash-ref v "edge_id") v)
              (hash-set! g "edges" tbl))
-           (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+           (hash-set! g "events" (cons ev (hash-ref g "events" '())))
            #t)
          #f))
       ((equal? op "invalidate-node")
@@ -256,7 +242,7 @@
              (hash-set! node "reason" (hash-ref v "reason" "upstream-invalidated"))
              (hash-set! node "invalid_from_seq" (hash-ref v "event_seq" 0))
              (hash-set! node "invalid_from_ms" (hash-ref v "invalid_from_ms" 0))
-             (hash-set! g "events" (append (hash-ref g "events" '()) (list ev)))
+             (hash-set! g "events" (cons ev (hash-ref g "events" '())))
              #t)
            #f)))
       ((equal? op "drop-node")
@@ -276,32 +262,48 @@
 (define (graph:save! g)
   (if (not (graph:graph? g))
     (list "error" "graph" "not an experience graph")
-    (let ((ws (graph:workspace g)))
+    (let* ((ws (graph:workspace g))
+           ;; Oldest first on disk.
+           (log (reverse (hash-ref g "events" '()))))
       (make-directory (graph:dir ws))
       (hash-set! g "updated_ms" (current-time-ms))
-      (file-write (graph:snapshot-path ws) (json-encode g))
-      (file-write (graph:log-path ws)
-                  (string-join
-                    (map json-encode (hash-ref g "events" '()))
-                    "\n"))
+      (hash-set! g "events" log)
+      (let ((snapshot (json-encode g)))
+        (hash-set! g "events" (reverse log))
+        (file-write (graph:snapshot-path ws) snapshot)
+        (file-write (graph:log-path ws) (string-join (map json-encode log) "\n")))
       (list "ok" (graph:node-count g) (graph:edge-count g)))))
 
-(define (graph:replay-log g ws)
+(define (graph:replay-lines g lines)
+  (cond
+    ((not (pair? lines)) g)
+    ((string=? (string-trim (car lines)) "")
+     (graph:replay-lines g (cdr lines)))
+    (else
+      (let ((ev (try (json-parse (car lines)) (catch (e) #f))))
+        (if (hash? ev) (graph:apply-event! g ev) #f)
+        (graph:replay-lines g (cdr lines))))))
+
+;; Replays the events logged after the first `skip` of them. A snapshot
+;; and its log file are written together, so the events the snapshot
+;; already reflects are not applied again.
+(define (graph:replay-log-from g ws skip)
   (let ((path (graph:log-path ws)))
     (if (not (file-exists? path))
       g
       (let ((text (file-read path)))
         (if (not (string? text))
           g
-          (let loop ((lines (string-split text "\n")))
+          (let past ((n skip) (lines (string-split text "\n")))
             (cond
               ((not (pair? lines)) g)
               ((string=? (string-trim (car lines)) "")
-               (loop (cdr lines)))
-              (else
-                (let ((ev (try (json-parse (car lines)) (catch (e) #f))))
-                  (if (hash? ev) (graph:apply-event! g ev) #f)
-                  (loop (cdr lines)))))))))))
+               (past n (cdr lines)))
+              ((> n 0) (past (- n 1) (cdr lines)))
+              (else (graph:replay-lines g lines)))))))))
+
+(define (graph:replay-log g ws)
+  (graph:replay-log-from g ws 0))
 
 (define (graph:load ws)
   (if (not (graph:ws? ws))
@@ -311,10 +313,14 @@
                    (let ((parsed (try (json-parse (file-read path)) (catch (e) #f))))
                      (if (and (hash? parsed)
                               (equal? (hash-ref parsed "kind" "") "experience-graph"))
-                       parsed
+                       (begin
+                         ;; The snapshot lists the log oldest first.
+                         (hash-set! parsed "events"
+                                    (reverse (hash-ref parsed "events" '())))
+                         parsed)
                        (graph:new ws)))
                    (graph:new ws))))
-      (graph:replay-log base ws))))
+      (graph:replay-log-from base ws (length (hash-ref base "events" '()))))))
 
 (define (graph:open ws)
   (graph:load ws))

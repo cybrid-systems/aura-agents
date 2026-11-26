@@ -36,16 +36,9 @@
         ((equal? x (car xs)) #t)
         (else (graph:member? x (cdr xs)))))
 
-(define (graph:hex-digits) "0123456789abcdef")
-
 (define (graph:hex n)
-  (let loop ((v (if (negative? n) (- n) n)) (acc ""))
-    (if (= v 0)
-      (if (string=? acc "") "0" acc)
-      (loop (quotient v 16)
-            (string-append (substring (graph:hex-digits) (modulo v 16)
-                                      (+ 1 (modulo v 16)))
-                           acc)))))
+  ;; The id is lowercase hex without leading zeros, as it always was.
+  (number->string (if (negative? n) (- n) n) 16))
 
 (define (graph:digest text)
   (string-fnv1-32 (if (string? text) text "")))
@@ -57,7 +50,14 @@
     ((boolean? value) (if value "1" "0"))
     ((symbol? value) (symbol->string value))
     ((list? value)
-     (string-append "[" (string-join (map graph:canon value) ",") "]"))
+     (if (not (pair? value))
+       "[]"
+       (let loop ((xs (cdr value))
+                  (acc (list (graph:canon (car value)))))
+         (if (not (pair? xs))
+           (string-append "[" (apply string-append (reverse acc)) "]")
+           (loop (cdr xs)
+                 (cons (graph:canon (car xs)) (cons "," acc)))))))
     ((hash? value)
      (string-append
        "{"
@@ -88,7 +88,7 @@
   (and (number? v) (> v 0)))
 
 (define (graph:hash-keys-bounded? h limit)
-  (and (hash? h) (<= (length (hash-keys h)) limit)))
+  (and (hash? h) (<= (hash-length h) limit)))
 
 ;; Fail closed on text that looks like target source, a filesystem path,
 ;; a credential, or a private endpoint. The graph stores abstractions, so
@@ -97,19 +97,21 @@
   (and (string? s)
        (or
          (> (string-length s) 512)
-         (string-contains? s "/")
-         (string-contains? s "..")
-         (string-contains? s "://")
-         (string-contains? s "(define ")
-         (string-contains? s "#include")
-         (string-contains? s "BEGIN ")
-         (string-contains? s "LLM_API_KEY")
-         (string-contains? s "API_KEY")
-         (string-contains? s "SECRET")
-         (string-contains? s "PASSWORD")
-         (string-contains? s "TOKEN=")
-         (string-contains? s "ghp_")
-         (string-contains? s "AKIA"))))
+         ;; The native search: std/string's string-contains? is a
+         ;; closure around it.
+         (>= (string-index s "/" 0) 0)
+         (>= (string-index s ".." 0) 0)
+         (>= (string-index s "://" 0) 0)
+         (>= (string-index s "(define " 0) 0)
+         (>= (string-index s "#include" 0) 0)
+         (>= (string-index s "BEGIN " 0) 0)
+         (>= (string-index s "LLM_API_KEY" 0) 0)
+         (>= (string-index s "API_KEY" 0) 0)
+         (>= (string-index s "SECRET" 0) 0)
+         (>= (string-index s "PASSWORD" 0) 0)
+         (>= (string-index s "TOKEN=" 0) 0)
+         (>= (string-index s "ghp_" 0) 0)
+         (>= (string-index s "AKIA" 0) 0))))
 
 (define (graph:safe-scalar? v)
   (cond
@@ -121,7 +123,7 @@
 (define (graph:safe-facts? facts)
   (cond
     ((not (hash? facts)) #f)
-    ((> (length (hash-keys facts)) 16) #f)
+    ((> (hash-length facts) 16) #f)
     (else
       (let loop ((ks (hash-keys facts)))
         (cond

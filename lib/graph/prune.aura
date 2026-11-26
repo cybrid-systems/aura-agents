@@ -64,13 +64,16 @@
                               (list "cost" 0 4 5))
           "quality" "quality")))
 
-(define (prune:elites g)
-  (let ((m (prune:map g)))
+(define (prune:elites-of nodes)
+  (let ((m (prune:map '())))
     (for-each
       (lambda (node)
         (qd:insert! m node (prune:quality node) (prune:behavior node)))
-      (graph:all-nodes g))
+      nodes)
     (map (lambda (e) (hash-ref e "cand")) (qd:elites m))))
+
+(define (prune:elites g)
+  (prune:elites-of (graph:all-nodes g)))
 
 (define (prune:tier node last-seq audit-window elite?)
   (let ((status (hash-ref node "status" ""))
@@ -91,7 +94,7 @@
 ;; opts: max-nodes (soft/hard cap), audit-window (seqs of invalidated
 ;; history to keep), keep-seeds (#t).
 (define (prune:last-seq g)
-  (let loop ((ns (graph:all-nodes g)) (m (hash-ref g "seq" 0)))
+  (let loop ((ns (hash-values (graph:node-table g))) (m (hash-ref g "seq" 0)))
     (cond
       ((not (pair? ns)) m)
       ((> (prune:num (hash-ref (car ns) "seq" 0) 0) m)
@@ -111,8 +114,11 @@
            (max-nodes (prune:max-nodes opts))
            (audit-window (let ((n (hash-ref opts "audit-window" 32)))
                            (if (and (number? n) (>= n 0)) n 32)))
+           ;; One sorted pass over the table: every list below comes
+           ;; from it.
+           (nodes (graph:all-nodes g))
            (last-seq (prune:last-seq g))
-           (elites (if (hash-ref opts "elites" #t) (prune:elites g) '()))
+           (elites (if (hash-ref opts "elites" #t) (prune:elites-of nodes) '()))
            (elite-ids (map (lambda (n) (hash-ref n "node_id")) elites))
            (elite-hash (let ((h (hash)))
                          (for-each (lambda (id) (hash-set! h id #t)) elite-ids)
@@ -125,7 +131,7 @@
                                           (hash-ref elite-hash id #f))
                               (- 0.0 (prune:quality n))
                               id)))
-                    (graph:all-nodes g))
+                    nodes)
                (lambda (a b)
                  (if (= (car a) (car b))
                    (< (cadr a) (cadr b))
@@ -143,20 +149,17 @@
                           h))
            (doomed (filter (lambda (n)
                              (not (hash-ref chosen-hash (hash-ref n "node_id") #f)))
-                           (graph:all-nodes g))))
-      (for-each (lambda (n) (graph:drop-node! g (hash-ref n "node_id"))) doomed)
-      (let ((alive (let ((h (hash)))
-                     (for-each (lambda (n) (hash-set! h (hash-ref n "node_id") #t))
-                               (graph:all-nodes g))
-                     h)))
+                           nodes)))
+        (for-each (lambda (n) (graph:drop-node! g (hash-ref n "node_id"))) doomed)
+        ;; What survives the prune is exactly the chosen set.
         (for-each
           (lambda (e)
-            (if (or (not (hash-ref alive (hash-ref e "from") #f))
-                    (not (hash-ref alive (hash-ref e "to") #f)))
+            (if (or (not (hash-ref chosen-hash (hash-ref e "from") #f))
+                    (not (hash-ref chosen-hash (hash-ref e "to") #f)))
               (graph:drop-edge! g (hash-ref e "edge_id"))
               #f))
-          (graph:all-edges g)))
-      (list "ok" before (graph:node-count g) (length doomed))))))
+          (graph:all-edges g))
+        (list "ok" before (graph:node-count g) (length doomed))))))
 
 ;; Built-in, data-free seed patterns. Only abstract shapes: no paths,
 ;; source text, business parameter values or private names.
