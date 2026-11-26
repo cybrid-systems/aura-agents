@@ -11,15 +11,14 @@
   "Arena: (arena:new opts); (arena:step state input) -> next state with events")
 
 (define (a-get h k d) (if (hash? h) (hash-ref h k d) d))
-(define (a-num h k d) (let ((v (a-get h k d))) (if (number? v) v d)))
+(define (a-num h k d)
+  (if (hash? h) (let ((v (hash-ref h k d))) (if (number? v) v d)) d))
 
-(define (a-copy h)
-  (let ((out (hash)))
-    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
-    out))
-
+;; The state is updated functionally: a step returns a fresh state and
+;; never touches the one it was given, so every update is one native
+;; copy with a key replaced.
 (define (a-with h k v)
-  (let ((c (a-copy h))) (hash-set! c k v) c))
+  (let ((c (hash-copy h))) (hash-set! c k v) c))
 
 (define (a-event st e)
   (a-with st "events" (cons e (a-get st "events" '()))))
@@ -179,11 +178,17 @@
 
 (define (arena:step state input)
   (let* ((t0 (monotonic-ms))
-         (st (a-with (a-with state "tick" (+ 1 (a-num state "tick" 0))) "events" '()))
-         (st (a-with (a-with st "frame_ms" 0) "visual_diff_ok" #t))
-         (st (a-move st input))
-         (st (a-fire st input))
-         (st (a-run-bullets st))
-         (st (a-clear st))
-         (dt (- (monotonic-ms) t0)))
-    (a-with st "frame_ms" (max 0 dt))))
+         ;; One copy of the caller's state opens the frame; what the
+         ;; frame returns descends from it, so the input stays as it was.
+         (st (hash-copy state)))
+    (hash-set! st "tick" (+ 1 (a-num state "tick" 0)))
+    (hash-set! st "events" '())
+    (hash-set! st "frame_ms" 0)
+    (hash-set! st "visual_diff_ok" #t)
+    (let* ((st (a-move st input))
+           (st (a-fire st input))
+           (st (a-run-bullets st))
+           (st (a-clear st))
+           (dt (- (monotonic-ms) t0)))
+      (hash-set! st "frame_ms" (max 0 dt))
+      st)))

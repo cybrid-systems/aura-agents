@@ -22,10 +22,7 @@
 
 (define (lc-get h k d) (if (hash? h) (hash-ref h k d) d))
 (define (lc-num h k d) (let ((v (lc-get h k d))) (if (number? v) v d)))
-(define (lc-copy h)
-  (let ((out (hash)))
-    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
-    out))
+(define (lc-copy h) (hash-copy h))
 
 (define (lc-find xs id)
   (let loop ((rest xs))

@@ -17,10 +17,7 @@
 (define (rq-list h k) (let ((v (rq-get h k '()))) (if (pair? v) v '())))
 (define (rq-text? v) (and (string? v) (> (string-length v) 0)))
 
-(define (rq-copy h)
-  (let ((out (hash)))
-    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
-    out))
+(define (rq-copy h) (hash-copy h))
 
 (define (rq-id x) (rq-get x "id" ""))
 

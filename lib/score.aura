@@ -30,16 +30,16 @@
                       keys)))
       (string-join rows "&"))))
 
+;; FNV-1a over the code points of the canonical text, digit for digit
+;; as it always was. It is the hot path of every milestone chain check
+;; (each event is re-digested on every verify), and on the tree-walker a
+;; fold over the characters costs half of the indexed loop.
 (define (score:contract-fingerprint requirement contract)
-  (let* ((s (string-append requirement "|" (score-contract-text contract)))
-         (h0 2166136261))
-    (let loop ((i 0) (h h0))
-      (if (>= i (string-length s))
-        (number->string h)
-        (loop (+ i 1)
-              (bitwise-and (* (bitwise-xor h (char->integer (string-ref s i)))
-                              16777619)
-                           4294967295))))))
+  (number->string
+    (foldl (lambda (c h)
+             (bitwise-and (* (bitwise-xor h (char->integer c)) 16777619) 4294967295))
+           2166136261
+           (string->list (string-append requirement "|" (score-contract-text contract))))))
 
 ; ── construction ───────────────────────────────────────────────
 

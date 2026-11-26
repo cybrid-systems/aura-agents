@@ -38,10 +38,7 @@
 
 (define (ms-pos? v) (and (number? v) (> v 0)))
 
-(define (ms-copy h)
-  (let ((out (hash)))
-    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
-    out))
+(define (ms-copy h) (hash-copy h))
 
 (define (ms-count-kind chain kind)
   (let loop ((xs chain) (n 0))

@@ -16,10 +16,7 @@
 
 (define (kp-get h k d) (if (hash? h) (hash-ref h k d) d))
 (define (kp-num h k d) (let ((v (kp-get h k d))) (if (number? v) v d)))
-(define (kp-copy h)
-  (let ((out (hash)))
-    (for-each (lambda (k) (hash-set! out k (hash-ref h k))) (hash-keys h))
-    out))
+(define (kp-copy h) (hash-copy h))
 
 (define (kpi:targets)
   (hash "wall_ms_per_inner_round" 1000
