@@ -1,0 +1,46 @@
+name: follow aura nightly
+
+on:
+  schedule:
+    - cron: "2-59/15 * * * *"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: follow-nightly-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: cybrid-systems/aura-agents
+          path: .aura-agents
+          persist-credentials: false
+      - name: Follow the latest nightly manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .aura-agents/scripts/follow-nightly.py --repo "$GITHUB_WORKSPACE"
+      - name: Verify the bumped baseline
+        run: python3 scripts/check-baseline.py --self
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "aura-baseline-bot"
+          git config user.email "aura-baseline-bot@users.noreply.github.com"
+          git add baseline/aura-baseline.json
+          if [ -f aura.toml ]; then git add aura.toml; fi
+          if [ -f AURA_REF ]; then git add AURA_REF; fi
+          if [ -d .github/workflows ]; then git add .github/workflows; fi
+          if git diff --cached --quiet; then
+            echo "baseline up to date"
+            exit 0
+          fi
+          git commit -m "chore(baseline): follow the latest Aura nightly"
+          git push

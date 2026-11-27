@@ -1,7 +1,7 @@
 # Orchestra baseline (#13)
 
 `baseline/aura-baseline.json` is the single source for the Aura commit,
-nightly archive digests and the `aura-ci` image digest.
+the immutable nightly archive names/digests and the `aura-ci` image digest.
 
 ## Drift gate
 
@@ -17,14 +17,15 @@ CI runs it before installing Aura.
 
 ## Installer contract
 
-The nightly tag is rebuilt in place: the archive under a fixed asset name
-is replaced, so the digest the baseline pins can name a build the release
-no longer publishes. Every member repo's `scripts/install-aura.sh`
-therefore:
+The nightly release keeps a rolling alias for the newest build, but every
+member repo pins the per-build archive name from
+`aura-nightly-manifest.json` (`aura-<sha9>-r<run_id>-a<attempt>-linux-<arch>`).
+That asset's URL and bytes do not change when the nightly rolls. Every
+member repo's `scripts/install-aura.sh` therefore:
 
 - verifies the download against the digest the release publishes beside
-  the archive (`<asset>.sha256`), not against the pinned digest, so an
-  unverified binary is never installed;
+  the archive (`<asset>.sha256`), so an unverified binary is never
+  installed; for an immutable asset this equals the baseline pin;
 - keys its cache by that digest, so a rolled nightly replaces the cached
   binary instead of leaving an arbitrarily old one in place;
 - reports a stale pin on stderr, and fails the install under
@@ -35,6 +36,16 @@ therefore:
 The pinned digest stays the coordination record: `check-baseline.py`
 still fails when the repos disagree, and moving the pin is the pin
 workflow's job.
+
+## Follow nightly
+
+`scripts/follow-nightly.py --repo .` reads the nightly manifest, pins the
+immutable assets, and patches `aura.toml`, `AURA_REF`, the workflow
+`aura-ci` digests and the `third_party/aura` gitlink when present. It is
+wrapped by the reusable workflow `.github/workflows/follow-nightly.yml`;
+every member/stage repo calls it on a 15-minute schedule and pushes only
+when the manifest moved. The bot verifies `check-baseline.py --self`
+before pushing, so a bad update never lands.
 
 ## Bump generator
 
@@ -68,6 +79,7 @@ digests and `aura-ci` digest into `aura-perf`, `aura-harness`,
 Each branch is a normal reviewed PR; a failed target CI is a real
 compatibility signal, not something the generator hides.
 
-aura-agents is pinned at `cb7d55e7d` (v0.3.4); `bump-baseline.py --check`
-prints the member and stage payloads for that commit, and they were not
-pushed with the aura-agents pin.
+All seven repos are pinned at `8004cc70b` and the follow-nightly workflow
+is live in each of them. A new nightly is picked up within 15 minutes;
+the baseline still records an immutable build, so a consumer that starts
+during the roll keeps the same bytes.
