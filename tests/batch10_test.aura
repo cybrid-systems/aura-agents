@@ -1,0 +1,154 @@
+;; Coordinate lists are not keys, appends are not tamper, word probes
+;; ignore test shape, and rejections name the rule.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/trial/workspace")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(shell "rm -rf out/b10-t4 out/b10-part out/b10-add out/b10-b3 out/b10-c2 out/b10-a2 out/b10-ty")
+
+(define (tree root)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b10\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n"))
+
+(define coord "把墙放在 (8,0)、(10,0)、(12,0) 和其它行，tank 保持不动")
+(line "t4-keys" (length (trial:key-names coord)))
+(line "part-keys" (length (trial:key-names "tuning 的键 speed 和 armor 都要是整数")))
+
+(tree "out/b10-t4")
+(file-write "out/b10-t4/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b10-t4/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b10-t4/tests/n_test.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b10-t4/tests/n_test.golden" "1\n")
+(trial:set-root! "out/b10-t4")
+(define t4
+  (trial:verdict 9900 coord '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t4" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)"))))
+(line "t4-rg" (text:lookup t4 "redgreen"))
+
+(tree "out/b10-part")
+(file-write "out/b10-part/src/main.aura" "(require \"src/tu.aura\")\n(display (tu:get \"speed\"))\n(newline)\n")
+(file-write "out/b10-part/src/tu.aura" "(define (tu:get k) 0)\n")
+(file-write "out/b10-part/tests/tu_test.aura"
+            "(require \"src/tu.aura\")\n(display (tu:get \"speed\"))\n(newline)\n")
+(file-write "out/b10-part/tests/tu_test.golden" "1\n")
+(trial:set-root! "out/b10-part")
+(define part
+  (trial:verdict 9901 "tuning 的键 speed 和 armor 都要是整数" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t2b" "path" "src/tu.aura"
+                             "old" "(define (tu:get k) 0)"
+                             "new" "(define (tu:get k) (if (equal? k \"speed\") 1 0))"))))
+(line "part-rg" (text:lookup part "redgreen"))
+(line "part-rule" (if (and (string-contains? (trial:last-log) "rule=partial")
+                           (string-contains? (trial:last-log) "key armor"))
+                    "yes" "no"))
+
+(tree "out/b10-add")
+(file-write "out/b10-add/src/main.aura" "(require \"src/sp.aura\")\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b10-add/src/sp.aura" "(define (sp:has? s) \"no\")\n")
+(file-write "out/b10-add/tests/input_test.aura"
+            "(require \"src/sp.aura\")\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b10-add/tests/input_test.golden" "no\n")
+(trial:set-root! "out/b10-add")
+(define added
+  (trial:verdict 9902 "判断字符串是否含有空格" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t1d" "path" "src/sp.aura"
+                             "old" "(define (sp:has? s) \"no\")"
+                             "new" "(define (sp:has? s)\n  (let loop ((i 0))\n    (if (>= i (string-length s)) \"no\"\n      (if (equal? (substring s i (+ i 1)) \" \") \"yes\" (loop (+ i 1))))))")
+                       (hash "kind" "patch" "task" "t1d" "diff"
+                             (string-append
+                               "--- a/tests/input_test.aura\n+++ b/tests/input_test.aura\n@@ -1,3 +1,5 @@\n"
+                               " (require \"src/sp.aura\")\n (display (sp:has? \"ab\"))\n (newline)\n"
+                               "+(display (sp:has? \"a b\"))\n+(newline)\n"
+                               "--- a/tests/input_test.golden\n+++ b/tests/input_test.golden\n@@ -1 +1,2 @@\n"
+                               " no\n+yes\n")))))
+(line "add-rg" (text:lookup added "redgreen"))
+
+(tree "out/b10-b3")
+(file-write "out/b10-b3/src/main.aura" "(require \"src/wc.aura\")\n(display (wc:count \"a b\"))\n(newline)\n")
+(file-write "out/b10-b3/src/wc.aura" "(define (wc:count text) 0)\n")
+(trial:set-root! "out/b10-b3")
+(define b3
+  (trial:verdict 9903 "统计单词数" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "b3" "path" "src/wc.aura"
+                             "old" "(define (wc:count text) 0)"
+                             "new" "(define (wc:count text) (length (string-split-words text)))")
+                       (hash "kind" "patch" "task" "b3" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/wc_test.aura\n@@ -0,0 +1,4 @@\n"
+                               "+(require \"src/wc.aura\")\n"
+                               "+(define text \"alpha beta gamma\")\n"
+                               "+(display (wc:count text))\n"
+                               "+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/wc_test.golden\n@@ -0,0 +1 @@\n"
+                               "+3\n")))))
+(line "b3-rg" (text:lookup b3 "redgreen"))
+
+(tree "out/b10-c2")
+(file-write "out/b10-c2/src/main.aura" "(require \"src/hot.aura\")\n(display (hot:cost))\n(newline)\n")
+(file-write "out/b10-c2/src/hot.aura" "(define (hot:cost) 100)\n")
+(trial:set-root! "out/b10-c2")
+(define c2
+  (trial:verdict 9904 "优化 hot path 的 p99 和 budget，(8,0)、(10,0) 和其它行" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "c2" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 100)"
+                             "new" "(define (hot:cost) 10)")
+                       (hash "kind" "patch" "task" "c2" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/hot_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/hot.aura\")\n"
+                               "+(display (hot:cost))\n"
+                               "+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/hot_test.golden\n@@ -0,0 +1 @@\n"
+                               "+10\n")))))
+(line "c2-rg" (text:lookup c2 "redgreen"))
+(line "c2-rule" (if (and (string-contains? (trial:last-log) "rule=constant")
+                         (string-contains? (trial:last-log) "hot:cost")
+                         (not (string-contains? (trial:last-log) "rule=partial")))
+                  "yes" "no"))
+
+(tree "out/b10-a2")
+(file-write "out/b10-a2/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b10-a2/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b10-a2/tests/n_test.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b10-a2/tests/n_test.golden" "2\n")
+(trial:set-root! "out/b10-a2")
+(define a2
+  (trial:verdict 9905 "同一文件先 A1 再 A2" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "a1" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)")
+                       (hash "kind" "mutate" "task" "a2" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 2)"))))
+(define note (trial:rebase-note (trial:current-dest) (car (trial:conflict-rows (trial:last-report)))))
+(line "a2-diff" (if (and (string-contains? note "PRIOR DIFF")
+                         (string-contains? note "(define (n:v) 0)")
+                         (string-contains? note "(define (n:v) 1)")
+                         (string-contains? note "CURRENT src/n.aura")
+                         (string-contains? (trial:last-log) "PRIOR DIFF"))
+                "yes" "no"))
+
+(tree "out/b10-ty")
+(file-write "out/b10-ty/src/main.aura" "(require \"src/f.aura\")\n(display (f 1))\n(newline)\n")
+(file-write "out/b10-ty/src/f.aura" "(define (f x)\n  0)\n")
+(file-write "out/b10-ty/tests/f_test.aura" "(require \"src/f.aura\")\n(display (f 1))\n(newline)\n")
+(file-write "out/b10-ty/tests/f_test.golden" "2\n")
+(trial:set-root! "out/b10-ty")
+(define ty
+  (trial:verdict 9906 "修类型" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t3d" "path" "src/f.aura"
+                             "old" "(define (f x)\n  0)"
+                             "new" "(define (f x)\n  (+ (newline) 1))"))))
+(line "ty-loc" (if (string-contains? (trial:last-log) "location=src/f.aura:2:4") "yes" "no"))
+(line "ty-exp" (if (string-contains? (trial:last-log) "expected=Int") "yes" "no"))
