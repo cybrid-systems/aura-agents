@@ -137,14 +137,26 @@
     (< try (min retries timeout-retries))
     (< try retries)))
 
+(define (orchestrate:context-given? context)
+  (and (string? context)
+       (> (string-length (string-trim context)) 0)
+       (not (string=? (string-trim context) "none"))))
+
+;; An explicit CONTEXT is kept. Hit files fill only the budget that remains.
 (define (orchestrate:task-context context requirement spec)
-  (let ((root (trial:root)))
-    (if root
-      (trial:external-context root
-                              (string-append (if (string? requirement) requirement "")
-                                             "\n"
-                                             (if (string? spec) spec "")))
-      context)))
+  (let ((root (trial:root))
+        (seeds (string-append (if (string? requirement) requirement "")
+                              "\n"
+                              (if (string? spec) spec ""))))
+    (if (not root)
+      context
+      (if (orchestrate:context-given? context)
+        (let ((left (- (trial:context-budget) (string-length context))))
+          (if (<= left 0)
+            context
+            (string-append context "\n"
+                           (trial:external-context-budget root seeds left))))
+        (trial:external-context root seeds)))))
 
 (define (orchestrate:invoke name spec mode target context requirement feedback retries)
   (let ((context (orchestrate:task-context context requirement spec)))
@@ -254,6 +266,39 @@
               (wave (car step))
               (reverse (car step)))))))))
 
+(define (orchestrate:changes-of ev task)
+  (let ((chs (if (and (pair? ev) (pair? (cdr ev)) (pair? (cddr ev)) (list? (caddr ev)))
+               (caddr ev)
+               '())))
+    (map (lambda (c)
+           (if (hash? c) (begin (hash-set! c "task" task) c) c))
+         chs)))
+
+;; A later task whose OLD missed because an earlier task already wrote
+;; the file is asked once more, against the current file.
+(define (orchestrate:rebase-once mode target context requirement contract evidence)
+  (let ((dest (trial:current-dest))
+        (rows (trial:conflict-rows (trial:last-report))))
+    (if (or (not (string? dest)) (not (pair? rows)))
+      evidence
+      (begin
+        (display "rebase-retry=1")
+        (newline)
+        (for-each
+          (lambda (row)
+            (let* ((task (hash-ref row "task" ""))
+                   (note (trial:rebase-note dest row))
+                   (ev (worker:run (contract:worker-user
+                                     target
+                                     (orchestrate:task-context context requirement task)
+                                     requirement task note)
+                                   mode)))
+              (if (orchestrate:ok? ev)
+                (trial:apply-more dest (orchestrate:changes-of ev task))
+                #f)))
+          rows)
+        (trial:rejudge requirement contract)))))
+
 (define (orchestrate:tests-failed? evidence)
   (let ((got (text:lookup evidence "tests")))
     (or (not (string? got)) (equal? got "fail") (equal? got "missing"))))
@@ -353,7 +398,14 @@
   (display "redgreen=")
   (let ((g (text:lookup evidence "redgreen")))
     (display (if (string? g) g "missing")))
-  (newline))
+  (newline)
+  (let ((u (text:lookup evidence "test-unstable")))
+    (if (string? u)
+      (begin
+        (display "test-unstable=")
+        (display u)
+        (newline))
+      #f)))
 
 (define (orchestrate:with-applied contract)
   (if (text:lookup contract "applied")
@@ -413,8 +465,10 @@
            (passed (let retry ((attempt 0)
                                (results first)
                                (evidence (if ready0
-                                           (trial:verdict ws requirement contract
-                                                          (orchestrate:tag-changes first))
+                                           (orchestrate:rebase-once
+                                             mode target context requirement contract
+                                             (trial:verdict ws requirement contract
+                                                            (orchestrate:tag-changes first)))
                                            (begin (trial:clear!) '()))))
                      (begin
                        (orchestrate:show-trial contract evidence)

@@ -670,9 +670,8 @@
 
 (define (trial:aura-test dest)
   ;; Redirects are opened after cd, so they stay inside the overlay.
-  (= (trial:shell (string-append "cd " (trial:quote dest)
-                                 " && aura test >test.out 2>test.err"))
-     0))
+  ;; A failure is retried once; see trial:test-ok?.
+  (trial:test-ok? dest ""))
 
 (define (trial:bench dest)
   (let ((out (try (command-output
@@ -726,11 +725,30 @@
       base
       #f)))
 
+(define *trial-unstable* #f)
+
+(define (trial:unstable?) *trial-unstable*)
+
+(define (trial:reset-unstable!)
+  (set! *trial-unstable* #f))
+
+(define (trial:test-once dir args)
+  (= (trial:shell (string-append "cd " (trial:quote dir)
+                                 " && aura test " args
+                                 " >test.out 2>test.err"))
+     0))
+
+;; A red run is tried once more. A pass after a failure is recorded
+;; as unstable instead of failing the patch.
+(define (trial:test-ok? dir args)
+  (if (trial:test-once dir args)
+    #t
+    (if (trial:test-once dir args)
+      (begin (set! *trial-unstable* #t) #t)
+      #f)))
+
 (define (trial:aura-fail? dir args)
-  (not (= (trial:shell (string-append "cd " (trial:quote dir)
-                                      " && aura test " args
-                                      " >test.out 2>test.err"))
-          0)))
+  (not (trial:test-ok? dir args)))
 
 (define (trial:changed-tests base dest)
   (let ((out (try (command-output
@@ -780,6 +798,8 @@
     ((equal? rg "not-red") "redgreen=not-red 修复前测试已经通过，没有先红\n")
     ((equal? rg "still-red") "redgreen=still-red 修复后测试仍失败\n")
     ((equal? rg "no-bench") "redgreen=no-bench 无 bench\n")
+    ((equal? rg "missing-file") "redgreen=missing-file 新测试没有因断言失败，失败原因是缺文件\n")
+    ((equal? rg "tamper") "redgreen=tamper 改了既有 golden 或既有测试，任务没有要求\n")
     (else (string-append "redgreen=" (if (string? rg) rg "") "\n"))))
 
 (define (trial:no-bench-note evidence)
@@ -794,6 +814,121 @@
   (let ((v (getenv "AURA_AGENTS_SPEEDUP")))
     (let ((n (if (and (string? v) (> (string-length v) 0)) (string->number v) #f)))
       (if (and (number? n) (> n 1)) n 2))))
+
+(define (trial:toml-entry dest)
+  (let ((text (file-read (string-append dest "/aura.toml"))))
+    (if (not (string? text))
+      #f
+      (let loop ((xs (text:lines text)))
+        (if (not (pair? xs))
+          #f
+          (let ((line (string-trim (car xs))))
+            (if (string-prefix? line "entry")
+              (let ((q1 (string-index line "\"" 0)))
+                (if (or (not (number? q1)) (< q1 0))
+                  #f
+                  (let ((q2 (string-index line "\"" (+ q1 1))))
+                    (if (or (not (number? q2)) (< q2 0))
+                      #f
+                      (substring line (+ q1 1) q2)))))
+              (loop (cdr xs)))))))))
+
+(define (trial:src-changed? changed)
+  (let loop ((xs changed))
+    (cond
+      ((not (pair? xs)) #f)
+      ((and (not (string-prefix? (car xs) "tests/"))
+            (not (string-contains? (car xs) "bench")))
+       #t)
+      (else (loop (cdr xs))))))
+
+(define (trial:existed? base rel)
+  (string? (file-read (string-append base "/" rel))))
+
+;; Time the project entry when a source file changed, and any new or
+;; changed bench. The clock is the harness, not a number the worker prints.
+(define (trial:displays? dest rel)
+  (let ((body (file-read (string-append dest "/" rel))))
+    (and (string? body) (string-contains? body "(display"))))
+
+(define (trial:time-targets base dest)
+  (let ((changed (trial:changed-aura base dest))
+        (entry (trial:toml-entry dest)))
+    (let loop ((xs changed)
+               (acc (if (and (string? entry) (> (string-length entry) 0)
+                             (trial:src-changed? changed)
+                             (trial:displays? dest entry))
+                      (list entry)
+                      '())))
+      (if (not (pair? xs))
+        acc
+        (loop (cdr xs)
+              (if (and (string-contains? (car xs) "bench")
+                       (not (equal? (car xs) entry)))
+                (cons (car xs) acc)
+                acc))))))
+
+(define (trial:measure dir rel)
+  (let ((code (trial:shell
+                (string-append
+                  "cd " (trial:quote dir)
+                  " && start=$(date +%s%N) && aura run --quiet " (trial:quote rel)
+                  " >timed.out 2>/dev/null; status=$?; end=$(date +%s%N);"
+                  " echo $(( (end - start) / 1000000 )) >timed.ms; exit $status"))))
+    (let ((out (file-read (string-append dir "/timed.out")))
+          (ms (file-read (string-append dir "/timed.ms"))))
+      (list (if (string? out) out "")
+            (let ((n (string->number (string-trim (if (string? ms) ms "")))))
+              (if (number? n) n 0))
+            (= code 0)))))
+
+(define (trial:old-tree base dest targets)
+  (let loop ((xs targets) (neu '()))
+    (if (not (pair? xs))
+      (if (pair? neu) (trial:red-tree base dest (reverse neu)) base)
+      (loop (cdr xs)
+            (if (trial:existed? base (car xs)) neu (cons (car xs) neu))))))
+
+(define (trial:harness-speed base dest requirement)
+  (if (not (contract:speed? requirement))
+    #f
+    (let ((files (trial:time-targets base dest)))
+      (if (not (pair? files))
+        #f
+        (let ((before (trial:old-tree base dest files)))
+          (let loop ((xs files) (bms 0) (ams 0) (ok #t))
+            (if (or (not ok) (not (pair? xs)))
+              (if (and ok (> bms 0) (<= (* ams (trial:speedup)) bms))
+                "speed"
+                #f)
+              (let ((b (trial:measure before (car xs)))
+                    (a (trial:measure dest (car xs))))
+                (loop (cdr xs)
+                      (+ bms (cadr b))
+                      (+ ams (cadr a))
+                      (and (caddr b) (caddr a) (string=? (car b) (car a))))))))))))
+
+(define (trial:fail-kind text)
+  (let ((s (if (string? text) text "")))
+    (cond
+      ((or (string-contains? s "cannot resolve")
+           (string-contains? s "No such file")
+           (string-contains? s "no such file")
+           (string-contains? s "not found"))
+       "missing-file")
+      ((string-contains? s "stdout differs") "assert")
+      (else "other"))))
+
+(define (trial:tampered base dest)
+  (let loop ((xs (trial:changed-tests base dest)) (acc '()))
+    (if (not (pair? xs))
+      (reverse acc)
+      (loop (cdr xs)
+            (if (trial:existed? base (car xs)) (cons (car xs) acc) acc)))))
+
+(define (trial:tamper? base dest requirement)
+  (and (not (contract:allows-test-edit? requirement))
+       (pair? (trial:tampered base dest))))
 
 (define (trial:changed-aura base dest)
   (let ((out (try (command-output
@@ -814,68 +949,6 @@
                 (loop (cdr xs)
                       (if (equal? a b) acc (cons rel acc)))))))))))
 
-(define (trial:drop-ms text)
-  (let loop ((xs (text:lines (if (string? text) text ""))) (acc '()))
-    (if (not (pair? xs))
-      (if (pair? acc) (string-join (reverse acc) "\n") "")
-      (if (string-prefix? (string-trim (car xs)) "ms=")
-        (loop (cdr xs) acc)
-        (loop (cdr xs) (cons (car xs) acc))))))
-
-(define (trial:ms-sum text)
-  (let loop ((xs (text:lines (if (string? text) text ""))) (sum 0) (seen #f))
-    (if (not (pair? xs))
-      (if seen sum #f)
-      (let ((line (string-trim (car xs))))
-        (if (string-prefix? line "ms=")
-          (let ((n (string->number (string-trim (text:after line "ms=")))))
-            (if (number? n)
-              (loop (cdr xs) (+ sum n) #t)
-              (loop (cdr xs) sum seen)))
-          (loop (cdr xs) sum seen))))))
-
-(define (trial:run-quiet dir rel)
-  (let ((out (try (command-output
-                    (string-append "cd " (trial:quote dir)
-                                   " && aura run --quiet " rel " 2>/dev/null"))
-                  (catch (e) ""))))
-    (if (string? out) out "")))
-
-(define (trial:timing-files base dest)
-  (let loop ((xs (trial:changed-aura base dest)) (acc '()))
-    (if (not (pair? xs))
-      (reverse acc)
-      (let ((body (file-read (string-append dest "/" (car xs)))))
-        (loop (cdr xs)
-              (if (and (string? body) (string-contains? body "ms="))
-                (cons (car xs) acc)
-                acc))))))
-
-;; Performance work may add a bench or a timing test. KEEP when that
-;; program prints the same lines before and after, and ms= drops by
-;; at least AURA_AGENTS_SPEEDUP (default 2). This does not add p99.
-(define (trial:speed-result base dest requirement)
-  (if (not (contract:perf? requirement))
-    #f
-    (let ((files (trial:timing-files base dest)))
-      (if (not (pair? files))
-        #f
-        (let ((before (trial:red-tree base dest files)))
-          (let loop ((xs files) (bms 0) (ams 0) (ok #t))
-            (if (or (not ok) (not (pair? xs)))
-              (if (and ok (> bms 0) (<= (* ams (trial:speedup)) bms))
-                "speed"
-                #f)
-              (let ((b (trial:run-quiet before (car xs)))
-                    (a (trial:run-quiet dest (car xs))))
-                (let ((bn (trial:ms-sum b))
-                      (an (trial:ms-sum a)))
-                  (loop (cdr xs)
-                        (+ bms (if (number? bn) bn 0))
-                        (+ ams (if (number? an) an 0))
-                        (and (number? bn) (number? an)
-                             (string=? (trial:drop-ms b) (trial:drop-ms a)))))))))))))
-
 ;; New or modified tests must fail on the untouched sources and the
 ;; full suite must pass after the edit. A pure metric change can
 ;; instead show a bench that was not ok before and is ok after.
@@ -884,15 +957,20 @@
   (let ((changed (trial:changed-tests base dest))
         (green (not (trial:aura-fail? dest "")))
         (metric (or (trial:wants? contract "p99") (trial:wants? contract "budget")))
-        (speed (trial:speed-result base dest requirement)))
+        (speed (trial:harness-speed base dest requirement)))
     (cond
+      ((trial:tamper? base dest requirement) "tamper")
       ((and green (equal? speed "speed")) "speed")
       ((pair? changed)
-       (let ((red (trial:red-tree base dest changed)))
+       (let* ((red (trial:red-tree base dest changed))
+              (red-fail (trial:aura-fail? red (trial:test-args changed)))
+              (kind (trial:fail-kind (file-read (string-append red "/test.out")))))
          (cond
+           ((and red-fail (equal? kind "missing-file")) "missing-file")
            ((not green) "still-red")
-           ((not (trial:aura-fail? red (trial:test-args changed))) "not-red")
-           (else "pass"))))
+           ((not red-fail) "not-red")
+           ((equal? kind "assert") "pass")
+           (else "not-red"))))
       ((and metric (trial:has-bench? dest))
        (let ((before (trial:parse-bench (trial:bench base)))
              (after (trial:parse-bench (trial:bench dest))))
@@ -915,30 +993,81 @@
       (if (trial:copy-tree root dest) dest #f)
       (if (trial:isolate kind dest) dest #f))))
 
+(define *trial-dest* #f)
+(define *trial-base* #f)
+
+(define (trial:current-dest) *trial-dest*)
+
+(define (trial:evidence dest base requirement contract report)
+  (let ((tests (trial:observe dest contract))
+        (word (trial:applied-word report))
+        (rg (if (not (equal? word "all"))
+              "apply-failed"
+              (if base (trial:redgreen base dest contract requirement) "not-red"))))
+    (set! *trial-report* report)
+    (trial:note! (string-append (trial:format-report report)
+                                (trial:redgreen-why rg)
+                                (if (trial:unstable?) "test-unstable=yes\n" "")
+                                (trial:no-bench-note tests)
+                                (trial:unbound-hint (trial:last-log))
+                                "TEST\n"
+                                (trial:last-log)))
+    (append tests
+            (list (list "applied" word) (list "redgreen" rg))
+            (if (trial:unstable?) (list (list "test-unstable" "yes")) '()))))
+
 (define (trial:verdict ws requirement contract changes)
   (let* ((dest (trial:prepare ws requirement))
          (ready (string? dest)))
     (if (not ready)
       (begin
         (set! *trial-report* '())
+        (set! *trial-dest* #f)
         (trial:note! "isolate failed")
         (append (map (lambda (p) (list (car p) "missing")) contract)
                 (list (list "applied" "none"))))
-      (let* ((base (trial:snapshot! dest))
-             (report (trial:apply-report dest (if (pair? changes) changes '())))
-             (tests (trial:observe dest contract))
-             (word (trial:applied-word report))
-             (rg (if (not (equal? word "all"))
-                   "apply-failed"
-                   (if base (trial:redgreen base dest contract requirement) "not-red"))))
-        (set! *trial-report* report)
-        (trial:note! (string-append (trial:format-report report)
-                                    (trial:redgreen-why rg)
-                                    (trial:no-bench-note tests)
-                                    (trial:unbound-hint (trial:last-log))
-                                    "TEST\n"
-                                    (trial:last-log)))
-        (append tests (list (list "applied" word) (list "redgreen" rg)))))))
+      (let ((base (trial:snapshot! dest)))
+        (trial:reset-unstable!)
+        (set! *trial-dest* dest)
+        (set! *trial-base* base)
+        (let ((report (trial:apply-report dest (if (pair? changes) changes '()))))
+          (trial:evidence dest base requirement contract report))))))
+
+(define (trial:same-row? a b)
+  (and (equal? (hash-ref a "task" "") (hash-ref b "task" ""))
+       (equal? (hash-ref a "path" "") (hash-ref b "path" ""))))
+
+(define (trial:merge-rows old neu)
+  (append (filter (lambda (r)
+                    (not (let loop ((xs neu))
+                           (cond
+                             ((not (pair? xs)) #f)
+                             ((trial:same-row? r (car xs)) #t)
+                             (else (loop (cdr xs)))))))
+                  (if (pair? old) old '()))
+          (if (pair? neu) neu '())))
+
+(define (trial:apply-more dest changes)
+  (let ((rows (trial:apply-report dest (if (pair? changes) changes '()))))
+    (set! *trial-report* (trial:merge-rows (trial:last-report) rows))
+    rows))
+
+(define (trial:rejudge requirement contract)
+  (if (not (string? *trial-dest*))
+    '()
+    (trial:evidence *trial-dest* *trial-base* requirement contract (trial:last-report))))
+
+(define (trial:conflict-rows report)
+  (filter (lambda (r)
+            (and (hash? r)
+                 (not (hash-ref r "ok" #f))
+                 (hash-ref r "prior" #f)))
+          (if (pair? report) report '())))
+
+(define (trial:rebase-note dest row)
+  (let* ((path (hash-ref row "path" ""))
+         (body (file-read (string-append dest "/" path))))
+    (string-append "rebase\nCURRENT " path "\n" (if (string? body) body ""))))
 
 ;; ── deterministic worker reply (mock) ─────────────────────────
 ;; The strings match fixtures/trials. A cheat reply still says tests=pass
@@ -1020,4 +1149,15 @@
     ((trial:timeout? text) "ERROR http-post: timeout\n")
     ((and (trial:has? text "SIMULATE-GARBAGE") (not (trial:has? text "FEEDBACK")))
      "<tool_call>{\"name\":\"edit\"}</tool_call>\n")
+    ((and (trial:has? text "SIMULATE-REBASE")
+          (trial:has? text "TASK second")
+          (trial:has? text "rebase"))
+     (string-append "RESULT tests=pass\n"
+                    (trial:block "src/n.aura" "(define (n:v) 1)" "(define (n:v) 2)")))
+    ((and (trial:has? text "SIMULATE-REBASE") (trial:has? text "TASK first"))
+     (string-append "RESULT tests=pass\n"
+                    (trial:block "src/n.aura" "(define (n:v) 0)" "(define (n:v) 1)")))
+    ((and (trial:has? text "SIMULATE-REBASE") (trial:has? text "TASK second"))
+     (string-append "RESULT tests=pass\n"
+                    (trial:block "src/n.aura" "(define (n:v) 0)" "(define (n:v) 2)")))
     (else (string-append (trial:result-line text) (trial:change-block text)))))

@@ -50,6 +50,28 @@
         (contract:has? s "p99")
         (contract:has? s "latency"))))
 
+;; Speed KEEP is separate from p99/budget. A render or "faster" task
+;; can take that path without those checks being added.
+(define (contract:speed? text)
+  (let ((s (contract:scoped (if (string? text) text ""))))
+    (or (contract:perf? text)
+        (contract:has? s "加速")
+        (contract:has? s "更快")
+        (contract:has? s "faster")
+        (contract:has? s "speed")
+        (contract:has? s "耗时")
+        (contract:has? s "渲染")
+        (contract:has? s "render"))))
+
+(define (contract:allows-test-edit? text)
+  (let ((s (contract:scoped (if (string? text) text ""))))
+    (or (contract:has? s "golden")
+        (contract:has? s "断言")
+        (contract:has? s "更新测试")
+        (contract:has? s "修改测试")
+        (contract:has? s "改测试")
+        (contract:has? s "update test"))))
+
 (define (contract:kind text)
   (cond
     ((contract:redis? text) "redis")
@@ -100,7 +122,10 @@
              #f)))
     (if (and (number? n) (> n 0))
       (if (integer? n) n (inexact->exact (floor n)))
-      (if (contract:redis? requirement) 2 1))))
+      (cond
+        ((contract:has? requirement "SIMULATE-REBASE") 2)
+        ((contract:redis? requirement) 2)
+        (else 1)))))
 
 (define (contract:missing? pairs key)
   (not (string? (text:lookup pairs key))))
@@ -188,6 +213,8 @@
   (cond
     ((contract:has? text "SIMULATE-LLM-ERROR")
      "ERROR connection refused\n")
+    ((contract:has? text "SIMULATE-REBASE")
+     "CONTRACT tests=pass\nTASK first\nTASK second\n")
     ((and (contract:has? text "SIMULATE-P99")
           (not (contract:has? text "AVOID p99")))
      (contract:redis-reply "skip"))

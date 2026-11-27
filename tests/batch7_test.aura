@@ -1,0 +1,146 @@
+;; Explicit context, harness timing, flaky tests, rebase, missing files, goldens.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/llm/chat")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(shell "rm -rf out/b7-ctx out/b7-miss out/b7-tamper out/b7-allow out/b7-flake out/b7-render out/b7-rebase out/b7-timeout.aura")
+
+(make-directory "out/b7-ctx/src")
+(file-write "out/b7-ctx/src/render.aura" "(define (render:frame) \"frame\")\n")
+(file-write "out/b7-ctx/src/other.aura" "(define (other:v) 0)\n")
+(trial:set-root! "out/b7-ctx")
+(define handed (orchestrate:task-context "HAND context\n" "加速 render" "render:frame"))
+(line "hand-kept" (if (string-prefix? handed "HAND context") "yes" "no"))
+(line "hand-hit" (if (string-contains? handed "render:frame") "yes" "no"))
+(define generated (orchestrate:task-context "" "加速 render" "render:frame"))
+(line "hand-empty" (if (string-prefix? generated "FILE ") "yes" "no"))
+(trial:set-root! #f)
+
+(file-write "out/b7-timeout.aura"
+            "(require \"lib/llm/chat\")\n(display (chat:timeout-of \"worker\"))\n")
+(define timed (command-output "AURA_AGENTS_WORKER_TIMEOUT=42 aura --grant exec out/b7-timeout.aura"))
+(line "timeout-env" (string-trim (if (string? timed) timed "")))
+
+(define (proj root src test golden)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b7\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n")
+  (file-write (string-append root "/src/n.aura") src)
+  (file-write (string-append root "/src/main.aura")
+              "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+  (file-write (string-append root "/tests/n_test.aura") test)
+  (file-write (string-append root "/tests/n_test.golden") golden))
+
+(proj "out/b7-miss" "(define (n:v) 0)\n"
+      "(require \"src/n.aura\")\n(display (if (= (n:v) 0) \"ok\" \"fail\"))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b7-miss")
+(define missed
+  (trial:verdict 9830 "补一个 spawn 测试" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "spawn" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/spawn_test.aura\n@@ -0,0 +1,2 @@\n"
+                               "+(require \"src/nope.aura\")\n+(display \"ok\")\n")))))
+(line "miss-rg" (text:lookup missed "redgreen"))
+(line "miss-why" (if (string-contains? (trial:last-log) "缺文件") "said" "quiet"))
+
+(proj "out/b7-tamper" "(define (n:v) 0)\n"
+      "(require \"src/n.aura\")\n(display (if (= (n:v) 1) \"ok\" \"fail\"))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b7-tamper")
+(define tampered
+  (trial:verdict 9831 "把 n 改成 1" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "edit" "diff"
+                             (string-append
+                               "--- a/src/n.aura\n+++ b/src/n.aura\n@@ -1 +1 @@\n"
+                               "-(define (n:v) 0)\n+(define (n:v) 1)\n"
+                               "--- a/tests/n_test.golden\n+++ b/tests/n_test.golden\n@@ -1 +1 @@\n"
+                               "-ok\n+yes\n"
+                               "--- a/tests/n_test.aura\n+++ b/tests/n_test.aura\n@@ -1,2 +1,2 @@\n"
+                               "-(require \"src/n.aura\")\n-(display (if (= (n:v) 1) \"ok\" \"fail\"))\n"
+                               "+(require \"src/n.aura\")\n+(display \"yes\")\n")))))
+(line "tamper-rg" (text:lookup tampered "redgreen"))
+(line "tamper-why" (if (string-contains? (trial:last-log) "既有") "said" "quiet"))
+
+(proj "out/b7-allow" "(define (n:v) 0)\n"
+      "(require \"src/n.aura\")\n(display (if (= (n:v) 1) \"ok\" \"fail\"))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b7-allow")
+(define allowed
+  (trial:verdict 9832 "把 n 改成 1，并更新测试 golden" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "edit" "diff"
+                             (string-append
+                               "--- a/src/n.aura\n+++ b/src/n.aura\n@@ -1 +1 @@\n"
+                               "-(define (n:v) 0)\n+(define (n:v) 1)\n"
+                               "--- a/tests/n_test.aura\n+++ b/tests/n_test.aura\n@@ -1,2 +1,2 @@\n"
+                               "-(require \"src/n.aura\")\n-(display (if (= (n:v) 1) \"ok\" \"fail\"))\n"
+                               "+(require \"src/n.aura\")\n+(display (if (= (n:v) 1) \"yes\" \"no\"))\n"
+                               "--- a/tests/n_test.golden\n+++ b/tests/n_test.golden\n@@ -1 +1 @@\n"
+                               "-ok\n+yes\n")))))
+(line "allow-rg" (text:lookup allowed "redgreen"))
+
+(proj "out/b7-flake" "(define (n:v) 0)\n"
+      "(require \"std/fs\")\n(require \"src/n.aura\")\n(define prev (file-read \"flake\"))\n(file-write \"flake\" \"1\")\n(display (if (not (string? prev)) \"fail\" (if (= (n:v) 1) \"ok\" \"fail\")))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b7-flake")
+(define flaked
+  (trial:verdict 9833 "修 n 的返回值" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "fix"
+                             "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)"))))
+(line "flake-tests" (text:lookup flaked "tests"))
+(line "flake-rg" (text:lookup flaked "redgreen"))
+(line "flake-unstable" (text:lookup flaked "test-unstable"))
+
+(make-directory "out/b7-render/src")
+(make-directory "out/b7-render/tests")
+(file-write "out/b7-render/aura.toml"
+            "name = \"tank\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n")
+(file-write "out/b7-render/src/render.aura"
+            "(define (render:loops) 200000)\n(define (render:frame)\n  (let loop ((i 0))\n    (if (>= i (render:loops)) \"frame\" (loop (+ i 1)))))\n")
+(file-write "out/b7-render/src/main.aura"
+            "(require \"src/render.aura\")\n(display (render:frame))\n(newline)\n")
+(file-write "out/b7-render/tests/render_test.aura"
+            "(require \"src/render.aura\")\n(display (render:frame))\n(newline)\n")
+(file-write "out/b7-render/tests/render_test.golden" "frame\n")
+(trial:set-root! "out/b7-render")
+(define rendered
+  (trial:verdict 9834 "加速 tank-battle 的 render，输出保持 frame" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "render"
+                             "path" "src/render.aura"
+                             "old" "(define (render:loops) 200000)"
+                             "new" "(define (render:loops) 1)"))))
+(line "render-tests" (text:lookup rendered "tests"))
+(line "render-rg" (text:lookup rendered "redgreen"))
+(line "render-p99" (if (text:lookup rendered "p99") "yes" "no"))
+(trial:set-root! #f)
+
+(proj "out/b7-rebase" "(define (n:v) 0)\n"
+      "(require \"src/n.aura\")\n(display (if (= (n:v) 2) \"ok\" \"fail\"))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b7-rebase")
+(define rebased
+  (orchestrate:run (hash "requirement" "SIMULATE-REBASE 把 n 改到 2"
+                         "sample" (hash "cpus" 2 "load" 0 "mem-available-kb" 8000000)
+                         "mode" "mock"
+                         "workspace" 9835
+                         "approve" "approved"
+                         "now" 0
+                         "retries" 0
+                         "graph" "off"
+                         "context" "HAND context\n")))
+(trial:set-root! #f)
+(line "rebase-result" (hash-ref rebased "result"))
+(line "rebase-gate" (hash-ref rebased "gate"))
