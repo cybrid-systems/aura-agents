@@ -19,6 +19,28 @@
         "generic" '("aura.toml" "src/marker.aura"
                     "tests/marker_test.aura" "tests/marker_test.golden")))
 
+;; Cap on the fixture text copied into the planner/worker CONTEXT.
+(define trial:context-limit 4096)
+
+;; Default CONTEXT: the target fixture's own files, not the word "none".
+;; Truncated so a larger tree cannot blow the prompt.
+(define (trial:fixture-context kind)
+  (let ((files (hash-ref trial:files (if (string? kind) kind "") '())))
+    (let loop ((xs files) (out ""))
+      (cond
+        ((not (pair? xs)) out)
+        ((>= (string-length out) trial:context-limit)
+         (string-append (substring out 0 trial:context-limit) "\n...truncated\n"))
+        (else
+          (let* ((rel (car xs))
+                 (text (file-read (string-append "fixtures/trials/" kind "/" rel)))
+                 (body (if (string? text) text ""))
+                 (chunk (string-append "FILE " rel "\n" body "\n"))
+                 (next (string-append out chunk)))
+            (if (> (string-length next) trial:context-limit)
+              (string-append (substring next 0 trial:context-limit) "\n...truncated\n")
+              (loop (cdr xs) next))))))))
+
 (define (trial:dest ws kind)
   (string-append "out/trials/" (number->string (if (number? ws) ws 0)) "/"
                  (if (string? kind) kind "generic")))

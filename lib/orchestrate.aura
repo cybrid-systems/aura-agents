@@ -189,8 +189,21 @@
     (caddr plan)
     "plan"))
 
+(define (orchestrate:note-dropped plan)
+  (let ((dropped (if (and (pair? plan) (pair? (cdr plan)) (pair? (cddr plan))
+                          (pair? (cdddr plan)) (list? (cadddr plan)))
+                   (cadddr plan)
+                   '())))
+    (if (pair? dropped)
+      (begin
+        (display "contract-dropped=")
+        (display (string-join dropped ","))
+        (newline))
+      #f)))
+
 (define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now graph ws target context)
   (let ((plan (planner:plan-with requirement mode graph target context)))
+    (orchestrate:note-dropped plan)
     (if (not (orchestrate:ok? plan))
       (begin
         (hash-set! flags "llm-error" (orchestrate:plan-reason plan))
@@ -274,17 +287,18 @@
 (define (orchestrate:contract-rollback? flags)
   (let ((g (hash-ref flags "gate" "")))
     (or (equal? g "contract-unsatisfied")
-        (equal? g "incomplete")
         (equal? g "empty-contract"))))
 
 ;; demo=ok is a finished attempt: at least one worker completed, and the
-;; judge kept the trial or rolled it back because the executed contract
-;; said so. workers=0, a skipped gate and a planner failure are not that.
+;; judge kept the trial or rolled it back because an executed check failed.
+;; gate=incomplete means the contract was not fully run (a worker missing,
+;; or a check the judge could not execute). That is not demo=ok.
 (define (orchestrate:demo-ok? flags)
   (let ((n (hash-ref flags "completed" 0)))
     (and (equal? (hash-ref flags "bus-host") "ok")
          (equal? (hash-ref flags "bus-attach") "ok")
          (equal? (hash-ref flags "bus-unhost") "ok")
+         (not (equal? (hash-ref flags "gate" "") "incomplete"))
          (number? n)
          (> n 0)
          (or (equal? (hash-ref flags "result") "keep")
@@ -361,7 +375,10 @@
          (now (let ((n (hash-ref cfg "now" 0))) (if (number? n) n 0)))
          (requirement (orchestrate:requirement cfg))
          (target (contract:target requirement (hash-ref cfg "target" #f)))
-         (context (contract:context (hash-ref cfg "context" #f)))
+         (context (let ((given (hash-ref cfg "context" #f)))
+                    (if (and (string? given) (> (string-length given) 0))
+                      given
+                      (trial:fixture-context (contract:kind requirement)))))
          (fp (query:fingerprint target requirement))
          (graph-on (orchestrate:graph-on? cfg))
          (graph (if graph-on (graph:open ws) #f))

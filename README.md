@@ -56,9 +56,9 @@ AURA_AGENTS_LLM=real aura run --grant exec,network
 
 Unset `LLM_MODEL` selects `deepseek-flash` at `https://api.deepseek.com/v1` (DeepSeek V4.1 Flash, the aura-runner preset). `LLM_BASE_URL` and `LLM_MODEL` override that. Without `--grant network` the call never leaves the machine: the run stops at `gate=plan-fail` and prints `llm-error=` with the reason.
 
-`aura run` sizes workers from CPU and memory unless `AURA_AGENTS_WORKERS` is set (including `0`). `demo=ok` requires `completed>0` and either `result=keep` or a rollback the contract gate itself produced. `workers=0` exits non-zero.
+`aura run` sizes workers from CPU and memory unless `AURA_AGENTS_WORKERS` is set (including `0`). `demo=ok` requires `completed>0`, a gate other than `incomplete`, and either `result=keep` or a rollback from a check the judge actually ran (`contract-unsatisfied` or `empty-contract`). `workers=0` exits non-zero.
 
-The worker RESULT line is a self-report. The judge copies the worker's patch or form replacement into an isolated workspace and runs `aura test` there, plus a bench when the contract asks for p99 or a budget. KEEP records those executed checks. A self-report of pass does not keep a change that fails the test.
+The worker RESULT line is a self-report. The judge copies the worker's patch or form replacement into an isolated workspace and runs `aura test` there, plus a bench when the contract asks for p99 or a budget. Only `tests`, `p99` and `budget` are executable checks; any other contract key is dropped and recorded as `contract-dropped=`. The default CONTEXT is the target fixture's files (capped), not the word `none`. KEEP records those executed checks. A self-report of pass does not keep a change that fails the test. This does not claim a real model has completed an evolution.
 
 ## On Aura main today
 

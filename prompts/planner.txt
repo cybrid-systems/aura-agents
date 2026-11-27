@@ -4,9 +4,11 @@ Turn that requirement into an executable contract and a list of tasks.
 Reply with exactly this shape and no other text:
 CONTRACT <check>=<expected> ...
 TASK <task-id>
-Each CONTRACT check is something the judge will execute.
+The only CONTRACT checks the judge can execute are tests, p99 and budget.
+Any other key (a command name, a function call, a file) is discarded and is not evidence.
 Use tests=pass when the requirement needs the project's checks to pass.
 Use p99=ok when the requirement says latency or p99 must not regress.
 Use budget=ok when the requirement states a budget.
+Do not invent checks. CONTEXT shows the files the judge will run.
 Every TASK id is one change the worker will apply as a patch or a form replacement.
 Do not widen the change beyond that contract. Do not touch the Aura C++ kernel.

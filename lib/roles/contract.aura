@@ -5,30 +5,49 @@
 (define (contract:has? text needle)
   (and (string? text) (string? needle) (string-contains? text needle)))
 
+;; Fixture source is injected above the REQUIREMENT marker. Kind and
+;; budget detection look only at the requirement (and a trailing hint),
+;; so a file that mentions p99 cannot invent a check.
+(define (contract:scoped text)
+  (if (not (string? text))
+    ""
+    (let ((i (string-index text "REQUIREMENT\n" 0)))
+      (if (< i 0)
+        text
+        (substring text (+ i (string-length "REQUIREMENT\n")) (string-length text))))))
+
 (define (contract:redis? text)
-  (or (contract:has? text "aura-redis")
-      (contract:has? text "ZRANGEBYSCORE")
-      (contract:has? text "zrangebyscore")))
+  (let ((s (contract:scoped text)))
+    (or (contract:has? s "aura-redis")
+        (contract:has? s "ZRANGEBYSCORE")
+        (contract:has? s "zrangebyscore"))))
 
 (define (contract:wordcount? text)
-  (or (contract:has? text "单词")
-      (contract:has? text "词数")
-      (contract:has? text "word count")
-      (contract:has? text "wordcount")
-      (contract:has? text "word-count")
-      (contract:has? text "count words")))
+  (let ((s (contract:scoped text)))
+    (or (contract:has? s "单词")
+        (contract:has? s "词数")
+        (contract:has? s "word count")
+        (contract:has? s "wordcount")
+        (contract:has? s "word-count")
+        (contract:has? s "count words"))))
 
 (define (contract:budget? text)
-  (or (contract:has? text "budget")
-      (contract:has? text "预算")
-      (contract:has? text "性能")
-      (contract:has? text "优化")
-      (contract:has? text "optimize")))
+  (let ((s (contract:scoped text)))
+    (or (contract:has? s "budget")
+        (contract:has? s "预算")
+        (contract:has? s "性能")
+        (contract:has? s "优化")
+        (contract:has? s "optimize"))))
+
+;; The judge can execute only these. Anything else becomes "missing".
+(define (contract:check? key)
+  (or (equal? key "tests") (equal? key "p99") (equal? key "budget")))
 
 (define (contract:perf? text)
-  (or (contract:budget? text)
-      (contract:has? text "p99")
-      (contract:has? text "latency")))
+  (let ((s (contract:scoped text)))
+    (or (contract:budget? s)
+        (contract:has? s "p99")
+        (contract:has? s "latency"))))
 
 (define (contract:kind text)
   (cond

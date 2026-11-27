@@ -6,13 +6,38 @@
 (require "lib/llm/chat")
 (require "lib/graph/query")
 (require "lib/roles/contract")
+(require "lib/trial/workspace")
+
+(define *planner-dropped* '())
+
+(define (planner:dropped) *planner-dropped*)
+
+(define (planner:split-checks pairs)
+  (let loop ((xs pairs) (keep '()) (drop '()))
+    (cond
+      ((not (pair? xs)) (list (reverse keep) (reverse drop)))
+      ((and (pair? (car xs)) (contract:check? (car (car xs))))
+       (loop (cdr xs) (cons (car xs) keep) drop))
+      (else
+       (loop (cdr xs) keep
+             (cons (if (pair? (car xs)) (car (car xs)) "?") drop))))))
 
 (define (planner:parse text)
   (let loop ((lines (text:lines text)) (contract #f) (tasks '()))
     (if (not (pair? lines))
       (if (and (pair? contract) (pair? tasks))
-        (list "ok" contract (reverse tasks))
-        (list "error" "parse" "need CONTRACT and TASK"))
+        (let* ((split (planner:split-checks contract))
+               (kept (car split))
+               (dropped (cadr split)))
+          (set! *planner-dropped* dropped)
+          (if (pair? kept)
+            (list "ok" kept (reverse tasks) dropped)
+            (list "error" "contract"
+                  (string-append "dropped " (string-join dropped ","))
+                  dropped)))
+        (begin
+          (set! *planner-dropped* '())
+          (list "error" "parse" "need CONTRACT and TASK")))
       (let ((line (string-trim (car lines))))
         (cond
           ((string=? line "") (loop (cdr lines) contract tasks))
@@ -38,7 +63,9 @@
   (let* ((given-target (if (pair? rest) (car rest) #f))
          (given-context (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
          (target (contract:target requirement given-target))
-         (context (contract:context given-context))
+         (context (if (and (string? given-context) (> (string-length given-context) 0))
+                    given-context
+                    (trial:fixture-context (contract:kind requirement))))
          (fp (query:fingerprint target requirement))
          (q (if graph
               (graph:query-for-planner graph (query:seeds requirement)

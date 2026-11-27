@@ -5,6 +5,46 @@
 (require "lib/text")
 (require "lib/llm/chat")
 
+(define (worker:join xs)
+  (if (pair? xs) (string-join xs "\n") ""))
+
+(define (worker:take-block lines marker)
+  (let loop ((ys lines) (acc '()))
+    (cond
+      ((not (pair? ys)) (list (reverse acc) '()))
+      ((or (string=? (string-trim (car ys)) marker)
+           (string=? (string-trim (car ys)) ">>"))
+       (list (reverse acc) (cdr ys)))
+      (else (loop (cdr ys) (cons (car ys) acc))))))
+
+;; lines begins at the MUTATE line. Returns (change remaining) or (#f lines).
+(define (worker:read-mutate lines)
+  (let ((path (string-trim (text:after (string-trim (car lines)) "MUTATE ")))
+        (rest (cdr lines)))
+    (if (not (pair? rest))
+      (list #f lines)
+      (let ((a (string-trim (car rest))))
+        (cond
+          ((and (string-prefix? a "OLD ")
+                (pair? (cdr rest))
+                (string-prefix? (string-trim (cadr rest)) "NEW "))
+           (list (hash "kind" "mutate" "path" path
+                       "old" (text:after a "OLD ")
+                       "new" (text:after (string-trim (cadr rest)) "NEW "))
+                 (cddr rest)))
+          ((or (string=? a "OLD") (string=? a "OLD<<"))
+           (let* ((old-pack (worker:take-block (cdr rest) "END OLD"))
+                  (after-old (cadr old-pack))
+                  (b (if (pair? after-old) (string-trim (car after-old)) "")))
+             (if (or (string=? b "NEW") (string=? b "NEW<<"))
+               (let ((new-pack (worker:take-block (cdr after-old) "END NEW")))
+                 (list (hash "kind" "mutate" "path" path
+                             "old" (worker:join (car old-pack))
+                             "new" (worker:join (car new-pack)))
+                       (cadr new-pack)))
+               (list #f rest))))
+          (else (list #f rest)))))))
+
 (define (worker:finish pairs changes patch buf)
   (let ((all (if patch
                (cons (hash "kind" "patch"
@@ -38,18 +78,11 @@
        (loop (cdr xs)
              (text:pairs (text:after (string-trim (car xs)) "RESULT "))
              changes #f '()))
-      ((and (string-prefix? (string-trim (car xs)) "MUTATE ")
-            (pair? (cdr xs))
-            (pair? (cddr xs))
-            (string-prefix? (string-trim (cadr xs)) "OLD ")
-            (string-prefix? (string-trim (caddr xs)) "NEW "))
-       (loop (cdddr xs) pairs
-             (cons (hash "kind" "mutate"
-                         "path" (string-trim (text:after (string-trim (car xs)) "MUTATE "))
-                         "old" (text:after (string-trim (cadr xs)) "OLD ")
-                         "new" (text:after (string-trim (caddr xs)) "NEW "))
-                   changes)
-             #f '()))
+      ((string-prefix? (string-trim (car xs)) "MUTATE ")
+       (let ((read (worker:read-mutate xs)))
+         (if (hash? (car read))
+           (loop (cadr read) pairs (cons (car read) changes) #f '())
+           (loop (cdr xs) pairs changes #f '()))))
       (else (loop (cdr xs) pairs changes #f '())))))
 
 (define (worker:run spec mode)

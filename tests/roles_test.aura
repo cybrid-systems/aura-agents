@@ -1,8 +1,13 @@
 (require "std/string")
+(require "std/fs")
 (require "lib/llm/mock")
 (require "lib/llm/chat")
 (require "lib/roles/planner")
 (require "lib/roles/worker")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+(require "lib/text")
 
 (define (line k v)
   (display k)
@@ -60,3 +65,53 @@
 (line "mode-real" (chat:mode-of "real" #f))
 (line "model-default" (chat:model-of #f))
 (line "model-env" (chat:model-of "custom-model"))
+
+(define invented (planner:parse "CONTRACT tests=pass aura_cli=ok wordcount=ok wc:count(\"\")=0\nTASK implement-word-count\n"))
+(line "invented" (car invented))
+(line "invented-n" (length (cadr invented)))
+(line "invented-tests" (cadr (car (cadr invented))))
+(line "invented-drop" (string-join (cadddr invented) ","))
+
+(define only-bad (planner:parse "CONTRACT aura_cli=ok wordcount=ok\nTASK x\n"))
+(line "only-bad" (car only-bad))
+(line "only-bad-reason" (if (string-prefix? (caddr only-bad) "dropped ") "ok" "bad"))
+
+(define ctx (trial:fixture-context "wordcount"))
+(line "ctx-src" (if (string-contains? ctx "(define (wc:count text) 0)") "ok" "bad"))
+(line "ctx-none" (if (string=? ctx "none") "bad" "ok"))
+(line "ctx-cap" (if (<= (string-length ctx) 4200) "ok" "bad"))
+
+(define noisy (contract:planner-user "local/wordcount"
+                 (string-append ctx "\nbudget=ok p99=regressed zrangebyscore\n")
+                 "写一个单词计数命令行" ""))
+(define noisy-plan (planner:parse (contract:reply noisy)))
+(line "noisy-checks" (string-join (map (lambda (p) (car p)) (cadr noisy-plan)) ","))
+
+(define block (worker:parse (string-append
+  "RESULT tests=pass\n"
+  "MUTATE src/marker.aura\n"
+  "OLD\n"
+  "(define (marker:done?)\n"
+  "  #f)\n"
+  "END OLD\n"
+  "NEW\n"
+  "(define (marker:done?)\n"
+  "  #t)\n"
+  "END NEW\n")))
+(define ch (car (caddr block)))
+(line "block-old" (if (string-contains? (hash-ref ch "old") "\n") "ok" "bad"))
+(line "block-new" (if (string-contains? (hash-ref ch "new") "#t") "ok" "bad"))
+(define dest (trial:dest 9420 "generic"))
+(trial:isolate "generic" dest)
+(file-write (string-append dest "/src/marker.aura") "(define (marker:done?)\n  #f)\n")
+(line "block-apply" (if (trial:apply-one dest ch) "ok" "bad"))
+(line "block-exec" (text:lookup (trial:observe dest '(("tests" "pass"))) "tests"))
+
+(line "incomplete-demo"
+      (if (orchestrate:demo-ok? (hash "bus-host" "ok" "bus-attach" "ok" "bus-unhost" "ok"
+                                      "completed" 2 "result" "rollback" "gate" "incomplete"))
+        "ok" "fail"))
+(line "unsatisfied-demo"
+      (if (orchestrate:demo-ok? (hash "bus-host" "ok" "bus-attach" "ok" "bus-unhost" "ok"
+                                      "completed" 2 "result" "rollback" "gate" "contract-unsatisfied"))
+        "ok" "fail"))

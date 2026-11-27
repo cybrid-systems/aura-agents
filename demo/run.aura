@@ -2,8 +2,9 @@
 ;; Mock LLM unless AURA_AGENTS_LLM=real (or a key is set and the
 ;; flag is unset). A real model needs `aura run --grant network`.
 ;; AURA_AGENTS_WORKERS overrides the sized worker count.
-;; demo=ok means at least one task completed and the judge kept the
-;; trial, or rolled it back from the executed contract. workers=0 is
+;; demo=ok means at least one task completed, the gate is not incomplete,
+;; and the judge kept the trial or rolled it back from an executed check.
+;; workers=0 is
 ;; demo=fail, and (error ...) exits non-zero. The sandbox rejects exit.
 ;; Approval is injected through the aura#5404 stand-in so the
 ;; smoke can finish; set AURA_AGENTS_APPROVE=timeout or denied to
