@@ -19,6 +19,29 @@
           (loop (cdr words) (cons (list (car parts) (cadr parts)) acc))
           (loop (cdr words) acc))))))
 
+(define (text:cut-span s open close)
+  (let loop ((s s))
+    (let ((i (string-index s open 0)))
+      (if (< i 0)
+        s
+        (let ((j (string-index s close i)))
+          (if (< j 0)
+            (substring s 0 i)
+            (loop (string-append
+                    (substring s 0 i)
+                    (substring s (+ j (string-length close)) (string-length s))))))))))
+
+;; MiniMax sometimes wraps a reply in tool-call markup. Drop those spans
+;; so a RESULT or CONTRACT line after them can still be parsed. An
+;; unclosed span drops the tail. The caller records a parse error when
+;; nothing executable remains.
+(define (text:strip-noise s)
+  (if (not (string? s))
+    ""
+    (text:cut-span
+      (text:cut-span s "<tool_call>" "</tool_call>")
+      "<|tool_call|>" "<|/tool_call|>")))
+
 (define (text:lookup pairs key)
   (let loop ((xs pairs))
     (cond

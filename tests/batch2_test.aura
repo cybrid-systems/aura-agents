@@ -1,0 +1,62 @@
+;; Queue, retry, tool-call stripping, stdlib reference, timeout pick.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/llm/chat")
+(require "lib/llm/stdlib-ref")
+(require "lib/roles/worker")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(line "timeout-worker" (chat:pick-timeout "worker" #f #f))
+(line "timeout-role" (chat:pick-timeout "worker" 10 99))
+(line "timeout-planner" (chat:pick-timeout "planner" #f 40))
+
+(define wrapped (worker:parse "<tool_call>junk</tool_call>\nRESULT tests=pass\nMUTATE src/wc.aura\nOLD (define (wc:count text) 0)\nNEW (define (wc:count text) 1)\n"))
+(line "strip" (car wrapped))
+(define bare (worker:parse "<tool_call>only</tool_call>\n"))
+(line "junk" (car bare))
+(line "junk-reason" (cadr bare))
+
+(make-directory "out/stdlib-mini")
+(file-write "out/stdlib-mini/string.aura" "(export string-split string-split-words string-join)\n")
+(file-write "out/stdlib-mini/list.aura" "(export map filter)\n")
+(define mini (stdlib:reference-from "out/stdlib-mini" 500))
+(line "mini-words" (if (string-contains? mini "string-split-words") "ok" "bad"))
+(line "mini-list" (if (string-contains? mini "std/list:") "ok" "bad"))
+(line "mini-deny" (if (string-contains? mini "NOT-EXPORTED: list:length") "ok" "bad"))
+
+(define sample1 (hash "cpus" 2 "load" 0 "mem-available-kb" 8000000))
+(define sample2 (hash "cpus" 3 "load" 0 "mem-available-kb" 8000000))
+
+(define (run ws requirement sample retries)
+  (orchestrate:run (hash "requirement" requirement
+                         "sample" sample
+                         "mode" "mock"
+                         "workspace" ws
+                         "approve" "approved"
+                         "now" 0
+                         "retries" retries
+                         "graph" "off")))
+
+(define queued (run 9601 "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。" sample1 0))
+(line "queue-workers" (hash-ref queued "workers"))
+(line "queue-tasks" (hash-ref queued "tasks"))
+(line "queue-completed" (hash-ref queued "completed"))
+(line "queue-gate" (hash-ref queued "gate"))
+(line "queue-result" (hash-ref queued "result"))
+(line "queue-demo" (hash-ref queued "demo"))
+
+(define retried (run 9602 "SIMULATE-RETRY 写一个单词计数命令行，测试必须通过" sample2 1))
+(line "retry-result" (hash-ref retried "result"))
+(line "retry-gate" (hash-ref retried "gate"))
+(line "retry-demo" (hash-ref retried "demo"))
+
+(define cleaned (run 9603 "SIMULATE-GARBAGE 写一个单词计数命令行，测试必须通过" sample2 1))
+(line "garbage-result" (hash-ref cleaned "result"))
+(line "garbage-gate" (hash-ref cleaned "gate"))

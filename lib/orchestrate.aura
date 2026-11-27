@@ -106,29 +106,93 @@
           ((equal? val "none") (loop (cdr xs) got))
           (else (loop (cdr xs) val)))))))
 
-(define (orchestrate:run-workers worker-ss mode now target context requirement)
-  (let loop ((ss worker-ss) (i 0) (acc '()))
-    (if (not (pair? ss))
+(define *orchestrate-specs* '())
+
+(define (orchestrate:note-error name ev)
+  (display "worker-error=")
+  (display name)
+  (display " reason=")
+  (display (if (and (pair? ev) (pair? (cdr ev))) (cadr ev) "fail"))
+  (if (and (pair? ev) (pair? (cdr ev)) (pair? (cddr ev)) (string? (caddr ev)))
+    (begin
+      (display " detail=")
+      (display (caddr ev)))
+    #f)
+  (newline))
+
+;; One task, with a bounded number of extra replies when the model
+;; returns markup or anything that is not a RESULT plus a change.
+(define (orchestrate:invoke name spec mode target context requirement feedback retries)
+  (let loop ((try 0) (note feedback))
+    (let ((ev (worker:run (contract:worker-user target context requirement spec note) mode)))
+      (if (orchestrate:ok? ev)
+        ev
+        (begin
+          (orchestrate:note-error name ev)
+          (if (< try retries)
+            (begin
+              (display "worker-retry=")
+              (display (+ try 1))
+              (newline)
+              (loop (+ try 1) "previous reply was not a RESULT plus PATCH or MUTATE"))
+            ev))))))
+
+;; One claim for this worker. #f when the queue is empty or the reply
+;; never parsed. The pool drains in waves, so workers < tasks still
+;; finishes the board instead of stopping at gate=incomplete.
+(define (orchestrate:claim-one session i mode now target context requirement feedback retries)
+  (let* ((name (orchestrate:worker-name i))
+         (claim (task:claim session name now)))
+    (if (not (orchestrate:ok? claim))
+      #f
+      (let* ((id (cadr claim))
+             (hb (task:heartbeat session id name now))
+             (spec (task:spec id))
+             (ev (if (orchestrate:ok? hb)
+                   (orchestrate:invoke name spec mode target context requirement feedback retries)
+                   #f)))
+        (if (and (orchestrate:ok? hb) (orchestrate:ok? ev))
+          (begin
+            (task:complete session id name now "done")
+            (set! *orchestrate-specs* (append *orchestrate-specs* (list spec)))
+            ev)
+          (begin
+            (if (not (orchestrate:ok? hb))
+              (orchestrate:note-error name (list "error" "lease" "heartbeat rejected"))
+              #f)
+            (task:fail session id name now "worker-error")
+            #f))))))
+
+(define (orchestrate:run-workers worker-ss mode now target context requirement feedback retries)
+  (set! *orchestrate-specs* '())
+  (let wave ((acc '()))
+    (let ((step (let each ((ss worker-ss) (i 0) (acc acc) (progress #f))
+                  (if (not (pair? ss))
+                    (list acc progress)
+                    (let ((ev (orchestrate:claim-one (car ss) i mode now target context
+                                                     requirement feedback retries)))
+                      (each (cdr ss) (+ i 1)
+                            (if (orchestrate:ok? ev) (cons ev acc) acc)
+                            (or progress (orchestrate:ok? ev))))))))
+      (if (cadr step)
+        (wave (car step))
+        (reverse (car step))))))
+
+(define (orchestrate:tests-failed? evidence)
+  (let ((got (text:lookup evidence "tests")))
+    (or (not (string? got)) (equal? got "fail") (equal? got "missing"))))
+
+(define (orchestrate:rerun mode target context requirement feedback)
+  (let loop ((specs *orchestrate-specs*) (acc '()))
+    (if (not (pair? specs))
       (reverse acc)
-      (let* ((session (car ss))
-             (name (orchestrate:worker-name i))
-             (claim (task:claim session name now)))
-        (if (not (orchestrate:ok? claim))
-          (loop (cdr ss) (+ i 1) acc)
-          (let* ((id (cadr claim))
-                 (hb (task:heartbeat session id name now))
-                 (ev (if (orchestrate:ok? hb)
-                       (worker:run (contract:worker-user target context requirement
-                                                         (task:spec id))
-                                   mode)
-                       #f)))
-            (if (and (orchestrate:ok? hb) (orchestrate:ok? ev))
-              (begin
-                (task:complete session id name now "done")
-                (loop (cdr ss) (+ i 1) (cons ev acc)))
-              (begin
-                (task:fail session id name now "worker-error")
-                (loop (cdr ss) (+ i 1) acc)))))))))
+      (let ((ev (worker:run (contract:worker-user target context requirement
+                                                   (car specs) feedback)
+                            mode)))
+        (if (not (orchestrate:ok? ev))
+          (orchestrate:note-error "retry" ev)
+          #f)
+        (loop (cdr specs) (if (orchestrate:ok? ev) (cons ev acc) acc))))))
 
 (define (orchestrate:reject flags judge-s)
   (orchestrate:read-channel flags judge-s)
@@ -141,7 +205,7 @@
       #f))
   (hash-set! flags "bus-audit" (orchestrate:audit-flag judge-s)))
 
-(define (orchestrate:deliver flags judge-s worker-ss contract tasks mode now ws requirement target context)
+(define (orchestrate:deliver flags judge-s worker-ss contract tasks mode now ws requirement target context retries)
   (let ((ids (let loop ((xs tasks) (acc '()))
                (if (not (pair? xs))
                  (reverse acc)
@@ -151,11 +215,35 @@
                      (loop (cdr xs) acc)))))))
     (hash-set! flags "task-backend" (task:backend))
     (hash-set! flags "tasks" (length ids))
-    (let* ((results (orchestrate:run-workers worker-ss mode now target context requirement))
-           (ready (and (= (length results) (length ids)) (pair? results)))
-           (evidence (if ready
-                       (trial:verdict ws requirement contract (orchestrate:changes results))
-                       '())))
+    (let* ((first (orchestrate:run-workers worker-ss mode now target context requirement "" retries))
+           (ready0 (and (= (length first) (length ids)) (pair? first)))
+           (passed (let retry ((attempt 0)
+                               (results first)
+                               (evidence (if ready0
+                                           (trial:verdict ws requirement contract
+                                                          (orchestrate:changes first))
+                                           '())))
+                     (if (or (not ready0)
+                             (>= attempt retries)
+                             (not (orchestrate:tests-failed? evidence)))
+                       (list results evidence)
+                       (begin
+                         (display "worker-retry=")
+                         (display (+ attempt 1))
+                         (newline)
+                         (let* ((feedback (trial:last-log))
+                                (again (orchestrate:rerun mode target context requirement feedback))
+                                (ready1 (and (= (length again) (length ids)) (pair? again)))
+                                (next (if ready1
+                                        (trial:verdict ws requirement contract
+                                                       (orchestrate:changes again))
+                                        evidence)))
+                           (retry (+ attempt 1)
+                                  (if ready1 again results)
+                                  next))))))
+           (results (car passed))
+           (evidence (cadr passed))
+           (ready (and (= (length results) (length ids)) (pair? results))))
       (hash-set! flags "completed" (length results))
       (hash-set! flags "bus-publish"
                  (orchestrate:flag (bus:publish judge-s 1 (if ready 1 0))))
@@ -201,7 +289,7 @@
         (newline))
       #f)))
 
-(define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now graph ws target context)
+(define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now graph ws target context retries)
   (let ((plan (planner:plan-with requirement mode graph target context)))
     (orchestrate:note-dropped plan)
     (if (not (orchestrate:ok? plan))
@@ -228,7 +316,7 @@
           (hash-set! flags "approve" decision)
           (if (equal? decision "approved")
             (orchestrate:deliver flags judge-s worker-ss contract tasks mode now
-                                 ws requirement target context)
+                                 ws requirement target context retries)
             (orchestrate:reject flags judge-s)))))))
 
 (define (orchestrate:graph-on? cfg)
@@ -314,7 +402,18 @@
   (orchestrate:emit flags)
   flags)
 
-(define (orchestrate:hosted flags ws n requirement mode approve-mode now graph target context fp)
+(define (orchestrate:retry-count cfg)
+  (let ((n (hash-ref cfg "retries" #f)))
+    (if (and (number? n) (>= n 0))
+      n
+      (let ((e (getenv "AURA_AGENTS_RETRIES")))
+        (if (and (string? e) (number? (string->number e)) (>= (string->number e) 0))
+          (if (integer? (string->number e))
+            (string->number e)
+            (inexact->exact (floor (string->number e))))
+          2)))))
+
+(define (orchestrate:hosted flags ws n requirement mode approve-mode now graph target context fp retries)
   (let* ((planner-a (bus:attach "" ws 0 127 31))
          (judge-a (bus:attach "" ws 0 127 31))
          (worker-ss (orchestrate:attach-workers ws n))
@@ -327,7 +426,7 @@
       (begin
         (orchestrate:pipeline flags (cadr planner-a) (cadr judge-a) worker-ss
                               requirement mode approve-mode now graph
-                              ws target context)
+                              ws target context retries)
         (orchestrate:finalize-graph flags graph (if graph #t #f) fp)
         (orchestrate:cleanup flags (orchestrate:sessions planner-a judge-a worker-ss) ws)))))
 
@@ -393,4 +492,5 @@
       (begin (orchestrate:emit flags) flags)
       (orchestrate:hosted flags ws (hash-ref flags "workers")
                           requirement mode approve-mode now graph
-                          target context fp))))
+                          target context fp
+                          (orchestrate:retry-count cfg)))))

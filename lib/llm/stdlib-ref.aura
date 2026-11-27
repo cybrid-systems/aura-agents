@@ -1,0 +1,90 @@
+;; Compact Aura stdlib reference for the worker prompt.
+;; Names come from (export ...) in the installed std/*.aura. Nothing
+;; here is invented. A short denylist records calls that are not exports.
+(require "std/string")
+(require "std/fs")
+(require "std/process")
+
+(define stdlib:priority '("string.aura" "list.aura"))
+
+(define *stdlib-built* #f)
+
+(define (stdlib:clip s n)
+  (let ((t (if (string? s) s "")))
+    (if (<= (string-length t) n)
+      t
+      (string-append (substring t 0 n) "\n...truncated\n"))))
+
+(define (stdlib:exports text)
+  (if (not (string? text))
+    '()
+    (let ((i (string-index text "(export " 0)))
+      (if (< i 0)
+        '()
+        (let ((j (string-index text ")" i)))
+          (if (< j 0)
+            '()
+            (string-split-words (substring text (+ i 8) j))))))))
+
+(define (stdlib:listed? name xs)
+  (let loop ((ys xs))
+    (cond
+      ((not (pair? ys)) #f)
+      ((equal? (car ys) name) #t)
+      (else (loop (cdr ys))))))
+
+(define (stdlib:line file text)
+  (let ((names (stdlib:exports text))
+        (mod (substring file 0 (- (string-length file) 5))))
+    (if (not (pair? names))
+      ""
+      (string-append "std/" mod ": " (string-join names " ") "\n"))))
+
+(define (stdlib:push acc chunk limit)
+  (if (or (string=? chunk "") (>= (string-length acc) limit))
+    acc
+    (let ((next (string-append acc chunk)))
+      (if (<= (string-length next) limit) next acc))))
+
+(define (stdlib:read-file dir name)
+  (file-read (string-append dir "/" name)))
+
+;; dir is a directory of *.aura modules. priority names are emitted
+;; first. The result is capped at limit characters.
+(define (stdlib:reference-from dir limit)
+  (let* ((cap (if (and (number? limit) (> limit 0)) limit 1200))
+         (header "STDLIB exported names only. builtins: length map filter string-append car cdr cons\nNOT-EXPORTED: list:length str:split list:map str:length\n")
+         (have (if (and (string? dir) (> (string-length dir) 0))
+                 (try (dir-list dir) (catch (e) '()))
+                 '())))
+    (let scan ((todo (append stdlib:priority
+                             (filter (lambda (n)
+                                       (and (string? n)
+                                            (string-suffix? n ".aura")
+                                            (not (stdlib:listed? n stdlib:priority))))
+                                     (if (pair? have) have '()))))
+               (acc header))
+      (cond
+        ((or (not (pair? todo)) (>= (string-length acc) cap))
+         (stdlib:clip acc cap))
+        (else
+          (let ((chunk (stdlib:line (car todo) (stdlib:read-file dir (car todo)))))
+            (scan (cdr todo) (stdlib:push acc chunk cap))))))))
+
+(define (stdlib:aura-dir)
+  (let ((env (getenv "AURA_STDLIB")))
+    (if (and (string? env) (> (string-length env) 0))
+      env
+      (let ((bin (try (command-output "command -v aura") (catch (e) ""))))
+        (if (and (string? bin) (> (string-length (string-trim bin)) 0))
+          (string-append (path-dirname (path-dirname (string-trim bin))) "/lib/std")
+          "")))))
+
+(define (stdlib:brief limit)
+  (if (not (string? *stdlib-built*))
+    (set! *stdlib-built* (stdlib:reference-from (stdlib:aura-dir) 4000))
+    #f)
+  (stdlib:clip *stdlib-built* (if (and (number? limit) (> limit 0)) limit 1200)))
+
+(define (stdlib:reset!)
+  (set! *stdlib-built* #f))
