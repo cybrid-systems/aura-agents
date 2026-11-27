@@ -478,7 +478,7 @@
        (hash "ok" #t "hunk" n "old" "" "now" ""))
       (else
        (hash "ok" #f "hunk" n "old" (trial:clip old 160)
-             "now" (trial:clip (string-append (trial:replace-why) "\n" text) 240))))))
+             "now" (trial:clip (string-append (trial:replace-why) "\n" text) 2000))))))
 
 (define (trial:apply-diff dest change)
   (let ((task (hash-ref change "task" ""))
@@ -557,7 +557,7 @@
                        (string-append
                          (if ok "" (string-append (trial:replace-why) "\n"))
                          (if (string? now) now ""))
-                       240)
+                       2000)
                 "diff" (trial:clip
                         (string-append "--- a/" path "\n+++ b/" path "\n-"
                                        (if (and (hash? change) (string? (hash-ref change "old" "")))
@@ -662,7 +662,7 @@
     (if (<= (string-length t) n) t (substring t 0 n))))
 
 (define (trial:note! s)
-  (set! *trial-log* (trial:clip s 1200)))
+  (set! *trial-log* (trial:clip s 8000)))
 
 ;; An unbound "std/string:string-split-words" is the model joining the
 ;; import hint to the bare name. Say so in the feedback.
@@ -975,6 +975,8 @@
 
 (define *trial-junk* '())
 (define *trial-rule* "")
+(define *trial-base-out* "")
+(define *trial-speed-note* "")
 
 (define (trial:hold rg detail)
   (set! *trial-rule* (if (string? detail) (string-append detail "\n") ""))
@@ -1006,11 +1008,12 @@
 
 (define (trial:redgreen-why rg dest)
   (cond
-    ((equal? rg "pass") "redgreen=pass 修复前测试失败，修复后通过\n")
+    ((equal? rg "pass") (string-append "redgreen=pass 修复前测试失败，修复后通过\n" *trial-rule*))
     ((equal? rg "bench") "redgreen=bench 修复前 bench 未达标，修复后达标\n")
     ((equal? rg "speed") "redgreen=speed 输出一致且耗时改善超过阈值\n")
+    ((equal? rg "slow") (string-append "redgreen=slow 耗时未达到相对阈值\n" *trial-speed-note*))
     ((equal? rg "apply-failed") "redgreen=apply-failed 补丁没有落地\n")
-    ((equal? rg "not-red") "redgreen=not-red 测试在原代码上未失败，没有先红。请重写断言，使新测试在原代码上失败、在改后的代码上通过\n")
+    ((equal? rg "not-red") (string-append "redgreen=not-red 测试在原代码上未失败，没有先红。请重写断言，使新测试在原代码上失败、在改后的代码上通过\n原码输出:\n" *trial-base-out* "\n"))
     ((equal? rg "toy") (string-append "redgreen=toy 常量实现，或新测试只覆盖单一输入，或变体输入不符合需求\n" *trial-rule*))
     ((equal? rg "still-red") "redgreen=still-red 修复后测试仍失败\n")
     ((equal? rg "no-bench") "redgreen=no-bench 无 bench\n")
@@ -1238,7 +1241,72 @@
         (loop (cdr xs)
               (and (caddr b) (caddr a) (string=? (car b) (car a))))))))
 
-(define (trial:decide-speed before dest files hot)
+(define (trial:digit? c)
+  (and (>= c 48) (<= c 57)))
+
+(define (trial:digits-before s end)
+  (let loop ((i (- end 1)))
+    (if (< i 0)
+      #f
+      (if (= (string-ref s i) 32)
+        (loop (- i 1))
+        (let collect ((j i) (acc ""))
+          (if (or (< j 0) (not (trial:digit? (string-ref s j))))
+            (let ((n (string->number acc)))
+              (if (and (number? n) (> (string-length acc) 0)) n #f))
+            (collect (- j 1) (string-append (substring s j (+ j 1)) acc))))))))
+
+(define (trial:digits-after s start)
+  (let ((n (string-length s)))
+    (let skip ((i start))
+      (if (>= i n)
+        #f
+        (if (= (string-ref s i) 32)
+          (skip (+ i 1))
+          (let collect ((j i) (acc ""))
+            (if (or (>= j n) (not (trial:digit? (string-ref s j))))
+              (let ((v (string->number acc)))
+                (if (and (number? v) (> (string-length acc) 0)) v #f))
+              (collect (+ j 1) (string-append acc (substring s j (+ j 1)))))))))))
+
+;; "2倍" in the requirement overrides AURA_AGENTS_SPEEDUP. "降到 N" is
+;; an absolute net-millisecond budget that also counts as fast enough.
+(define (trial:ratio-of requirement)
+  (let ((s (if (string? requirement) requirement "")))
+    (let ((i (string-index s "倍" 0)))
+      (if (and (number? i) (>= i 0))
+        (let ((n (trial:digits-before s i)))
+          (if (and (number? n) (> n 1)) n (trial:speedup)))
+        (trial:speedup)))))
+
+(define (trial:ms-goal requirement)
+  (let ((s (if (string? requirement) requirement "")))
+    (let ((i (string-index s "降到" 0)))
+      (if (and (number? i) (>= i 0))
+        (trial:digits-after s (+ i (string-length "降到")))
+        #f))))
+
+(define (trial:fast-enough? before after requirement)
+  (let ((goal (trial:ms-goal requirement))
+        (need (trial:ratio-of requirement)))
+    (or (and (number? goal) (<= after goal))
+        (and (> before 0) (<= (* after need) before)))))
+
+(define (trial:speed-note! before after requirement)
+  (set! *trial-speed-note*
+        (string-append "speed-before=" (number->string before)
+                       " speed-after=" (number->string after)
+                       " speed-need=" (number->string (trial:ratio-of requirement))
+                       "\n")))
+
+(define (trial:judge-net before after requirement)
+  (if (trial:fast-enough? before after requirement)
+    "speed"
+    (begin
+      (trial:speed-note! before after requirement)
+      "slow")))
+
+(define (trial:decide-speed before dest files hot requirement)
   (let ((by-hot (if (pair? hot)
                   (begin
                     (trial:write-hot before (car hot) (cadr hot) 12)
@@ -1246,16 +1314,16 @@
                     (let ((b (trial:net-ms before))
                           (a (trial:net-ms dest)))
                       (if (> b 30)
-                        (if (trial:net-faster? (+ b 1) (+ a 1) 1 1) "speed" "slow")
+                        (trial:judge-net b a requirement)
                         #f)))
                   #f)))
-    (if (equal? by-hot "speed")
-      "speed"
-      (if (equal? by-hot "slow")
-        #f
-        (let ((b (trial:file-net before (car files)))
-              (a (trial:file-net dest (car files))))
-          (if (trial:net-faster? (+ b 1) (+ a 1) 1 1) "speed" #f))))))
+    (if (or (equal? by-hot "speed") (equal? by-hot "slow"))
+      by-hot
+      (let ((b (trial:file-net before (car files)))
+            (a (trial:file-net dest (car files))))
+        (if (> b 30)
+          (trial:judge-net b a requirement)
+          #f)))))
 
 (define (trial:harness-speed base dest requirement)
   (if (not (contract:speed? requirement))
@@ -1266,7 +1334,7 @@
         #f
         (let ((before (trial:old-tree base dest files)))
           (let ((answer (if (trial:outputs-match? before dest files)
-                           (trial:decide-speed before dest files hot)
+                           (trial:decide-speed before dest files hot requirement)
                            #f)))
             (trial:sweep-junk! base before)
             (trial:sweep-junk! base dest)
@@ -1562,6 +1630,49 @@
                 (loop (cdr xs)
                       (if (equal? a b) acc (cons rel acc)))))))))))
 
+(define (trial:read-out dir)
+  (let ((t (file-read (string-append dir "/test.out"))))
+    (if (string? t) (trial:clip t 500) "")))
+
+;; The new test was not red, but a requirement probe differs between
+;; the original and the edit and the edit matches the property.
+(define (trial:proved-change base dest requirement)
+  (let loop ((xs (trial:param-fns (trial:changed-src-text base dest))))
+    (if (not (pair? xs))
+      #f
+      (let ((name (car xs))
+            (rel (trial:fn-file dest name))
+            (brel (trial:fn-file base name)))
+        (if (or (not rel) (not brel))
+          (loop (cdr xs))
+          (let ((got (cond
+                       ((trial:space-req? requirement)
+                        (let ((bd (trial:probe base brel name "a b"))
+                              (dd (trial:probe dest rel name "a b")))
+                          (if (or (equal? bd dd)
+                                  (not (equal? (trial:space-diff dest rel name) "ok")))
+                            #f
+                            (string-append "rule=probe evidence=input=a b base=" bd " dest=" dd))))
+                       ((trial:word-req? requirement)
+                        (let* ((lit "alpha beta gamma")
+                               (bd (trial:probe base brel name lit))
+                               (dd (trial:probe dest rel name lit)))
+                          (if (or (equal? bd dd)
+                                  (not (equal? dd (trial:word-ref lit)))
+                                  (not (equal? (trial:word-diff dest rel name) "ok")))
+                            #f
+                            (string-append "rule=probe evidence=input=" lit " base=" bd " dest=" dd))))
+                       (else #f))))
+            (if got got (loop (cdr xs)))))))))
+
+(define (trial:or-proved base dest requirement dir)
+  (let ((proved (trial:proved-change base dest requirement)))
+    (if proved
+      (trial:hold "pass" proved)
+      (begin
+        (set! *trial-base-out* (trial:read-out dir))
+        "not-red"))))
+
 ;; New or modified tests must fail on the untouched sources and the
 ;; full suite must pass after the edit. A pure metric change can
 ;; instead show a bench that was not ok before and is ok after.
@@ -1575,8 +1686,11 @@
         (toy (trial:toy-reason base dest requirement))
         (part (trial:partial-evidence base dest requirement)))
     (set! *trial-rule* "")
+    (set! *trial-base-out* "")
     (cond
       (tamp (trial:hold "tamper" tamp))
+      ((and (equal? speed "slow") toy) (trial:hold "toy" toy))
+      ((equal? speed "slow") "slow")
       ((and green (equal? speed "speed"))
        (if toy (trial:hold "toy" toy) "speed"))
       ((pair? changed)
@@ -1587,11 +1701,11 @@
            ((and red-fail (equal? kind "missing-file")) "missing-file")
            ((pair? (trial:missing-goldens dest)) "missing-golden")
            ((not green) "still-red")
-           ((not red-fail) "not-red")
+           ((not red-fail) (trial:or-proved base dest requirement red))
            (toy (trial:hold "toy" toy))
            (part (trial:hold "partial" part))
            ((equal? kind "assert") "pass")
-           (else "not-red"))))
+           (else (trial:or-proved base dest requirement red)))))
       ((and metric (trial:has-bench? dest))
        (let ((before (trial:parse-bench (trial:bench base)))
              (after (trial:parse-bench (trial:bench dest))))
@@ -1602,9 +1716,9 @@
              ((not (string? a)) "no-bench")
              ((and (equal? a "ok") (not (equal? b "ok"))) "bench")
              ((not green) "still-red")
-             (else "not-red")))))
+             (else (trial:or-proved base dest requirement base))))))
       ((not green) "still-red")
-      ((not (trial:aura-fail? base "")) "not-red")
+      ((not (trial:aura-fail? base "")) (trial:or-proved base dest requirement base))
       (toy (trial:hold "toy" toy))
       (part (trial:hold "partial" part))
       ((pair? (trial:missing-goldens dest)) "missing-golden")
@@ -1859,6 +1973,30 @@
     ((trial:timeout? text) "ERROR http-post: timeout\n")
     ((and (trial:has? text "SIMULATE-GARBAGE") (not (trial:has? text "FEEDBACK")))
      "<tool_call>{\"name\":\"edit\"}</tool_call>\n")
+    ((trial:has? text "SIMULATE-APPEND")
+     (string-append "RESULT tests=pass\n"
+                    "MUTATE src/sp.aura\nOLD\n(define (sp:has? s) \"no\")\nEND OLD\nNEW\n"
+                    "(define (sp:has? s)\n  (let loop ((i 0))\n    (if (>= i (string-length s)) \"no\"\n      (if (equal? (substring s i (+ i 1)) \" \") \"yes\" (loop (+ i 1))))))\n"
+                    "END NEW\n"
+                    "PATCH\n--- a/tests/input_test.aura\n+++ b/tests/input_test.aura\n@@ -1,3 +1,5 @@\n"
+                    " (require \"src/sp.aura\")\n (display (sp:has? \"ab\"))\n (newline)\n"
+                    "+(display (sp:has? \"a b\"))\n+(newline)\n"
+                    "--- a/tests/input_test.golden\n+++ b/tests/input_test.golden\n@@ -1 +1,2 @@\n"
+                    " no\n+yes\nEND\n"))
+    ((trial:has? text "SIMULATE-PARTIAL")
+     (string-append "RESULT tests=pass\n"
+                    (trial:block "src/tu.aura"
+                                 "(define (tu:get k) 0)"
+                                 "(define (tu:get k) (if (equal? k \"speed\") 1 0))")))
+    ((trial:has? text "SIMULATE-TYPE")
+     (string-append "RESULT tests=pass\n"
+                    "MUTATE src/f.aura\nOLD\n(define (f x)\n  0)\nEND OLD\nNEW\n"
+                    "(define (f x)\n  (+ (newline) 1))\nEND NEW\n"))
+    ((trial:has? text "SIMULATE-JUNK")
+     (string-append "RESULT tests=pass\n"
+                    (trial:block "src/n.aura"
+                                 "(define (n:v) 0)"
+                                 "(define (n:v) 1)")))
     ((and (trial:has? text "SIMULATE-REBASE")
           (trial:has? text "TASK second")
           (string-contains? (trial:context-part text) "(define (n:v) 1)"))

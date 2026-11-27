@@ -48,6 +48,8 @@ contract=tests=pass p99=ok budget=ok
 apply=optimize-hot-path:src/hot.aura:pass
 test-summary=pass
 redgreen=toy
+rule=constant
+evidence=(define (hot:cost) 10)
 demo=ok
 llm=mock
 workers=2

@@ -1,0 +1,83 @@
+;; Scripted worker, no LLM. Real orchestrate path for append, partial,
+;; prior diff, type location, junk cleanup, and fiber scheduling.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define sample (hash "cpus" 4 "load" 0 "mem-available-kb" 8000000))
+
+(define (tree root)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b11e\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n"))
+
+(define (go root ws requirement retries)
+  (trial:set-root! root)
+  (orchestrate:run (hash "requirement" requirement
+                         "sample" sample
+                         "mode" "mock"
+                         "workspace" ws
+                         "approve" "approved"
+                         "now" 0
+                         "retries" retries
+                         "graph" "off")))
+
+(shell "rm -rf out/b11e-add out/b11e-part out/b11e-rebase out/b11e-ty out/b11e-junk")
+
+(tree "out/b11e-add")
+(file-write "out/b11e-add/src/main.aura" "(require \"src/sp.aura\")\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b11e-add/src/sp.aura" "(define (sp:has? s) \"no\")\n")
+(file-write "out/b11e-add/tests/input_test.aura"
+            "(require \"src/sp.aura\")\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b11e-add/tests/input_test.golden" "no\n")
+(define added (go "out/b11e-add" 9930 "SIMULATE-APPEND 判断字符串是否含有空格" 0))
+(line "add-result" (hash-ref added "result"))
+(line "add-gate" (hash-ref added "gate"))
+
+(tree "out/b11e-part")
+(file-write "out/b11e-part/src/main.aura" "(require \"src/tu.aura\")\n(display (tu:get \"speed\"))\n(newline)\n")
+(file-write "out/b11e-part/src/tu.aura" "(define (tu:get k) 0)\n")
+(file-write "out/b11e-part/tests/tu_test.aura"
+            "(require \"src/tu.aura\")\n(display (tu:get \"speed\"))\n(newline)\n")
+(file-write "out/b11e-part/tests/tu_test.golden" "1\n")
+(define part (go "out/b11e-part" 9931 "SIMULATE-PARTIAL tuning 的键 speed 和 armor 都要是整数" 0))
+(line "part-result" (hash-ref part "result"))
+(line "part-rule" (if (string-contains? (trial:last-log) "rule=partial") "yes" "no"))
+
+(tree "out/b11e-rebase")
+(file-write "out/b11e-rebase/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b11e-rebase/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b11e-rebase/tests/n_test.aura"
+            "(require \"src/n.aura\")\n(display (if (= (n:v) 2) \"ok\" \"fail\"))\n(newline)\n")
+(file-write "out/b11e-rebase/tests/n_test.golden" "ok\n")
+(define rebased (go "out/b11e-rebase" 9932 "SIMULATE-REBASE 把 n 改到 2" 0))
+(line "rebase-result" (hash-ref rebased "result"))
+
+(tree "out/b11e-ty")
+(file-write "out/b11e-ty/src/main.aura" "(require \"src/f.aura\")\n(display (f 1))\n(newline)\n")
+(file-write "out/b11e-ty/src/f.aura" "(define (f x)\n  0)\n")
+(file-write "out/b11e-ty/tests/f_test.aura" "(require \"src/f.aura\")\n(display (f 1))\n(newline)\n")
+(file-write "out/b11e-ty/tests/f_test.golden" "2\n")
+(define typed (go "out/b11e-ty" 9933 "SIMULATE-TYPE 修类型" 0))
+(line "ty-loc" (if (string-contains? (trial:last-log) "location=src/f.aura:2:4") "yes" "no"))
+(line "ty-exp" (if (string-contains? (trial:last-log) "expected=Int") "yes" "no"))
+
+(tree "out/b11e-junk")
+(file-write "out/b11e-junk/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b11e-junk/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b11e-junk/tests/n_test.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b11e-junk/tests/n_test.golden" "1\n")
+(file-write "out/b11e-junk/_hot.aura" "(display \"junk\")\n")
+(define junked (go "out/b11e-junk" 9934 "SIMULATE-JUNK 把 n 改成 1" 0))
+(line "junk-result" (hash-ref junked "result"))
+(line "junk-gone" (if (file-exists? "out/trials/9934/external/_hot.aura") "still" "cleared"))
+(line "junk-log" (if (string-contains? (trial:last-log) "junk-removed=_hot.aura") "yes" "no"))

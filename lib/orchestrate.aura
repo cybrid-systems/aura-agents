@@ -286,6 +286,8 @@
       (begin
         (display "rebase-retry=1")
         (newline)
+        (display "prior-diff=yes")
+        (newline)
         (for-each
           (lambda (row)
             (let* ((task (hash-ref row "task" ""))
@@ -312,16 +314,21 @@
       (let ((applied (text:lookup evidence "applied")))
         (and (string? applied) (not (equal? applied "all"))))))
 
-;; A test that did not fail on the original code gets one rewrite.
-;; Other failures keep the normal retry budget.
-(define (orchestrate:should-rerun? evidence attempt retries)
-  (cond
-    ((>= attempt retries) #f)
-    ((or (equal? (text:lookup evidence "redgreen") "not-red")
-         (equal? (text:lookup evidence "redgreen") "missing-golden"))
-     (< attempt 1))
-    ((orchestrate:need-retry? evidence) #t)
-    (else #f)))
+;; not-red, a missing golden, and a missed speed target each get one
+;; rewrite of their own. apply-failed and other test failures spend
+;; AURA_AGENTS_RETRIES and do not consume that rewrite.
+(define (orchestrate:rewrite-rg? rg)
+  (or (equal? rg "not-red")
+      (equal? rg "missing-golden")
+      (equal? rg "slow")))
+
+(define (orchestrate:should-rerun? evidence rewrite-n apply-n retries)
+  (let ((rg (text:lookup evidence "redgreen")))
+    (cond
+      ((orchestrate:rewrite-rg? rg) (< rewrite-n 1))
+      ((>= apply-n retries) #f)
+      ((orchestrate:need-retry? evidence) #t)
+      (else #f))))
 
 (define (orchestrate:tag-changes results)
   (let loop ((rs results) (ss *orchestrate-specs*) (acc '()))
@@ -437,6 +444,17 @@
   (let ((g (text:lookup evidence "redgreen")))
     (display (if (string? g) g "missing")))
   (newline)
+  (let ((s (if (string? *trial-rule*) *trial-rule* "")))
+    (if (string-contains? s "rule=")
+      (let ((e (string-index s "evidence=" 0)))
+        (display (string-trim (if (and (number? e) (>= e 0)) (substring s 0 e) s)))
+        (newline)
+        (if (and (number? e) (>= e 0))
+          (begin
+            (display (string-trim (substring s e (string-length s))))
+            (newline))
+          #f))
+      #f))
   (let ((u (text:lookup evidence "test-unstable")))
     (if (string? u)
       (begin
@@ -468,8 +486,7 @@
         (rows (trial:conflict-rows (trial:last-report))))
     (if (or (not (string? dest)) (not (pair? rows)))
       context
-      (string-append (trial:kept-file dest (hash-ref (car rows) "path" ""))
-                     (if (string? context) context "")))))
+      (trial:kept-file dest (hash-ref (car rows) "path" "")))))
 
 (define (orchestrate:rerun mode target context requirement feedback)
   (let ((context (orchestrate:kept-context context)))
@@ -509,7 +526,8 @@
     (hash-set! flags "tasks" (length ids))
     (let* ((first (orchestrate:run-workers worker-ss mode now target context requirement "" retries))
            (ready0 (and (= (length first) (length ids)) (pair? first)))
-           (passed (let retry ((attempt 0)
+           (passed (let retry ((rewrite-n 0)
+                               (apply-n 0)
                                (results first)
                                (evidence (if ready0
                                            (orchestrate:rebase-once
@@ -520,13 +538,14 @@
                      (begin
                        (orchestrate:show-trial contract evidence)
                        (if (or (not ready0)
-                               (not (orchestrate:should-rerun? evidence attempt retries)))
+                               (not (orchestrate:should-rerun? evidence rewrite-n apply-n retries)))
                          (list results evidence)
                          (begin
                            (display "worker-retry=")
-                           (display (+ attempt 1))
+                           (display (+ rewrite-n apply-n 1))
                            (newline)
-                           (let* ((feedback (trial:last-log))
+                           (let* ((rg0 (text:lookup evidence "redgreen"))
+                                  (feedback (trial:last-log))
                                   (again (begin
                                            (orchestrate:feedback-summary feedback)
                                            (orchestrate:rerun mode target context requirement feedback)))
@@ -545,7 +564,8 @@
                                               (trial:rejudge requirement contract))
                                             (trial:verdict ws requirement contract
                                                            (orchestrate:tag-changes again))))))
-                             (retry (+ attempt 1)
+                             (retry (if (orchestrate:rewrite-rg? rg0) (+ rewrite-n 1) rewrite-n)
+                                    (if (orchestrate:rewrite-rg? rg0) apply-n (+ apply-n 1))
                                     (if ready1 again results)
                                     next)))))))
            (results (car passed))
