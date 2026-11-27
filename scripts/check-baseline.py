@@ -102,6 +102,14 @@ def check_repo(repo: pathlib.Path, baseline: dict) -> list[str]:
             findings.append(
                 "scripts/install-aura.sh: does not verify the archive digest"
             )
+        # The nightly tag is rebuilt in place, so the pinned digest can
+        # name a build the release no longer publishes. The installer must
+        # verify against the digest published beside the archive instead.
+        if "published" not in text:
+            findings.append(
+                "scripts/install-aura.sh: does not verify against the "
+                "published digest (the pinned build is not published)"
+            )
 
     return findings
 

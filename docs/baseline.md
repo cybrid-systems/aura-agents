@@ -15,6 +15,27 @@ nightly archive digests and the `aura-ci` image digest.
 
 CI runs it before installing Aura.
 
+## Installer contract
+
+The nightly tag is rebuilt in place: the archive under a fixed asset name
+is replaced, so the digest the baseline pins can name a build the release
+no longer publishes. Every member repo's `scripts/install-aura.sh`
+therefore:
+
+- verifies the download against the digest the release publishes beside
+  the archive (`<asset>.sha256`), not against the pinned digest, so an
+  unverified binary is never installed;
+- keys its cache by that digest, so a rolled nightly replaces the cached
+  binary instead of leaving an arbitrarily old one in place;
+- reports a stale pin on stderr, and fails the install under
+  `AURA_REQUIRE_PINNED=1` for the caller that gates on the pinned build
+  (the nightly pin job holds the last green pin instead of testing a
+  newer build in the pinned one's place).
+
+The pinned digest stays the coordination record: `check-baseline.py`
+still fails when the repos disagree, and moving the pin is the pin
+workflow's job.
+
 ## Bump generator
 
 `scripts/bump-baseline.py`:
