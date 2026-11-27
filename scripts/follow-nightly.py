@@ -25,6 +25,26 @@ _BUMP = runpy.run_path(str(HERE / "bump-baseline.py"))
 fetch_upstream = _BUMP["fetch_upstream"]
 make_baseline = _BUMP["make_baseline"]
 dependency_block = _BUMP["dependency_block"]
+gh_json = _BUMP["gh_json"]
+
+
+def ci_is_green(commit: str) -> bool:
+    """The latest CI push run for this commit must be a completed success."""
+    runs = gh_json(
+        "https://api.github.com/repos/cybrid-systems/aura/actions/runs"
+        f"?head_sha={commit}&per_page=50"
+    ).get("workflow_runs", [])
+    ci = [
+        run
+        for run in runs
+        if run.get("name") == "CI"
+        and run.get("event") == "push"
+        and run.get("head_branch") == "main"
+    ]
+    if not ci:
+        return False
+    latest = max(ci, key=lambda run: (run.get("created_at", ""), run.get("run_number", 0)))
+    return latest.get("status") == "completed" and latest.get("conclusion") == "success"
 
 
 def patch_toml(path: pathlib.Path, deps: dict[str, str]) -> None:
@@ -56,6 +76,12 @@ def main() -> int:
     baseline_path = repo / "baseline" / "aura-baseline.json"
     current = json.loads(baseline_path.read_text())
     upstream = fetch_upstream()
+    if not ci_is_green(upstream["commit_sha"]):
+        print(
+            f"CI not green for {upstream['commit_sha'][:9]}; "
+            f"baseline stays at {current['aura']['commit_sha'][:9]}"
+        )
+        return 0
     next_base = make_baseline(current, upstream)
 
     same = (
