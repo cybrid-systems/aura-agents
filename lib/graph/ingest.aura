@@ -18,6 +18,7 @@
 ;;   rollback canary-revert
 (require "std/string")
 (require "std/json")
+(require "std/list")
 (require "std/bus")
 (require "lib/graph/schema")
 (require "lib/graph/store")

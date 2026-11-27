@@ -11,6 +11,7 @@
 (require "std/string")
 (require "std/fs")
 (require "std/json")
+(require "std/list")
 (require "lib/graph/schema")
 
 (define graph:root "out/experience")
