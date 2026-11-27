@@ -36,13 +36,14 @@
   (chat:model-of (getenv "LLM_MODEL")))
 
 ;; Role timeout in seconds. An explicit role value wins, then the
-;; shared AURA_AGENTS_LLM_TIMEOUT, then 180 for a worker and 150 for
-;; the planner. llm:chat treats "timeout" as the transport budget.
+;; shared AURA_AGENTS_LLM_TIMEOUT, then 300 for a worker and 150 for
+;; the planner. The worker budget is wider so a large CONTEXT can
+;; finish. llm:chat treats "timeout" as the transport budget.
 (define (chat:pick-timeout role role-n global-n)
   (cond
     ((and (number? role-n) (> role-n 0)) role-n)
     ((and (number? global-n) (> global-n 0)) global-n)
-    ((equal? role "worker") 180)
+    ((equal? role "worker") 300)
     ((equal? role "planner") 150)
     (else 60)))
 

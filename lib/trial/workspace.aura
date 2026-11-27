@@ -88,7 +88,7 @@
   (let ((n (if (and (string? raw) (> (string-length raw) 0)) (string->number raw) #f)))
     (if (and (number? n) (> n 0))
       (if (integer? n) n (inexact->exact (floor n)))
-      4096)))
+      16384)))
 
 (define (trial:context-budget)
   (trial:context-budget-of (getenv "AURA_AGENTS_CONTEXT_BUDGET")))
@@ -132,15 +132,68 @@
 
 (define (trial:take-chunk out left chunk)
   (if (> (string-length chunk) left)
-    (list (string-append out (trial:clip chunk left)) 0)
+    (list out left)
     (list (string-append out chunk) (- left (string-length chunk)))))
 
-;; Full text of files whose path or body matches a requirement token,
-;; then a relative-path list with whatever budget remains.
+;; Top-level forms, each kept whole. A cut never stops inside one.
+(define (trial:top-forms text)
+  (let ((n (string-length (if (string? text) text ""))))
+    (let loop ((i 0) (depth 0) (start #f) (acc '()))
+      (if (>= i n)
+        (reverse acc)
+        (let ((c (string-ref text i)))
+          (cond
+            ((and (= depth 0) (not (= c 40)))
+             (loop (+ i 1) 0 #f acc))
+            ((= c 40)
+             (loop (+ i 1) (+ depth 1) (if start start i) acc))
+            ((= c 41)
+             (if (and (= depth 1) start)
+               (loop (+ i 1) 0 #f (cons (substring text start (+ i 1)) acc))
+               (loop (+ i 1) (if (> depth 0) (- depth 1) 0) start acc)))
+            (else (loop (+ i 1) depth start acc))))))))
+
+(define (trial:pack-forms forms left)
+  (let loop ((xs forms) (out "") (used 0))
+    (if (not (pair? xs))
+      out
+      (let ((piece (string-append (if (string=? out "") "" "\n") (car xs))))
+        (if (> (+ used (string-length piece)) left)
+          out
+          (loop (cdr xs) (string-append out piece) (+ used (string-length piece))))))))
+
+(define (trial:matching-forms text seeds)
+  (let loop ((xs (trial:top-forms text)) (acc '()))
+    (if (not (pair? xs))
+      (reverse acc)
+      (loop (cdr xs)
+            (if (trial:hit? "" (car xs) seeds) (cons (car xs) acc) acc)))))
+
+;; A hit file is included whole. If it does not fit, include complete
+;; matching forms instead of cutting mid-function. Other files wait.
+(define (trial:pack-hit rel text seeds left)
+  (let* ((header (string-append "FILE " rel "\n"))
+         (full (string-append header text "\n"))
+         (room (max 0 (- left (string-length header)))))
+    (if (<= (string-length full) left)
+      (list full (string-length full))
+      (let* ((matched (trial:matching-forms text seeds))
+             (forms (if (pair? matched) matched (trial:top-forms text)))
+             (body (trial:pack-forms forms room)))
+        (if (string=? body "")
+          (list "" 0)
+          (let ((chunk (string-append header body "\n")))
+            (if (> (string-length chunk) left)
+              (list "" 0)
+              (list chunk (string-length chunk)))))))))
+
+;; Full text of files whose path or body matches a requirement or task
+;; token, then a relative-path list with whatever budget remains.
+;; Non-matching text is dropped before a matching form is cut.
 (define (trial:external-context-budget root requirement budget)
   (let ((seeds (trial:context-seeds requirement))
         (abs (trial:aura-files root))
-        (limit (if (and (number? budget) (> budget 0)) budget 4096)))
+        (limit (if (and (number? budget) (> budget 0)) budget 16384)))
     (let ((packed (let loop ((xs abs) (hits '()) (rest '()))
                     (if (not (pair? xs))
                       (list (reverse hits) (reverse rest))
@@ -153,11 +206,10 @@
       (let ((full (let loop ((xs (car packed)) (out "") (left limit))
                     (if (or (not (pair? xs)) (<= left 0))
                       (list out left)
-                      (let ((step (trial:take-chunk
-                                    out left
-                                    (string-append "FILE " (car (car xs)) "\n"
-                                                   (cadr (car xs)) "\n"))))
-                        (loop (cdr xs) (car step) (cadr step)))))))
+                      (let ((step (trial:pack-hit (car (car xs)) (cadr (car xs)) seeds left)))
+                        (loop (cdr xs)
+                              (string-append out (car step))
+                              (- left (cadr step))))))))
         (let loop ((xs (cadr packed)) (out (car full)) (left (cadr full)) (head #t))
           (if (or (not (pair? xs)) (<= left 0))
             out
@@ -211,6 +263,97 @@
                   (file-write to text)
                   (loop (cdr xs) #t))))))))))
 
+(define *trial-replace-why* "")
+
+(define (trial:replace-why) *trial-replace-why*)
+
+(define (trial:ws? c)
+  (or (= c 32) (= c 9) (= c 10) (= c 13)))
+
+;; Collapses whitespace to a single space and records the original
+;; index of every kept character. Leading and trailing space is dropped.
+(define (trial:norm text)
+  (let ((n (string-length (if (string? text) text ""))))
+    (let loop ((i 0) (out "") (idxs '()) (gap #f))
+      (if (>= i n)
+        (list out idxs)
+        (let ((c (string-ref text i)))
+          (if (trial:ws? c)
+            (loop (+ i 1) out idxs (if (string=? out "") #f (if gap gap i)))
+            (if gap
+              (loop (+ i 1)
+                    (string-append out " " (substring text i (+ i 1)))
+                    (append idxs (list gap i))
+                    #f)
+              (loop (+ i 1)
+                    (string-append out (substring text i (+ i 1)))
+                    (append idxs (list i))
+                    #f))))))))
+
+(define (trial:nth xs i)
+  (if (or (not (pair? xs)) (<= i 0))
+    (if (pair? xs) (car xs) #f)
+    (trial:nth (cdr xs) (- i 1))))
+
+(define (trial:exact-spans text old)
+  (let ((n (string-length old))
+        (lim (string-length text)))
+    (let loop ((i 0) (acc '()))
+      (if (> (+ i n) lim)
+        (reverse acc)
+        (let ((j (string-index text old i)))
+          (if (or (not (number? j)) (< j 0))
+            (reverse acc)
+            (loop (+ j n) (cons j acc))))))))
+
+(define (trial:fuzzy-span text old)
+  (let* ((nt (trial:norm text))
+         (no (trial:norm old))
+         (hay (car nt))
+         (needle (car no))
+         (hits (trial:exact-spans hay needle)))
+    (cond
+      ((or (string=? needle "") (not (pair? hits))) #f)
+      ((pair? (cdr hits)) 'ambiguous)
+      (else
+       (let* ((idxs (cadr nt))
+              (at (car hits))
+              (start (trial:nth idxs at))
+              (end-i (trial:nth idxs (+ at (string-length needle) -1))))
+         (if (and (number? start) (number? end-i))
+           (list start (+ end-i 1))
+           #f))))))
+
+(define (trial:splice text start len neu)
+  (string-append (substring text 0 start)
+                 neu
+                 (substring text (+ start len) (string-length text))))
+
+;; Exact match first. A whitespace-normalized match is used only when
+;; the exact search misses and the normalized search hits once.
+(define (trial:replace-into full text old neu)
+  (let ((spans (trial:exact-spans text old)))
+    (cond
+      ((and (pair? spans) (not (pair? (cdr spans))))
+       (begin
+         (file-write full (trial:splice text (car spans) (string-length old) neu))
+         (set! *trial-replace-why* "")
+         #t))
+      ((pair? spans)
+       (begin (set! *trial-replace-why* "ambiguous exact match") #f))
+      (else
+       (let ((fuzzy (trial:fuzzy-span text old)))
+         (cond
+           ((equal? fuzzy 'ambiguous)
+            (begin (set! *trial-replace-why* "ambiguous whitespace match") #f))
+           ((pair? fuzzy)
+            (begin
+              (file-write full (trial:splice text (car fuzzy) (- (cadr fuzzy) (car fuzzy)) neu))
+              (set! *trial-replace-why* "")
+              #t))
+           (else
+            (begin (set! *trial-replace-why* "OLD not found") #f))))))))
+
 (define (trial:mutate! dest change)
   (let ((path (hash-ref change "path" ""))
         (old (hash-ref change "old" ""))
@@ -218,14 +361,12 @@
     (if (or (not (trial:safe-path? path))
             (not (string? old)) (string=? old "")
             (not (string? new)))
-      #f
+      (begin (set! *trial-replace-why* "OLD not found") #f)
       (let* ((full (string-append dest "/" path))
              (text (file-read full)))
-        (if (or (not (string? text)) (not (string-contains? text old)))
-          #f
-          (begin
-            (file-write full (string-replace text old new))
-            #t))))))
+        (if (not (string? text))
+          (begin (set! *trial-replace-why* "OLD not found") #f)
+          (trial:replace-into full text old new))))))
 
 (define (trial:diff-path raw)
   (let ((s (string-trim (if (string? raw) raw ""))))
@@ -333,12 +474,11 @@
        (hash "ok" #f "hunk" n "old" (trial:clip old 160) "now" "missing file"))
       ((string=? old "")
        (hash "ok" #f "hunk" n "old" "" "now" (trial:clip text 240)))
-      ((not (string-contains? text old))
-       (hash "ok" #f "hunk" n "old" (trial:clip old 160) "now" (trial:clip text 240)))
+      ((trial:replace-into full text old neu)
+       (hash "ok" #t "hunk" n "old" "" "now" ""))
       (else
-       (begin
-         (file-write full (string-replace text old neu))
-         (hash "ok" #t "hunk" n "old" "" "now" ""))))))
+       (hash "ok" #f "hunk" n "old" (trial:clip old 160)
+             "now" (trial:clip (string-append (trial:replace-why) "\n" text) 240))))))
 
 (define (trial:apply-diff dest change)
   (let ((task (hash-ref change "task" ""))
@@ -411,7 +551,11 @@
                 "hunk" 0
                 "prior" #f
                 "old" (trial:clip (if (hash? change) (trial:change-old change) "") 160)
-                "now" (trial:clip (if (string? now) now "") 240)))))
+                "now" (trial:clip
+                       (string-append
+                         (if ok "" (string-append (trial:replace-why) "\n"))
+                         (if (string? now) now ""))
+                       240)))))
 
 (define (trial:seen? path seen)
   (let loop ((ys seen))
@@ -477,7 +621,10 @@
                     (if (hash-ref r "prior" #f)
                       "file already changed by an earlier task\n"
                       "")
-                    "OLD not found:\n" (hash-ref r "old" "") "\n"
+                    (if (string-contains? (hash-ref r "now" "") "ambiguous")
+                      "OLD ambiguous:\n"
+                      "OLD not found:\n")
+                    (hash-ref r "old" "") "\n"
                     "file now:\n" (hash-ref r "now" "") "\n"))))))))
 
 (define (trial:wants? contract key)
@@ -628,6 +775,8 @@
   (cond
     ((equal? rg "pass") "redgreen=pass 修复前测试失败，修复后通过\n")
     ((equal? rg "bench") "redgreen=bench 修复前 bench 未达标，修复后达标\n")
+    ((equal? rg "speed") "redgreen=speed 输出一致且耗时改善超过阈值\n")
+    ((equal? rg "apply-failed") "redgreen=apply-failed 补丁没有落地\n")
     ((equal? rg "not-red") "redgreen=not-red 修复前测试已经通过，没有先红\n")
     ((equal? rg "still-red") "redgreen=still-red 修复后测试仍失败\n")
     ((equal? rg "no-bench") "redgreen=no-bench 无 bench\n")
@@ -641,14 +790,103 @@
        "无 bench\n")
       (else (loop (cdr xs))))))
 
+(define (trial:speedup)
+  (let ((v (getenv "AURA_AGENTS_SPEEDUP")))
+    (let ((n (if (and (string? v) (> (string-length v) 0)) (string->number v) #f)))
+      (if (and (number? n) (> n 1)) n 2))))
+
+(define (trial:changed-aura base dest)
+  (let ((out (try (command-output
+                    (string-append "cd " (trial:quote dest)
+                                   " && find . -type f -name '*.aura' 2>/dev/null"))
+                  (catch (e) ""))))
+    (let loop ((xs (text:lines (if (string? out) out ""))) (acc '()))
+      (if (not (pair? xs))
+        (reverse acc)
+        (let ((raw (string-trim (car xs))))
+          (let ((rel (if (string-prefix? raw "./")
+                       (substring raw 2 (string-length raw))
+                       raw)))
+            (if (or (string=? rel "") (not (trial:safe-path? rel)))
+              (loop (cdr xs) acc)
+              (let ((a (file-read (string-append dest "/" rel)))
+                    (b (file-read (string-append base "/" rel))))
+                (loop (cdr xs)
+                      (if (equal? a b) acc (cons rel acc)))))))))))
+
+(define (trial:drop-ms text)
+  (let loop ((xs (text:lines (if (string? text) text ""))) (acc '()))
+    (if (not (pair? xs))
+      (if (pair? acc) (string-join (reverse acc) "\n") "")
+      (if (string-prefix? (string-trim (car xs)) "ms=")
+        (loop (cdr xs) acc)
+        (loop (cdr xs) (cons (car xs) acc))))))
+
+(define (trial:ms-sum text)
+  (let loop ((xs (text:lines (if (string? text) text ""))) (sum 0) (seen #f))
+    (if (not (pair? xs))
+      (if seen sum #f)
+      (let ((line (string-trim (car xs))))
+        (if (string-prefix? line "ms=")
+          (let ((n (string->number (string-trim (text:after line "ms=")))))
+            (if (number? n)
+              (loop (cdr xs) (+ sum n) #t)
+              (loop (cdr xs) sum seen)))
+          (loop (cdr xs) sum seen))))))
+
+(define (trial:run-quiet dir rel)
+  (let ((out (try (command-output
+                    (string-append "cd " (trial:quote dir)
+                                   " && aura run --quiet " rel " 2>/dev/null"))
+                  (catch (e) ""))))
+    (if (string? out) out "")))
+
+(define (trial:timing-files base dest)
+  (let loop ((xs (trial:changed-aura base dest)) (acc '()))
+    (if (not (pair? xs))
+      (reverse acc)
+      (let ((body (file-read (string-append dest "/" (car xs)))))
+        (loop (cdr xs)
+              (if (and (string? body) (string-contains? body "ms="))
+                (cons (car xs) acc)
+                acc))))))
+
+;; Performance work may add a bench or a timing test. KEEP when that
+;; program prints the same lines before and after, and ms= drops by
+;; at least AURA_AGENTS_SPEEDUP (default 2). This does not add p99.
+(define (trial:speed-result base dest requirement)
+  (if (not (contract:perf? requirement))
+    #f
+    (let ((files (trial:timing-files base dest)))
+      (if (not (pair? files))
+        #f
+        (let ((before (trial:red-tree base dest files)))
+          (let loop ((xs files) (bms 0) (ams 0) (ok #t))
+            (if (or (not ok) (not (pair? xs)))
+              (if (and ok (> bms 0) (<= (* ams (trial:speedup)) bms))
+                "speed"
+                #f)
+              (let ((b (trial:run-quiet before (car xs)))
+                    (a (trial:run-quiet dest (car xs))))
+                (let ((bn (trial:ms-sum b))
+                      (an (trial:ms-sum a)))
+                  (loop (cdr xs)
+                        (+ bms (if (number? bn) bn 0))
+                        (+ ams (if (number? an) an 0))
+                        (and (number? bn) (number? an)
+                             (string=? (trial:drop-ms b) (trial:drop-ms a)))))))))))))
+
 ;; New or modified tests must fail on the untouched sources and the
 ;; full suite must pass after the edit. A pure metric change can
 ;; instead show a bench that was not ok before and is ok after.
-(define (trial:redgreen base dest contract)
+;; A performance task can also show equivalent output and a real speedup.
+(define (trial:redgreen base dest contract requirement)
   (let ((changed (trial:changed-tests base dest))
         (green (not (trial:aura-fail? dest "")))
-        (metric (or (trial:wants? contract "p99") (trial:wants? contract "budget"))))
+        (metric (or (trial:wants? contract "p99") (trial:wants? contract "budget")))
+        (speed (trial:speed-result base dest requirement)))
     (cond
+      ((and green (equal? speed "speed")) "speed")
       ((pair? changed)
        (let ((red (trial:red-tree base dest changed)))
          (cond
@@ -690,7 +928,9 @@
              (report (trial:apply-report dest (if (pair? changes) changes '())))
              (tests (trial:observe dest contract))
              (word (trial:applied-word report))
-             (rg (if base (trial:redgreen base dest contract) "not-red")))
+             (rg (if (not (equal? word "all"))
+                   "apply-failed"
+                   (if base (trial:redgreen base dest contract requirement) "not-red"))))
         (set! *trial-report* report)
         (trial:note! (string-append (trial:format-report report)
                                     (trial:redgreen-why rg)
@@ -770,9 +1010,10 @@
                       "(define (marker:done?) #t)"))))))
 
 (define (trial:timeout? text)
-  (and (trial:has? text "SIMULATE-TIMEOUT")
-       (not (trial:has? text "previous reply"))
-       (not (trial:has? text "FEEDBACK"))))
+  (or (trial:has? text "SIMULATE-TIMEOUT-ALWAYS")
+      (and (trial:has? text "SIMULATE-TIMEOUT")
+           (not (trial:has? text "previous reply"))
+           (not (trial:has? text "FEEDBACK")))))
 
 (define (trial:worker-reply text)
   (cond

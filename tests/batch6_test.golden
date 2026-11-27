@@ -1,0 +1,35 @@
+budget-default=16384
+worker-timeout=300
+timeout-retry-0=yes
+timeout-retry-1=no
+parse-retry-1=yes
+slice-fire=ok
+slice-cut=whole
+wide-end=ok
+wide-len=ok
+task-hit=ok
+ws-ok=yes
+ws-body=(define (a:v) 1)
+ws-ambig-apply=no
+ws-ambig=ambiguous exact match
+ws-ambig-body=(define (a:v) 0)
+(define (a:v) 0)
+hunk-ws=pass
+hunk-body=(define (c:v) 2)
+speed-tests=pass
+speed-rg=speed
+speed-applied=all
+speed-p99=no
+speed-budget=no
+slow-rg=not-red
+drift-tests=fail
+drift-rg=still-red
+miss-applied=partial
+miss-rg=apply-failed
+miss-pass=no
+miss-word=said
+worker-error=t reason=http-timeout detail=http-post: timeout
+worker-retry=1
+feedback-summary=previous reply was not a RESULT plus PATCH or MUTATE
+worker-error=t reason=http-timeout detail=http-post: timeout
+timeout-stop=error

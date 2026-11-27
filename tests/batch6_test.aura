@@ -1,0 +1,170 @@
+;; Larger context, unique whitespace match, speed KEEP, apply-failed, timeout.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/llm/chat")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (repeat n ch)
+  (let loop ((i 0) (s ""))
+    (if (>= i n) s (loop (+ i 1) (string-append s ch)))))
+
+(shell "rm -rf out/b6-ctx out/b6-ws out/b6-speed out/b6-slow out/b6-diff out/b6-miss")
+
+(line "budget-default" (trial:context-budget-of ""))
+(line "worker-timeout" (chat:pick-timeout "worker" #f #f))
+(line "timeout-retry-0"
+      (if (orchestrate:should-retry? "http-timeout" 0 2 1) "yes" "no"))
+(line "timeout-retry-1"
+      (if (orchestrate:should-retry? "http-timeout" 1 2 1) "yes" "no"))
+(line "parse-retry-1"
+      (if (orchestrate:should-retry? "parse" 1 2 1) "yes" "no"))
+
+(make-directory "out/b6-ctx/src")
+(file-write "out/b6-ctx/src/level.aura"
+            (string-append "(define (noise) \"" (repeat 700 "X") "\")\n"
+                           "(define (tank:fire) 1)\n"))
+(file-write "out/b6-ctx/src/other.aura" "(define (other:v) 0)\n")
+(define sliced (trial:external-context-budget "out/b6-ctx" "修复 tank:fire" 80))
+(line "slice-fire" (if (string-contains? sliced "(define (tank:fire) 1)") "ok" "bad"))
+(line "slice-cut" (if (string-contains? sliced "XXXX") "cut" "whole"))
+(define wide-body (string-append "(define (tank:fire) \"" (repeat 8400 "Y") "END\")\n"))
+(file-write "out/b6-ctx/src/level.aura" wide-body)
+(define wide (trial:external-context-budget "out/b6-ctx" "修复 tank:fire" 16384))
+(line "wide-end" (if (string-contains? wide "END") "ok" "bad"))
+(line "wide-len" (if (> (string-length wide) 8400) "ok" "bad"))
+(file-write "out/b6-ctx/src/render.aura" "(define (render:frame) 1)\n")
+(define tasked (trial:external-context-budget "out/b6-ctx" "任务\nrender:frame" 16384))
+(line "task-hit" (if (string-contains? tasked "FILE src/render.aura") "ok" "bad"))
+
+(make-directory "out/b6-ws/src")
+(file-write "out/b6-ws/src/a.aura" "(define (a:v)\n  0)\n")
+(line "ws-ok"
+      (if (trial:mutate! "out/b6-ws"
+                         (hash "path" "src/a.aura"
+                               "old" "(define (a:v) 0)"
+                               "new" "(define (a:v) 1)"))
+        "yes" "no"))
+(line "ws-body" (string-trim (file-read "out/b6-ws/src/a.aura")))
+(file-write "out/b6-ws/src/b.aura" "(define (a:v) 0)\n(define (a:v) 0)\n")
+(line "ws-ambig-apply"
+      (if (trial:mutate! "out/b6-ws"
+                         (hash "path" "src/b.aura"
+                               "old" "(define (a:v) 0)"
+                               "new" "(define (a:v) 1)"))
+        "yes" "no"))
+(line "ws-ambig" (trial:replace-why))
+(line "ws-ambig-body" (string-trim (file-read "out/b6-ws/src/b.aura")))
+(file-write "out/b6-ws/src/c.aura" "(define (c:v)\n  1)\n")
+(define hunk
+  (string-append
+    "--- a/src/c.aura\n"
+    "+++ b/src/c.aura\n"
+    "@@ -1 +1 @@\n"
+    "-(define (c:v) 1)\n"
+    "+(define (c:v) 2)\n"))
+(define hrow (car (trial:apply-diff "out/b6-ws"
+                                    (hash "kind" "patch" "task" "h" "diff" hunk))))
+(line "hunk-ws" (if (hash-ref hrow "ok" #f) "pass" "fail"))
+(line "hunk-body" (string-trim (file-read "out/b6-ws/src/c.aura")))
+
+(define (proj root src test golden)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b6\"\nentry = \"src/hot.aura\"\npreset = \"dev\"\nout = \"out\"\n")
+  (file-write (string-append root "/src/hot.aura") src)
+  (file-write (string-append root "/tests/hot_test.aura") test)
+  (file-write (string-append root "/tests/hot_test.golden") golden))
+
+(define hot-test
+  "(require \"src/hot.aura\")\n(display (hot:frame))\n(newline)\n")
+(define bench-diff
+  (string-append
+    "--- /dev/null\n"
+    "+++ b/bench.aura\n"
+    "@@ -0,0 +1,7 @@\n"
+    "+(require \"src/hot.aura\")\n"
+    "+(display \"out=\")\n"
+    "+(display (hot:frame))\n"
+    "+(newline)\n"
+    "+(display \"ms=\")\n"
+    "+(display (hot:cost))\n"
+    "+(newline)\n"))
+
+(define (speed-patch cost-new frame-old frame-new)
+  (string-append
+    "--- a/src/hot.aura\n"
+    "+++ b/src/hot.aura\n"
+    "@@ -1,2 +1,2 @@\n"
+    "-(define (hot:frame) \"" frame-old "\")\n"
+    "+(define (hot:frame) \"" frame-new "\")\n"
+    "-(define (hot:cost) 5900)\n"
+    "+(define (hot:cost) " cost-new ")\n"
+    bench-diff))
+
+(proj "out/b6-speed"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      hot-test "ok\n")
+(trial:set-root! "out/b6-speed")
+(define sped
+  (trial:verdict 9820 "优化渲染耗时" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "speed"
+                             "diff" (speed-patch "80" "ok" "ok")))))
+(line "speed-tests" (text:lookup sped "tests"))
+(line "speed-rg" (text:lookup sped "redgreen"))
+(line "speed-applied" (text:lookup sped "applied"))
+(line "speed-p99" (if (text:lookup sped "p99") "yes" "no"))
+(line "speed-budget" (if (text:lookup sped "budget") "yes" "no"))
+
+(proj "out/b6-slow"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      hot-test "ok\n")
+(trial:set-root! "out/b6-slow")
+(define slow
+  (trial:verdict 9821 "优化渲染耗时" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "slow"
+                             "diff" (speed-patch "4000" "ok" "ok")))))
+(line "slow-rg" (text:lookup slow "redgreen"))
+
+(proj "out/b6-diff"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      hot-test "ok\n")
+(trial:set-root! "out/b6-diff")
+(define drifted
+  (trial:verdict 9822 "优化渲染耗时" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "drift"
+                             "diff" (speed-patch "80" "ok" "no")))))
+(line "drift-tests" (text:lookup drifted "tests"))
+(line "drift-rg" (text:lookup drifted "redgreen"))
+
+(proj "out/b6-miss"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      hot-test "ok\n")
+(trial:set-root! "out/b6-miss")
+(define missed
+  (trial:verdict 9823 "优化渲染耗时" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "miss"
+                             "path" "src/hot.aura"
+                             "old" "(define (hot:cost) missing)"
+                             "new" "(define (hot:cost) 80)"))))
+(trial:set-root! #f)
+(line "miss-applied" (text:lookup missed "applied"))
+(line "miss-rg" (text:lookup missed "redgreen"))
+(line "miss-pass"
+      (if (string-contains? (trial:last-log) "redgreen=pass") "yes" "no"))
+(line "miss-word"
+      (if (string-contains? (trial:last-log) "apply-failed") "said" "quiet"))
+
+(define always
+  (orchestrate:invoke "t" "implement-change" "mock" "local/project" ""
+                      "SIMULATE-TIMEOUT-ALWAYS 修一个标记" "" 3))
+(line "timeout-stop" (car always))
