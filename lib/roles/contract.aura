@@ -90,6 +90,24 @@
         (string-append "\nFEEDBACK\n" feedback)
         ""))))
 
+;; Small requirements stay one task so two patches cannot fight over
+;; the same file. Redis keeps two tasks because they edit two files.
+;; AURA_AGENTS_TASKS, when a positive integer, is the cap instead.
+(define (contract:task-cap-of requirement env)
+  (let ((n (if (and (string? env) (> (string-length env) 0))
+             (string->number env)
+             #f)))
+    (if (and (number? n) (> n 0))
+      (if (integer? n) n (inexact->exact (floor n)))
+      (if (contract:redis? requirement) 2 1))))
+
+(define (contract:limit-tasks requirement tasks env)
+  (let ((cap (contract:task-cap-of requirement env)))
+    (let loop ((xs tasks) (n cap) (acc '()))
+      (if (or (not (pair? xs)) (<= n 0))
+        (reverse acc)
+        (loop (cdr xs) (- n 1) (cons (car xs) acc))))))
+
 (define (contract:redis-reply p99)
   (string-append
     "CONTRACT tests=pass p99=" p99 "\n"

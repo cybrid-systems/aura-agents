@@ -1,3 +1,7 @@
+contract=tests=pass p99=ok
+apply=implement-zrangebyscore:src/zset.aura:pass
+apply=check-p99:src/latency.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=2
@@ -60,6 +64,10 @@ bus-audit=ok
 bus-unhost=ok
 timeout-result=rollback
 timeout-nodes=3
+contract=tests=pass p99=skip
+apply=implement-zrangebyscore:src/zset.aura:pass
+apply=check-p99:src/latency.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=2

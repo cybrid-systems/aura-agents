@@ -11,6 +11,9 @@ direct-gate=rollback
 seed-intact=ok
 overlay=changed
 patch-exec=pass
+contract=tests=pass
+apply=implement-word-count:src/wc.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=2
@@ -40,6 +43,9 @@ keep-tests=pass
 keep-source=exec
 keep-req=ok
 word-result=keep
+contract=tests=pass p99=ok budget=ok
+apply=optimize-hot-path:src/hot.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=2
@@ -67,8 +73,17 @@ bus-audit=ok
 bus-unhost=ok
 perf-result=keep
 perf-gate=ok
+contract=tests=pass
+apply=implement-word-count:src/wc.aura:pass
+test-summary=fail
 worker-retry=1
+contract=tests=pass
+apply=implement-word-count:src/wc.aura:pass
+test-summary=fail
 worker-retry=2
+contract=tests=pass
+apply=implement-word-count:src/wc.aura:pass
+test-summary=fail
 demo=ok
 llm=mock
 workers=2
@@ -97,6 +112,8 @@ bus-unhost=ok
 cheat-self=pass
 cheat-exec=fail
 cheat-result=rollback
+contract=tests=pass p99=ok
+test-summary=missing
 demo=fail
 llm=mock
 workers=0
@@ -126,6 +143,7 @@ zero-workers=0
 zero-refused=cpu
 zero-completed=0
 zero-demo=fail
+planner-retry=1
 llm-error=connection refused
 demo=fail
 llm=mock

@@ -1,0 +1,61 @@
+;; Partial apply still runs tests. A miss is recorded and cannot KEEP.
+(require "std/string")
+(require "lib/text")
+(require "lib/adapt/gate")
+(require "lib/llm/chat")
+(require "lib/roles/contract")
+(require "lib/roles/planner")
+(require "lib/trial/workspace")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(line "planner-default" (chat:pick-timeout "planner" #f #f))
+(line "cap-small" (contract:task-cap-of "写一个单词计数命令行" #f))
+(line "cap-redis" (contract:task-cap-of "给 aura-redis 加 ZRANGEBYSCORE" #f))
+(line "cap-env" (contract:task-cap-of "写一个单词计数命令行" "3"))
+(line "limit"
+      (length (contract:limit-tasks "写一个单词计数命令行"
+                                    '("a" "b" "c") #f)))
+
+(define good (hash "kind" "mutate" "task" "implement-zrangebyscore"
+                   "path" "src/zset.aura"
+                   "old" "(define (zset:zrangebyscore key min max) \"missing\")"
+                   "new" "(define (zset:zrangebyscore key min max) \"1,2,3\")"))
+(define bad (hash "kind" "mutate" "task" "check-p99"
+                  "path" "src/latency.aura"
+                  "old" "(define (latency:floor?) #t)"
+                  "new" "(define (latency:floor?) #t)"))
+(define ev (trial:verdict 9701 "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。"
+                          '(("tests" "pass") ("p99" "ok"))
+                          (list good bad)))
+(line "partial-tests" (text:lookup ev "tests"))
+(line "partial-applied" (text:lookup ev "applied"))
+(define judged (gate:standin (append '(("tests" "pass") ("p99" "ok"))
+                                     '(("applied" "all")))
+                             ev))
+(line "partial-keep" (if (equal? (car judged) "ok") "yes" "no"))
+(define log (trial:last-log))
+(line "feedback-path" (if (string-contains? log "path=src/latency.aura") "ok" "bad"))
+(line "feedback-old" (if (string-contains? log "OLD not found") "ok" "bad"))
+(line "feedback-now" (if (string-contains? log "latency:floor?") "ok" "bad"))
+(line "feedback-bare" (if (string=? log "apply failed") "yes" "no"))
+
+(define first (hash "kind" "mutate" "task" "one" "path" "src/wc.aura"
+                    "old" "(define (wc:count text) 0)"
+                    "new" "(define (wc:count text) (length (string-split-words text)))"))
+(define second (hash "kind" "mutate" "task" "two" "path" "src/wc.aura"
+                     "old" "(define (wc:count text) 0)"
+                     "new" "(define (wc:count text) 2)"))
+(define both (trial:verdict 9702 "写一个单词计数命令行"
+                            '(("tests" "pass"))
+                            (list first second)))
+(line "conflict-tests" (text:lookup both "tests"))
+(line "conflict-applied" (text:lookup both "applied"))
+(line "conflict-earlier"
+      (if (string-contains? (trial:last-log) "earlier task") "ok" "bad"))
+(define conflict-gate (gate:standin '(("tests" "pass") ("applied" "all")) both))
+(line "conflict-keep" (if (equal? (car conflict-gate) "ok") "yes" "no"))

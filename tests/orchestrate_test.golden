@@ -1,3 +1,7 @@
+contract=tests=pass p99=ok
+apply=implement-zrangebyscore:src/zset.aura:pass
+apply=check-p99:src/latency.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=2

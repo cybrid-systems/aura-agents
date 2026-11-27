@@ -7,6 +7,10 @@ junk-reason=parse
 mini-words=ok
 mini-list=ok
 mini-deny=ok
+contract=tests=pass p99=ok
+apply=implement-zrangebyscore:src/zset.aura:pass
+apply=check-p99:src/latency.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=1
@@ -38,7 +42,13 @@ queue-completed=2
 queue-gate=ok
 queue-result=keep
 queue-demo=ok
+contract=tests=pass
+apply=implement-word-count:src/wc.aura:pass
+test-summary=fail
 worker-retry=1
+contract=tests=pass
+apply=implement-word-count:src/wc.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=2
@@ -69,6 +79,9 @@ retry-gate=ok
 retry-demo=ok
 worker-error=w0 reason=parse detail=no RESULT
 worker-retry=1
+contract=tests=pass
+apply=implement-word-count:src/wc.aura:pass
+test-summary=pass
 demo=ok
 llm=mock
 workers=2
