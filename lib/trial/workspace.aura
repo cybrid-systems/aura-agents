@@ -1410,22 +1410,45 @@
       (trial:speed-note! before after requirement)
       "slow")))
 
+;; A speed verdict compares a before-net with an after-net, so the
+;; before-net has to clear the timing noise floor first. That floor is a
+;; wall-clock value while the work per timed iteration depends on the
+;; host, so a fixed iteration count judged the same change as "speed" on
+;; a slow host and as "not measurable" on a fast one. Escalate the timed
+;; workload until the before-net clears the floor; both trees run the
+;; same iteration count, so the ratio the judge uses stays comparable.
+(define trial:timing-floor-ms 100)
+(define trial:timing-rungs '(12 48 192 768))
+
+(define (trial:hot-net-before before hot times)
+  (trial:write-hot before (car hot) (cadr hot) times)
+  (trial:net-ms before))
+
+(define (trial:hot-net-after dest hot times)
+  (trial:write-hot dest (car hot) (cadr hot) times)
+  (trial:net-ms dest))
+
+(define (trial:decide-speed-hot before dest hot requirement)
+  (let loop ((rungs trial:timing-rungs))
+    (if (not (pair? rungs))
+      #f
+      (let ((b (trial:hot-net-before before hot (car rungs))))
+        (cond
+          ((> b trial:timing-floor-ms)
+           (trial:judge-net b (trial:hot-net-after dest hot (car rungs)) requirement))
+          ;; No measurable hot work yet: more iterations cannot expose it.
+          ((<= b 0) #f)
+          (else (loop (cdr rungs))))))))
+
 (define (trial:decide-speed before dest files hot requirement)
   (let ((by-hot (if (pair? hot)
-                  (begin
-                    (trial:write-hot before (car hot) (cadr hot) 12)
-                    (trial:write-hot dest (car hot) (cadr hot) 12)
-                    (let ((b (trial:net-ms before))
-                          (a (trial:net-ms dest)))
-                      (if (> b 100)
-                        (trial:judge-net b a requirement)
-                        #f)))
+                  (trial:decide-speed-hot before dest hot requirement)
                   #f)))
     (if (or (equal? by-hot "speed") (equal? by-hot "slow"))
       by-hot
       (let ((b (trial:file-net before (car files)))
             (a (trial:file-net dest (car files))))
-        (if (> b 100)
+        (if (> b trial:timing-floor-ms)
           (trial:judge-net b a requirement)
           #f)))))
 
