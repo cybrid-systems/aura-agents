@@ -1,0 +1,12 @@
+t4-keys=0
+part-keys=2
+t4-rg=pass
+part-rg=partial
+part-rule=yes
+add-rg=pass
+b3-rg=pass
+c2-rg=toy
+c2-rule=yes
+a2-diff=yes
+ty-loc=yes
+ty-exp=yes

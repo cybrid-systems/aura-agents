@@ -497,7 +497,8 @@
               (file-loop (cdr fs)
                          (append acc (list (hash "task" task "path" path "ok" #f
                                                  "hunk" 0 "prior" #f
-                                                 "old" "no hunk" "now" ""))))
+                                                 "old" "no hunk" "now" ""
+                                                 "diff" "")))))
               (let hunk-loop ((hs hunks) (n 1) (rows '()) (failed #f))
                 (if (or failed (not (pair? hs)))
                   (file-loop (cdr fs) (append acc (reverse rows)))
@@ -508,9 +509,10 @@
                                            "hunk" (hash-ref row "hunk" n)
                                            "prior" #f
                                            "old" (hash-ref row "old" "")
-                                           "now" (hash-ref row "now" ""))
+                                           "now" (hash-ref row "now" "")
+                                           "diff" (trial:clip (hash-ref change "diff" "") 800))
                                      rows)
-                               (not (hash-ref row "ok" #f)))))))))))))
+                               (not (hash-ref row "ok" #f))))))))))))
 
 (define (trial:patch! dest change)
   (let ((rows (trial:apply-diff dest change)))
@@ -555,7 +557,18 @@
                        (string-append
                          (if ok "" (string-append (trial:replace-why) "\n"))
                          (if (string? now) now ""))
-                       240)))))
+                       240)
+                "diff" (trial:clip
+                        (string-append "--- a/" path "\n+++ b/" path "\n-"
+                                       (if (and (hash? change) (string? (hash-ref change "old" "")))
+                                         (hash-ref change "old" "")
+                                         "")
+                                       "\n+"
+                                       (if (and (hash? change) (string? (hash-ref change "new" "")))
+                                         (hash-ref change "new" "")
+                                         "")
+                                       "\n")
+                        800)))))
 
 (define (trial:seen? path seen)
   (let loop ((ys seen))
@@ -850,24 +863,94 @@
   (let ((ids (filter trial:ident-ok? (trial:idents part))))
     (if (pair? ids) (car (reverse ids)) #f)))
 
-(define (trial:listed-keys requirement)
-  (let ((s (contract:scoped (if (string? requirement) requirement ""))))
-    (let ((chunks (append (if (string-contains? s "和") (string-split s "和") '())
-                          (if (string-contains? s "、") (string-split s "、") '()))))
-      (if (< (length chunks) 2)
-        '()
-        (let loop ((xs chunks) (acc '()))
-          (if (not (pair? xs))
-            (reverse acc)
-            (let ((k (trial:edge-ident (car xs))))
-              (loop (cdr xs) (if k (cons k acc) acc)))))))))
+;; Only 「键 name」 and 「name 是/为 …」 are subconditions. A coordinate
+;; list such as (8,0)、(10,0) 和其它行 has no key.
+(define (trial:earliest s from marks)
+  (let loop ((xs marks) (best -1))
+    (if (not (pair? xs))
+      (if (< best 0) (string-length s) best)
+      (let ((j (string-index s (car xs) from)))
+        (loop (cdr xs)
+              (if (or (not (number? j)) (< j 0))
+                best
+                (if (or (< best 0) (< j best)) j best)))))))
 
-(define (trial:missing-keys requirement tests)
-  (let ((keys (trial:listed-keys requirement)))
-    (if (< (length keys) 2)
-      '()
-      (filter (lambda (k) (not (string-contains? (if (string? tests) tests "") k)))
-              keys))))
+(define (trial:key-regions s)
+  (let ((n (string-length s))
+        (mark "键"))
+    (let loop ((i 0) (acc '()))
+      (if (>= i n)
+        (reverse acc)
+        (let ((j (string-index s mark i)))
+          (if (or (not (number? j)) (< j 0))
+            (reverse acc)
+            (let ((from (+ j (string-length mark))))
+              (let ((to (trial:earliest s from '("是" "为" "都" "必须" "\n"))))
+                (loop to (cons (substring s from to) acc))))))))))
+
+(define (trial:is-key? s ident)
+  (let ((j (string-index s ident 0)))
+    (if (or (not (number? j)) (< j 0))
+      #f
+      (let ((rest (string-trim (substring s (+ j (string-length ident)) (string-length s)))))
+        (or (string-prefix? rest "是")
+            (string-prefix? rest "为"))))))
+
+(define (trial:dedupe xs)
+  (let loop ((xs xs) (acc '()))
+    (if (not (pair? xs))
+      (reverse acc)
+      (loop (cdr xs)
+            (if (member? (car xs) acc) acc (cons (car xs) acc))))))
+
+(define (trial:key-names requirement)
+  (let ((s (contract:scoped (if (string? requirement) requirement ""))))
+    (let ((from-key (let loop ((xs (trial:key-regions s)) (acc '()))
+                      (if (not (pair? xs))
+                        acc
+                        (loop (cdr xs) (append acc (trial:idents (car xs)))))))
+          (from-is (filter (lambda (id) (trial:is-key? s id)) (trial:idents s))))
+      (trial:dedupe (append from-key from-is)))))
+
+(define (trial:param-fns text)
+  (let loop ((xs (text:lines (if (string? text) text ""))) (acc '()))
+    (if (not (pair? xs))
+      (reverse acc)
+      (let ((line (string-trim (car xs))))
+        (if (and (string-prefix? line "(define (") (not (trial:zero-arg? line)))
+          (let ((name (trial:fn-name line)))
+            (loop (cdr xs) (if (> (string-length name) 0) (cons name acc) acc)))
+          (loop (cdr xs) acc))))))
+
+;; A key that still returns the base value was not implemented. A key
+;; whose dest value moved was. Mixed coverage is partial. Coordinates
+;; never reach this probe.
+(define (trial:partial-evidence base dest requirement)
+  (let ((keys (trial:key-names requirement))
+        (names (trial:param-fns (trial:changed-src-text base dest))))
+    (if (or (< (length keys) 2) (not (pair? names)))
+      #f
+      (let ((name (car names))
+            (rel (trial:fn-file dest name)))
+        (if (not rel)
+          #f
+          (let ((brel (trial:fn-file base name)))
+            (let loop ((xs keys) (same "") (moved ""))
+              (if (not (pair? xs))
+                (if (and (> (string-length same) 0) (> (string-length moved) 0))
+                  (string-append "rule=partial evidence=" same)
+                  #f)
+                (let* ((k (car xs))
+                       (a (if brel (trial:probe base brel name k) ""))
+                       (d (trial:probe dest rel name k))
+                       (bit (string-append "key " k " base=" a " dest=" d)))
+                  (if (equal? a d)
+                    (loop (cdr xs)
+                          (if (> (string-length same) 0) same bit)
+                          moved)
+                    (loop (cdr xs)
+                          same
+                          (if (> (string-length moved) 0) moved bit))))))))))))
 
 (define (trial:allowed-new? rel)
   (or (and (string-prefix? rel "src/") (string-suffix? rel ".aura"))
@@ -886,9 +969,16 @@
 (define (trial:harness-file? rel)
   (or (string=? rel "test.out")
       (string=? rel "test.err")
-      (string=? rel "bench.out")))
+      (string=? rel "bench.out")
+      (string=? rel "timed.out")
+      (string=? rel "timed.ms")))
 
 (define *trial-junk* '())
+(define *trial-rule* "")
+
+(define (trial:hold rg detail)
+  (set! *trial-rule* (if (string? detail) (string-append detail "\n") ""))
+  rg)
 
 (define (trial:sweep-junk! base dest)
   (let ((out (try (command-output
@@ -921,13 +1011,13 @@
     ((equal? rg "speed") "redgreen=speed 输出一致且耗时改善超过阈值\n")
     ((equal? rg "apply-failed") "redgreen=apply-failed 补丁没有落地\n")
     ((equal? rg "not-red") "redgreen=not-red 测试在原代码上未失败，没有先红。请重写断言，使新测试在原代码上失败、在改后的代码上通过\n")
-    ((equal? rg "toy") "redgreen=toy 常量实现，或新测试只覆盖单一输入，或变体输入不符合需求\n")
+    ((equal? rg "toy") (string-append "redgreen=toy 常量实现，或新测试只覆盖单一输入，或变体输入不符合需求\n" *trial-rule*))
     ((equal? rg "still-red") "redgreen=still-red 修复后测试仍失败\n")
     ((equal? rg "no-bench") "redgreen=no-bench 无 bench\n")
     ((equal? rg "missing-file") "redgreen=missing-file 新测试没有因断言失败，失败原因是缺文件\n")
     ((equal? rg "missing-golden") (trial:golden-feedback dest))
-    ((equal? rg "partial") "redgreen=partial 需求里的子条件没有逐条断言\n")
-    ((equal? rg "tamper") "redgreen=tamper 改了既有 golden 或既有测试，任务没有要求\n")
+    ((equal? rg "partial") (string-append "redgreen=partial 需求里的子条件没有逐条断言\n" *trial-rule*))
+    ((equal? rg "tamper") (string-append "redgreen=tamper 改了既有 golden 或既有测试，任务没有要求\n" *trial-rule*))
     (else (string-append "redgreen=" (if (string? rg) rg "") "\n"))))
 
 (define (trial:no-bench-note evidence)
@@ -1200,9 +1290,29 @@
       (loop (cdr xs)
             (if (trial:existed? base (car xs)) (cons (car xs) acc) acc)))))
 
-(define (trial:tamper? base dest requirement)
-  (and (not (contract:allows-test-edit? requirement))
-       (pair? (trial:tampered base dest))))
+;; Appending lines keeps every old byte in place. Editing or deleting
+;; an existing assertion is tamper.
+(define (trial:append-only? old new)
+  (and (string? old)
+       (string? new)
+       (string-prefix? new old)))
+
+(define (trial:tamper-evidence base dest requirement)
+  (if (contract:allows-test-edit? requirement)
+    #f
+    (let loop ((xs (trial:tampered base dest)) (bad ""))
+      (if (not (pair? xs))
+        (if (> (string-length bad) 0)
+          (string-append "rule=tamper evidence=" bad)
+          #f)
+        (let ((rel (car xs)))
+          (if (trial:append-only? (file-read (string-append base "/" rel))
+                                  (file-read (string-append dest "/" rel)))
+            (loop (cdr xs) bad)
+            (loop (cdr xs)
+                  (if (> (string-length bad) 0)
+                    (string-append bad " " rel)
+                    rel))))))))
 
 (define (trial:string-lits text)
   (let ((s (if (string? text) text ""))
@@ -1344,54 +1454,94 @@
         (trial:shell (string-append "rm -f " (trial:quote (string-append dest "/_probe.aura"))))
         (string-trim out)))))
 
-;; Compare a variant the tests never used with the requirement's
-;; property. A hardcoded branch fails that variant; a real fix does not.
+(define (trial:word-inputs dest)
+  (cons "alpha beta gamma"
+        (let loop ((xs (trial:input-lits (trial:all-test-text dest))) (n 0) (acc '()))
+          (if (or (not (pair? xs)) (>= n 6))
+            (reverse acc)
+            (loop (cdr xs) (+ n 1) (cons (car xs) acc))))))
+
+;; "ok" when a spaced input and its unseen variant both match the
+;; reference. A failure string when a spaced input matches and the
+;; variant does not. #f when this function is not a word counter.
+;; The literals come from the tests plus a fixed sentence, so a
+;; let-bound or one-line call is judged the same way.
+(define (trial:word-diff dest rel name)
+  (let loop ((xs (trial:word-inputs dest)) (ok #f))
+    (if (not (pair? xs))
+      (if ok "ok" #f)
+      (let* ((lit (car xs))
+             (got (trial:probe dest rel name lit))
+             (ref (trial:word-ref lit)))
+        (if (not (equal? got ref))
+          (loop (cdr xs) ok)
+          (let* ((v (trial:variant lit))
+                 (got2 (trial:probe dest rel name v))
+                 (ref2 (trial:word-ref v)))
+            (if (equal? got2 ref2)
+              (loop (cdr xs) (or ok (string-contains? lit " ")))
+              (if (string-contains? lit " ")
+                (string-append "rule=variant evidence=input=" v " got=" got2 " ref=" ref2)
+                (loop (cdr xs) ok)))))))))
+
+(define (trial:space-diff dest rel name)
+  (let ((a (trial:probe dest rel name "a b"))
+        (b (trial:probe dest rel name "q r"))
+        (c (trial:probe dest rel name "ab")))
+    (cond
+      ((not (equal? a b))
+       (string-append "rule=variant evidence=input=q r got=" b " ref=" a))
+      ((and (not (equal? a c)) (> (string-length a) 0)) "ok")
+      (else #f))))
+
+(define (trial:worse a b)
+  (cond
+    ((and (string? a) (not (equal? a "ok"))) a)
+    ((and (string? b) (not (equal? b "ok"))) b)
+    ((or (equal? a "ok") (equal? b "ok")) "ok")
+    (else #f)))
+
+(define (trial:fn-diff dest requirement name rel)
+  (trial:worse
+    (if (trial:word-req? requirement) (trial:word-diff dest rel name) #f)
+    (if (trial:space-req? requirement) (trial:space-diff dest rel name) #f)))
+
+;; "ok" if some changed function meets the requirement on an unseen
+;; input. A rule=variant string if one fails that input. #f if no
+;; property applies. Call shape in the test does not matter.
 (define (trial:diff-toy? base dest requirement)
-  (let ((calls (trial:fn-calls (trial:all-test-text dest))))
-    (let loop ((xs calls))
-      (if (not (pair? xs))
-        #f
-        (let* ((name (car (car xs)))
-               (lit (cadr (car xs)))
-               (rel (trial:fn-file dest name)))
+  (let loop ((xs (trial:param-fns (trial:changed-src-text base dest))) (fail #f) (ok #f))
+    (if (not (pair? xs))
+      (if ok "ok" fail)
+      (let ((rel (trial:fn-file dest (car xs))))
+        (let ((got (if rel (trial:fn-diff dest requirement (car xs) rel) #f)))
           (cond
-            ((and (trial:word-req? requirement) rel)
-             (let ((seen (trial:probe dest rel name lit))
-                   (ref0 (trial:word-ref lit)))
-               (if (not (equal? seen ref0))
-                 (loop (cdr xs))
-                 (let ((got (trial:probe dest rel name (trial:variant lit)))
-                       (ref (trial:word-ref (trial:variant lit))))
-                   (if (equal? got ref)
-                     (loop (cdr xs))
-                     "variant")))))
-            ((and (trial:space-req? requirement) rel (string-contains? lit " "))
-             (let ((a (trial:probe dest rel name lit))
-                   (b (trial:probe dest rel name (trial:spaced-variant lit))))
-               (if (equal? a b)
-                 (loop (cdr xs))
-                 "variant")))
-            (else (loop (cdr xs)))))))))
+            ((equal? got "ok") (loop (cdr xs) fail #t))
+            ((string? got) (loop (cdr xs) got ok))
+            (else (loop (cdr xs) fail ok))))))))
 
 (define (trial:toy-reason base dest requirement)
   (let ((src (trial:changed-src-text base dest))
         (fresh (trial:new-test-text base dest))
         (lits (trial:input-lits fresh))
-        (blob (trial:blob dest)))
-    (cond
-      ((let scan ((xs (text:lines src)))
-         (cond
-           ((not (pair? xs)) #f)
-           ((trial:const-def? (car xs)) #t)
-           ((trial:shown-const? (car xs) blob) #t)
-           (else (scan (cdr xs)))))
-       "constant")
-      ((and (> (string-length fresh) 0)
-            (= (length lits) 1)
-            (not (string-contains? fresh "(if ")))
-       "single")
-      ((trial:diff-toy? base dest requirement) "variant")
-      (else #f))))
+        (blob (trial:blob dest))
+        (diff (trial:diff-toy? base dest requirement)))
+    (let ((constant (let scan ((xs (text:lines src)))
+                      (cond
+                        ((not (pair? xs)) #f)
+                        ((or (trial:const-def? (car xs))
+                             (trial:shown-const? (car xs) blob))
+                         (string-trim (car xs)))
+                        (else (scan (cdr xs)))))))
+      (cond
+        (constant (string-append "rule=constant evidence=" constant))
+        ((and (string? diff) (not (equal? diff "ok"))) diff)
+        ((and (not (equal? diff "ok"))
+              (> (string-length fresh) 0)
+              (= (length lits) 1)
+              (not (string-contains? fresh "(if ")))
+         (string-append "rule=single evidence=lit=" (car lits)))
+        (else #f)))))
 
 (define (trial:changed-aura base dest)
   (let ((out (try (command-output
@@ -1420,11 +1570,15 @@
   (let ((changed (trial:changed-tests base dest))
         (green (not (trial:aura-fail? dest "")))
         (metric (or (trial:wants? contract "p99") (trial:wants? contract "budget")))
-        (speed (trial:harness-speed base dest requirement)))
+        (speed (trial:harness-speed base dest requirement))
+        (tamp (trial:tamper-evidence base dest requirement))
+        (toy (trial:toy-reason base dest requirement))
+        (part (trial:partial-evidence base dest requirement)))
+    (set! *trial-rule* "")
     (cond
-      ((trial:tamper? base dest requirement) "tamper")
+      (tamp (trial:hold "tamper" tamp))
       ((and green (equal? speed "speed"))
-       (if (trial:toy-reason base dest requirement) "toy" "speed"))
+       (if toy (trial:hold "toy" toy) "speed"))
       ((pair? changed)
        (let* ((red (trial:red-tree base dest changed))
               (red-fail (trial:aura-fail? red (trial:test-args changed)))
@@ -1434,10 +1588,8 @@
            ((pair? (trial:missing-goldens dest)) "missing-golden")
            ((not green) "still-red")
            ((not red-fail) "not-red")
-           ((and (equal? kind "assert")
-                 (pair? (trial:missing-keys requirement (trial:all-test-text dest))))
-            "partial")
-           ((and (equal? kind "assert") (trial:toy-reason base dest requirement)) "toy")
+           (toy (trial:hold "toy" toy))
+           (part (trial:hold "partial" part))
            ((equal? kind "assert") "pass")
            (else "not-red"))))
       ((and metric (trial:has-bench? dest))
@@ -1446,16 +1598,16 @@
          (let ((b (text:lookup before "p99"))
                (a (text:lookup after "p99")))
             (cond
-             ((trial:toy-reason base dest requirement) "toy")
+             (toy (trial:hold "toy" toy))
              ((not (string? a)) "no-bench")
              ((and (equal? a "ok") (not (equal? b "ok"))) "bench")
              ((not green) "still-red")
              (else "not-red")))))
       ((not green) "still-red")
       ((not (trial:aura-fail? base "")) "not-red")
-      ((pair? (trial:missing-keys requirement (trial:all-test-text dest))) "partial")
+      (toy (trial:hold "toy" toy))
+      (part (trial:hold "partial" part))
       ((pair? (trial:missing-goldens dest)) "missing-golden")
-      ((trial:toy-reason base dest requirement) "toy")
       (else "pass"))))
 
 (define (trial:prepare ws requirement)
@@ -1474,24 +1626,31 @@
 (define (trial:evidence dest base requirement contract report)
   (let ((tests (trial:observe dest contract))
         (word (trial:applied-word report))
-        (rg (if (not (equal? word "all"))
-              "apply-failed"
-              (if base (trial:redgreen base dest contract requirement) "not-red"))))
+        (captured (trial:last-log)))
+    (set! *trial-rule* "")
+    (let ((rg (if (not (equal? word "all"))
+                "apply-failed"
+                (if base (trial:redgreen base dest contract requirement) "not-red"))))
     (set! *trial-report* report)
     (trial:sweep-junk! base dest)
     (trial:note! (string-append (trial:format-report report)
                                 (trial:redgreen-why rg dest)
+                                (let ((rows (trial:conflict-rows report)))
+                                  (if (and (string? dest) (pair? rows))
+                                    (string-append (trial:rebase-note dest (car rows)) "\n")
+                                    ""))
+                                (trial:type-note captured)
                                 (if (pair? *trial-junk*)
                                   (string-append "junk-removed=" (string-join *trial-junk* ",") "\n")
                                   "")
                                 (if (trial:unstable?) "test-unstable=yes\n" "")
                                 (trial:no-bench-note tests)
-                                (trial:unbound-hint (trial:last-log))
+                                (trial:unbound-hint captured)
                                 "TEST\n"
-                                (trial:last-log)))
+                                captured))
     (append tests
             (list (list "applied" word) (list "redgreen" rg))
-            (if (trial:unstable?) (list (list "test-unstable" "yes")) '()))))
+            (if (trial:unstable?) (list (list "test-unstable" "yes")) '())))))
 
 (define (trial:verdict ws requirement contract changes)
   (let* ((dest (trial:prepare ws requirement))
@@ -1554,10 +1713,60 @@
                      (trial:ok-path? (hash-ref r "path" "") report))))
           (if (pair? report) report '())))
 
+(define (trial:prior-diff-text path)
+  (let loop ((xs (trial:last-report)) (acc ""))
+    (if (not (pair? xs))
+      acc
+      (let ((r (car xs)))
+        (if (and (hash? r)
+                 (hash-ref r "ok" #f)
+                 (equal? (hash-ref r "path" "") path))
+          (loop (cdr xs) (string-append acc (hash-ref r "diff" "") "\n"))
+          (loop (cdr xs) acc))))))
+
+;; The later task sees the KEEP diff that already landed and the file
+;; as it is now, so OLD is written against that text.
 (define (trial:rebase-note dest row)
   (let* ((path (hash-ref row "path" ""))
          (body (file-read (string-append dest "/" path))))
-    (string-append "rebase\nCURRENT " path "\n" (if (string? body) body ""))))
+    (string-append "rebase\nPRIOR DIFF\n"
+                   (trial:prior-diff-text path)
+                   "CURRENT " path "\n"
+                   (if (string? body) body ""))))
+
+(define (trial:take-until s from mark)
+  (let ((j (string-index s mark from)))
+    (if (or (not (number? j)) (< j 0))
+      ""
+      (string-trim (substring s from j)))))
+
+(define (trial:type-line line)
+  (let ((exp-at (string-index line "expected " 0)))
+    (if (or (not (number? exp-at)) (< exp-at 0))
+      ""
+      (let ((expected (trial:take-until line (+ exp-at 9) ","))
+            (got-at (string-index line "got " 0))
+            (err-at (string-index line "error: " 0))
+            (in-at (string-index line "(in " 0)))
+        (let ((got (if (or (not (number? got-at)) (< got-at 0))
+                     ""
+                     (trial:take-until line (+ got-at 4) " ")))
+              (loc (if (or (not (number? err-at)) (< err-at 0))
+                     ""
+                     (trial:take-until line (+ err-at 7) ": type")))
+              (expr (if (or (not (number? in-at)) (< in-at 0))
+                      ""
+                      (trial:take-until line (+ in-at 4) ")"))))
+          (string-append "type-error location=" loc
+                         " expected=" expected
+                         " got=" got
+                         " expr=" expr "\n"))))))
+
+(define (trial:type-note text)
+  (let loop ((xs (text:lines (if (string? text) text ""))) (acc ""))
+    (if (not (pair? xs))
+      acc
+      (loop (cdr xs) (string-append acc (trial:type-line (car xs)))))))
 
 (define (trial:kept-file dest path)
   (let ((body (file-read (string-append dest "/" path))))
