@@ -62,6 +62,23 @@ def gh_json(url: str) -> dict:
         return json.load(resp)
 
 
+def gh_bytes(url: str) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "aura-agents-baseline",
+        },
+    )
+    token = __import__("os").environ.get("GITHUB_TOKEN") or __import__(
+        "os"
+    ).environ.get("GH_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
 def ghcr_digest(image: str = AURA_CI_IMAGE) -> str:
     token_url = f"https://ghcr.io/token?scope=repository:{image.split('/', 1)[1]}:pull&service=ghcr.io"
     with urllib.request.urlopen(token_url, timeout=20) as resp:
@@ -88,18 +105,35 @@ def fetch_upstream() -> dict:
     if not m:
         raise ValueError("nightly release body has no commit sha")
     short = m.group(1)
-    full = gh_json(f"https://api.github.com/repos/{AURA_REPO}/commits/{short}")["sha"]
-    assets = {}
-    for arch, name in (
-        ("linux-x86_64", "aura-nightly-linux-x86_64.tar.gz"),
-        ("linux-arm64", "aura-nightly-linux-arm64.tar.gz"),
-    ):
-        found = next(
-            (a for a in release.get("assets", []) if a.get("name") == name), None
+    # The manifest is the immutable-build contract: each entry names the
+    # per-build asset to pin, not the rolling alias that moves every push.
+    assets_by_name = {a.get("name"): a for a in release.get("assets", [])}
+    manifest_asset = assets_by_name.get("aura-nightly-manifest.json")
+    if not manifest_asset or not manifest_asset.get("url"):
+        raise ValueError("nightly release has no aura-nightly-manifest.json")
+    manifest = json.loads(gh_bytes(manifest_asset["url"]))
+    if manifest.get("schema") != 1:
+        raise ValueError("nightly manifest schema is not 1")
+    full = manifest.get("commit", "")
+    if not HEX40.fullmatch(full):
+        raise ValueError("nightly manifest commit is not a 40-char sha")
+    if not full.startswith(short):
+        raise ValueError(
+            f"nightly manifest commit {full} does not match release notes {short}"
         )
-        if not found or not found.get("digest", "").startswith("sha256:"):
-            raise ValueError(f"nightly asset missing digest: {name}")
-        assets[arch] = {"name": name, "sha256": found["digest"].removeprefix("sha256:")}
+    assets = {}
+    for arch in ("linux-x86_64", "linux-arm64"):
+        entry = manifest.get("assets", {}).get(arch, {}).get("immutable", {})
+        name = entry.get("name", "")
+        sha = entry.get("sha256", "")
+        if not isinstance(name, str) or not name or "/" in name:
+            raise ValueError(f"nightly manifest {arch}.immutable.name is invalid")
+        if not isinstance(sha, str) or not SHA256.fullmatch(sha):
+            raise ValueError(f"nightly manifest {arch}.immutable.sha256 is invalid")
+        found = assets_by_name.get(name)
+        if not found or found.get("digest") != f"sha256:{sha}":
+            raise ValueError(f"nightly manifest asset missing or digest mismatch: {name}")
+        assets[arch] = {"name": name, "sha256": sha}
     return {
         "commit_sha": full,
         "nightly_updated_at": release.get("updated_at", ""),
@@ -117,6 +151,12 @@ def make_baseline(current: dict, upstream: dict) -> dict:
     data["aura"]["nightly_updated_at"] = upstream.get("nightly_updated_at", "")
     data["aura"]["assets"] = upstream["assets"]
     data["aura_ci"]["digest"] = upstream["aura_ci_digest"]
+    data["notes"] = (
+        f"Aura main green nightly at {upstream['commit_sha'][:9]}; "
+        "each asset is the immutable per-build archive named by the nightly "
+        "manifest, not the rolling alias. Bump this file only through a "
+        "reviewed PR; never touch tags or releases."
+    )
     validate(data)
     return data
 
