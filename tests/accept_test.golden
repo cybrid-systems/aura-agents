@@ -14,6 +14,7 @@ patch-exec=pass
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=pass
+redgreen=pass
 demo=ok
 llm=mock
 workers=2
@@ -46,6 +47,7 @@ word-result=keep
 contract=tests=pass p99=ok budget=ok
 apply=optimize-hot-path:src/hot.aura:pass
 test-summary=pass
+redgreen=bench
 demo=ok
 llm=mock
 workers=2
@@ -76,16 +78,19 @@ perf-gate=ok
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=fail
+redgreen=still-red
 worker-retry=1
-feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golden at line 1:     want: 3    
+feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass redgreen=still-red 修复后测试仍失败 TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golde
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=fail
+redgreen=still-red
 worker-retry=2
-feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golden at line 1:     want: 3    
+feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass redgreen=still-red 修复后测试仍失败 TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golde
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=fail
+redgreen=still-red
 demo=ok
 llm=mock
 workers=2
@@ -116,6 +121,7 @@ cheat-exec=fail
 cheat-result=rollback
 contract=tests=pass p99=ok
 test-summary=missing
+redgreen=missing
 demo=fail
 llm=mock
 workers=0

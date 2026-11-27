@@ -322,12 +322,27 @@
   (display "test-summary=")
   (let ((t (text:lookup evidence "tests")))
     (display (if (string? t) t "missing")))
+  (newline)
+  (display "redgreen=")
+  (let ((g (text:lookup evidence "redgreen")))
+    (display (if (string? g) g "missing")))
   (newline))
 
 (define (orchestrate:with-applied contract)
   (if (text:lookup contract "applied")
     contract
     (append contract (list (list "applied" "all")))))
+
+;; KEEP needs a red-then-green test, or a bench that was short before
+;; and met after. A bench result is the expected value in that case.
+(define (orchestrate:with-redgreen contract evidence)
+  (if (text:lookup contract "redgreen")
+    contract
+    (append contract
+            (list (list "redgreen"
+                        (if (equal? (text:lookup evidence "redgreen") "bench")
+                          "bench"
+                          "pass"))))))
 
 (define (orchestrate:rerun mode target context requirement feedback)
   (let loop ((specs *orchestrate-specs*) (acc '()))
@@ -404,7 +419,11 @@
         (hash-set! flags "bus-trial" (orchestrate:flag tr))
         (if (orchestrate:ok? tr)
           (let ((d (judge:decide judge-s (cadr tr)
-                                 (if ready (orchestrate:with-applied contract) contract)
+                                 (if ready
+                                   (orchestrate:with-redgreen
+                                     (orchestrate:with-applied contract)
+                                     evidence)
+                                   contract)
                                  (if ready evidence '())
                                  (hash "self-tests" (orchestrate:self-tests results)))))
             (hash-set! flags "gate-backend" (gate:backend))
@@ -631,7 +650,7 @@
                       given
                       (let ((root (trial:root)))
                         (if root
-                          (trial:external-context root)
+                          (trial:external-context root requirement)
                           (trial:fixture-context (contract:kind requirement)))))))
          (fp (query:fingerprint target requirement))
          (graph-on (orchestrate:graph-on? cfg))

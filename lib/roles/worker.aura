@@ -85,8 +85,24 @@
            (loop (cdr xs) pairs changes #f '()))))
       (else (loop (cdr xs) pairs changes #f '())))))
 
+(define (worker:timeout? reason)
+  (or (string-contains? reason "timeout")
+      (string-contains? reason "timed out")))
+
+;; A transport ERROR is not a parse failure. Timeouts stay retryable.
+(define (worker:transport text)
+  (let ((s (string-trim (text:strip-noise (if (string? text) text "")))))
+    (if (string-prefix? s "ERROR")
+      (let ((reason (string-trim (substring s 5 (string-length s)))))
+        (if (worker:timeout? reason)
+          (list "error" "http-timeout" reason)
+          (list "error" "llm" reason)))
+      #f)))
+
 (define (worker:run spec mode)
   (let ((system (read-file "prompts/worker.txt")))
     (if (not (string? system))
       (list "error" "prompt" "missing worker prompt")
-      (worker:parse (chat:complete mode "worker" system spec)))))
+      (let ((reply (chat:complete mode "worker" system spec)))
+        (let ((bad (worker:transport reply)))
+          (if bad bad (worker:parse reply)))))))
