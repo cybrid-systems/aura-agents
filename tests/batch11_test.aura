@@ -1,0 +1,93 @@
+;; not-red rewrite budget, probe evidence, speed threshold, full current file.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(line "fast-2" (if (trial:fast-enough? 100 40 "至少2倍") "yes" "no"))
+(line "fast-miss" (if (trial:fast-enough? 100 60 "至少2倍") "yes" "no"))
+(line "fast-goal" (if (trial:fast-enough? 100 30 "降到 40") "yes" "no"))
+(line "slow-retry" (if (orchestrate:should-rerun? '(("redgreen" "slow")) 0 5 0) "yes" "no"))
+(line "slow-stop" (if (orchestrate:should-rerun? '(("redgreen" "slow")) 1 0 0) "yes" "no"))
+(line "apply-stop" (if (orchestrate:should-rerun? '(("redgreen" "apply-failed") ("applied" "partial") ("tests" "pass")) 0 0 0) "yes" "no"))
+(line "notred-free" (if (orchestrate:should-rerun? '(("redgreen" "not-red") ("applied" "all") ("tests" "pass")) 0 9 0) "yes" "no"))
+
+(shell "rm -rf out/b11-t1c out/b11-weak out/b11-long")
+
+(define (tree root)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b11\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n"))
+
+(tree "out/b11-t1c")
+(file-write "out/b11-t1c/src/main.aura" "(require \"src/sp.aura\")\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b11-t1c/src/sp.aura" "(define (sp:has? s) \"no\")\n")
+(trial:set-root! "out/b11-t1c")
+(define t1c
+  (trial:verdict 9920 "判断字符串是否含有空格" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t1c" "path" "src/sp.aura"
+                             "old" "(define (sp:has? s) \"no\")"
+                             "new" "(define (sp:has? s)\n  (let loop ((i 0))\n    (if (>= i (string-length s)) \"no\"\n      (if (equal? (substring s i (+ i 1)) \" \") \"yes\" (loop (+ i 1))))))")
+                       (hash "kind" "patch" "task" "t1c" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/sp_test.aura\n@@ -0,0 +1,2 @@\n"
+                               "+(display \"ok\")\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/sp_test.golden\n@@ -0,0 +1 @@\n+ok\n")))))
+(line "t1c-rg" (text:lookup t1c "redgreen"))
+(line "t1c-probe" (if (and (string-contains? (trial:last-log) "rule=probe")
+                           (string-contains? (trial:last-log) "base=no")
+                           (string-contains? (trial:last-log) "dest=yes"))
+                    "yes" "no"))
+
+(tree "out/b11-weak")
+(file-write "out/b11-weak/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b11-weak/src/n.aura" "(define (n:v) 0)\n")
+(trial:set-root! "out/b11-weak")
+(define weak
+  (trial:verdict 9921 "改一下 n" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "weak" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)")
+                       (hash "kind" "patch" "task" "weak" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/n_test.aura\n@@ -0,0 +1,2 @@\n"
+                               "+(display \"ok\")\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/n_test.golden\n@@ -0,0 +1 @@\n+ok\n")))))
+(line "weak-rg" (text:lookup weak "redgreen"))
+(line "weak-out" (if (and (string-contains? (trial:last-log) "原码输出:")
+                          (string-contains? (trial:last-log) "ok"))
+                   "yes" "no"))
+
+(tree "out/b11-long")
+(file-write "out/b11-long/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b11-long/src/n.aura"
+            (string-append ";; "
+                           "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                           "\n(define (n:v) 0)\n;; MARKER-END\n"))
+(file-write "out/b11-long/tests/n_test.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b11-long/tests/n_test.golden" "2\n")
+(trial:set-root! "out/b11-long")
+(define long
+  (trial:verdict 9922 "同一文件 A1 然后 A2" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "a1" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)")
+                       (hash "kind" "mutate" "task" "a2" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 2)"))))
+(define note (trial:rebase-note (trial:current-dest)
+                                (car (trial:conflict-rows (trial:last-report)))))
+(line "long-mark" (if (and (string-contains? note "MARKER-END")
+                           (string-contains? note "(define (n:v) 1)")
+                           (string-contains? note "PRIOR DIFF")
+                           (string-contains? (trial:last-log) "MARKER-END")
+                           (string-contains? (trial:last-log) "(define (n:v) 1)"))
+                  "yes" "no"))

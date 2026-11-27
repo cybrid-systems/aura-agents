@@ -1,0 +1,12 @@
+fast-2=yes
+fast-miss=no
+fast-goal=yes
+slow-retry=yes
+slow-stop=no
+apply-stop=no
+notred-free=yes
+t1c-rg=pass
+t1c-probe=yes
+weak-rg=not-red
+weak-out=yes
+long-mark=yes
