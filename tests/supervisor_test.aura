@@ -43,6 +43,13 @@
 (line "case-f-workers" (hash-ref f "workers"))
 (line "case-f-reason" (hash-ref f "reason"))
 
+(define sized-a (sized 8 0.2 8000000))
+(line "override-workers" (hash-ref (supervisor:with-override sized-a "2") "workers"))
+(line "override-reason" (hash-ref (supervisor:with-override sized-a "2") "reason"))
+(line "override-zero" (hash-ref (supervisor:with-override sized-a "0") "workers"))
+(line "override-unset" (hash-ref (supervisor:with-override sized-a "") "workers"))
+(line "override-bad" (hash-ref (supervisor:with-override sized-a "nope") "reason"))
+
 (define live (supervisor:read-sample))
 (define live-sized (supervisor:size live))
 (line "live-probe"

@@ -1,0 +1,1 @@
+(define (hot:cost) 100)

@@ -20,7 +20,7 @@ jobs:
       - name: Test
         env:
           AURA_AGENTS_LLM: mock
-        run: aura test
+        run: aura test --grant exec
       - name: Mock-LLM demo smoke
         env:
           AURA_AGENTS_LLM: mock

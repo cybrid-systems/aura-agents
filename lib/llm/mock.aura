@@ -1,6 +1,9 @@
 ;; Deterministic mock LLM. No network, no key, no clock.
-;; The planner and worker replies match prompts/planner.txt and prompts/worker.txt.
+;; Planner replies follow the requirement. Worker replies carry a
+;; MUTATE block the judge applies; RESULT is only a self-report.
 (require "std/string")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
 
 (define *mock-calls* 0)
 
@@ -12,14 +15,6 @@
 (define (mock:complete role user)
   (set! *mock-calls* (+ *mock-calls* 1))
   (cond
-    ((equal? role "planner")
-     (if (and (string? user)
-              (string-contains? user "SIMULATE-P99")
-              (not (string-contains? user "AVOID p99")))
-       "CONTRACT tests=pass p99=skip\nTASK implement-zrangebyscore\nTASK check-p99\n"
-       "CONTRACT tests=pass p99=ok\nTASK implement-zrangebyscore\nTASK check-p99\n"))
-    ((equal? role "worker")
-     (if (and (string? user) (string-contains? user "SIMULATE-FAIL"))
-       "RESULT tests=fail p99=ok\n"
-       "RESULT tests=pass p99=ok\n"))
-    (else "RESULT tests=pass p99=ok\n")))
+    ((equal? role "planner") (contract:reply user))
+    ((equal? role "worker") (trial:worker-reply user))
+    (else "RESULT tests=pass\n")))

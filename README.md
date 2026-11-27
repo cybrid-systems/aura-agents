@@ -38,9 +38,11 @@ demo proves the bus workflow, not code synthesis. The shipped fixture uses four 
 ## Quick start
 
 ```bash
-aura test
-AURA_AGENTS_LLM=mock aura run
+aura test --grant exec
+AURA_AGENTS_LLM=mock aura run --grant exec
 ```
+
+`--grant exec` is required: the judge runs `aura test` in the isolated workspace, and the dev sandbox does not include the exec effect.
 
 `aura run` reads [demo/requirement.txt](demo/requirement.txt), sizes workers from CPU and memory headroom (no fixed cap), and drives the bus that exists on Aura main today: `bus:host`, `bus:attach`, `bus:subscribe`, `bus:publish`, `bus:query`, `bus:trial`, `bus:keep`, `bus:rollback`, `bus:audit`.
 
@@ -49,10 +51,14 @@ Tests and CI use a deterministic mock LLM and do not open a network connection. 
 ```bash
 cp .env.example .env   # .env is gitignored; put LLM_API_KEY only there
 set -a && . ./.env && set +a
-AURA_AGENTS_LLM=real aura run
+AURA_AGENTS_LLM=real aura run --grant exec,network
 ```
 
-Unset `LLM_MODEL` selects `deepseek-flash` at `https://api.deepseek.com/v1` (DeepSeek V4.1 Flash, the aura-runner preset). `LLM_BASE_URL` and `LLM_MODEL` override that.
+Unset `LLM_MODEL` selects `deepseek-flash` at `https://api.deepseek.com/v1` (DeepSeek V4.1 Flash, the aura-runner preset). `LLM_BASE_URL` and `LLM_MODEL` override that. Without `--grant network` the call never leaves the machine: the run stops at `gate=plan-fail` and prints `llm-error=` with the reason.
+
+`aura run` sizes workers from CPU and memory unless `AURA_AGENTS_WORKERS` is set (including `0`). `demo=ok` requires `completed>0`, a gate other than `incomplete`, and either `result=keep` or a rollback from a check the judge actually ran (`contract-unsatisfied` or `empty-contract`). `workers=0` exits non-zero.
+
+The worker RESULT line is a self-report. The judge copies the worker's patch or form replacement into an isolated workspace and runs `aura test` there, plus a bench when the contract asks for p99 or a budget. Only `tests`, `p99` and `budget` are executable checks; any other contract key is dropped and recorded as `contract-dropped=`. The default CONTEXT is the target fixture's files (capped), not the word `none`. KEEP records those executed checks. A self-report of pass does not keep a change that fails the test. This does not claim a real model has completed an evolution.
 
 ## On Aura main today
 
@@ -96,7 +102,7 @@ different commit/digest. The baseline is updated by a reviewed change, never
 by a tag or release write.
 
 ```bash
-aura test
+aura test --grant exec
 python3 scripts/check-baseline.py --self
 ```
 
@@ -254,12 +260,14 @@ the workspace COW/hot-replace half.
 - `ab.aura` — deterministic Track A A/B suite (mock LLM) and the `scripts/ab-redis.sh` Track B entry point.
 
 ```bash
-aura test
-AURA_AGENTS_GRAPH=on aura run     # graph=on for the demo pipeline
-bash scripts/ab-redis.sh          # Track A now; Track B prints its blocker
+aura test --grant exec
+AURA_AGENTS_GRAPH=on aura run --grant exec   # graph=on for the demo pipeline
+bash scripts/ab-redis.sh                      # Track A now; Track B prints its blocker
 ```
 
 Set `AURA_AGENTS_GRAPH=on` (or pass `"graph": "on"` to `orchestrate:run`) to seed, ingest, prune and persist the graph after a run. The default is `graph=off`, so the baseline behavior and its goldens are unchanged.
+
+Each run stamps nodes with a fingerprint of the target and the requirement. Planner hints for a fingerprint skip nodes stamped for a different requirement. After any node in that workspace carries a fingerprint, unstamped evidence is left out of the hint as well, so a shared workspace cannot keep mixing requirements into the prompt. Data-free seed patterns stay visible.
 
 ## External load replay (#15)
 

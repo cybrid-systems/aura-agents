@@ -1,0 +1,128 @@
+;; Execution gate: the judge runs the contract. A worker that reports
+;; pass while the code fails the test is rolled back.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/adapt/gate")
+(require "lib/roles/planner")
+(require "lib/roles/worker")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+(require "lib/graph/store")
+(require "lib/graph/query")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (checks plan)
+  (string-join (map (lambda (p) (string-append (car p) "=" (cadr p)))
+                    (cadr plan))
+               " "))
+
+(define word-req "写一个单词计数命令行，测试必须通过")
+(define perf-req "优化 hot path，p99 不退化，预算内")
+(define cheat-req "SIMULATE-CHEAT 写一个单词计数命令行")
+(define sample (hash "cpus" 3 "load" 0 "mem-available-kb" 8000000))
+
+(define word-plan (planner:plan word-req "mock"))
+(line "word-ok" (car word-plan))
+(line "word-task" (car (caddr word-plan)))
+(line "word-checks" (checks word-plan))
+
+(define perf-plan (planner:plan perf-req "mock"))
+(line "perf-ok" (car perf-plan))
+(line "perf-task" (car (caddr perf-plan)))
+(line "perf-checks" (checks perf-plan))
+
+(define (parsed requirement task)
+  (worker:parse (trial:worker-reply (contract:worker-user "local/trial" "none" requirement task))))
+
+(define good (parsed word-req "implement-word-count"))
+(define good-ev (trial:verdict 9401 word-req '(("tests" "pass")) (caddr good)))
+(line "direct-good" (text:lookup good-ev "tests"))
+
+(define cheat (parsed cheat-req "implement-word-count"))
+(line "direct-self" (text:lookup (cadr cheat) "tests"))
+(define seed-before (file-read "fixtures/trials/wordcount/src/wc.aura"))
+(define cheat-ev (trial:verdict 9402 cheat-req '(("tests" "pass")) (caddr cheat)))
+(define seed-after (file-read "fixtures/trials/wordcount/src/wc.aura"))
+(line "direct-exec" (text:lookup cheat-ev "tests"))
+(line "direct-gate"
+      (let ((g (gate:standin '(("tests" "pass")) cheat-ev)))
+        (if (equal? (car g) "ok") "keep" "rollback")))
+(line "seed-intact" (if (equal? seed-before seed-after) "ok" "bad"))
+(line "overlay"
+      (if (equal? seed-before
+                  (file-read (string-append (trial:dest 9402 "wordcount") "/src/wc.aura")))
+        "same" "changed"))
+
+(define patch
+  (list (hash "kind" "patch"
+              "diff" (string-append
+                       "--- a/src/marker.aura\n"
+                       "+++ b/src/marker.aura\n"
+                       "@@ -1 +1 @@\n"
+                       "-(define (marker:done?) #f)\n"
+                       "+(define (marker:done?) #t)\n"))))
+(define patch-ev (trial:verdict 9403 "unrelated requirement" '(("tests" "pass")) patch))
+(line "patch-exec" (text:lookup patch-ev "tests"))
+
+(define (run-one ws requirement approve graph?)
+  (orchestrate:run (hash "requirement" requirement
+                         "sample" sample
+                         "mode" "mock"
+                         "workspace" ws
+                         "approve" approve
+                         "now" 0
+                         "graph" (if graph? "on" "off"))))
+
+(graph:reset! 9404)
+(define word-run (run-one 9404 word-req "approved" #t))
+(define word-keep (car (graph:nodes-by-type (graph:load 9404) "keep-evidence")))
+(define word-facts (hash-ref word-keep "facts" (hash)))
+(line "keep-tests" (hash-ref word-facts "tests" ""))
+(line "keep-source" (hash-ref word-facts "source" ""))
+(line "keep-req"
+      (if (equal? (hash-ref word-facts "req" "")
+                  (query:fingerprint (contract:target word-req #f) word-req))
+        "ok" "bad"))
+(line "word-result" (hash-ref word-run "result"))
+
+(define perf-run (run-one 9405 perf-req "approved" #f))
+(line "perf-result" (hash-ref perf-run "result"))
+(line "perf-gate" (hash-ref perf-run "gate"))
+
+(graph:reset! 9406)
+(define cheat-run (run-one 9406 cheat-req "approved" #t))
+(define cheat-node (car (graph:nodes-by-type (graph:load 9406) "rollback-evidence")))
+(define cheat-facts (hash-ref cheat-node "facts" (hash)))
+(line "cheat-self" (hash-ref cheat-facts "self-tests" ""))
+(line "cheat-exec" (hash-ref cheat-facts "tests" ""))
+(line "cheat-result" (hash-ref cheat-run "result"))
+
+(define zero-run
+  (orchestrate:run (hash "requirement" "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。"
+                         "sample" (hash "cpus" 1 "load" 0 "mem-available-kb" 8000000)
+                         "mode" "mock"
+                         "workspace" 9408
+                         "approve" "approved"
+                         "now" 0)))
+(line "zero-workers" (hash-ref zero-run "workers"))
+(line "zero-refused" (hash-ref zero-run "refused"))
+(line "zero-completed" (hash-ref zero-run "completed"))
+(line "zero-demo" (hash-ref zero-run "demo"))
+
+(define failed
+  (orchestrate:run (hash "requirement" "SIMULATE-LLM-ERROR please plan"
+                         "sample" sample
+                         "mode" "mock"
+                         "workspace" 9409
+                         "approve" "approved"
+                         "now" 0)))
+(line "plan-gate" (hash-ref failed "gate"))
+(line "plan-demo" (hash-ref failed "demo"))
+(line "plan-reason" (hash-ref failed "llm-error" ""))

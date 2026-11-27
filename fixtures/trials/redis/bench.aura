@@ -1,0 +1,8 @@
+(require "src/zset.aura")
+(require "src/latency.aura")
+(display "p99=")
+(display (if (and (equal? (zset:zrangebyscore "k" 1 3) "1,2,3")
+                  (latency:floor?))
+           "ok"
+           "regressed"))
+(newline)

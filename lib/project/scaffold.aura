@@ -34,8 +34,31 @@
 (define (sc-file path content)
   (hash "path" path "content" content))
 
+;; Theme and an explicit repo field name the repository. The template
+;; itself is not a game.
+(define (sc-slug s)
+  (let ((raw (string-downcase (if (string? s) s ""))))
+    (let loop ((i 0) (acc "") (hyphen #f))
+      (if (>= i (string-length raw))
+        (if (and (> (string-length acc) 0) (string-suffix? acc "-"))
+          (substring acc 0 (- (string-length acc) 1))
+          acc)
+        (let ((c (string-ref raw i)))
+          (if (or (and (>= c 97) (<= c 122))
+                  (and (>= c 48) (<= c 57)))
+            (loop (+ i 1) (string-append acc (substring raw i (+ i 1))) #f)
+            (if (or hyphen (string=? acc ""))
+              (loop (+ i 1) acc #t)
+              (loop (+ i 1) (string-append acc "-") #t))))))))
+
 (define (sc-repo-name spec)
-  (if (equal? (sc-get spec "theme" "") "tank-battle") "aura-tank-battle" "aura-game"))
+  (let ((explicit (sc-line (sc-get spec "repo" ""))))
+    (if (> (string-length explicit) 0)
+      explicit
+      (let ((theme (sc-slug (sc-get spec "theme" ""))))
+        (if (> (string-length theme) 0)
+          (string-append "aura-" theme)
+          "aura-project")))))
 
 (define (project:scaffold-file plan path)
   (let loop ((xs (sc-get plan "files" '())))
@@ -71,19 +94,25 @@
     "    steps:\n"
     "      - uses: actions/checkout@v4\n"
     "      - name: Install pinned Aura\n"
-    "        run: ./scripts/install-aura.sh\n"
+    "        run: echo \"$(bash scripts/install-aura.sh)\" >> \"$GITHUB_PATH\"\n"
     "      - name: Test\n"
     "        run: aura test\n"
     "      - name: Bootstrap seed round\n"
     "        run: aura run bootstrap/run.aura\n"))
 
-(define (sc-readme repo)
+(define (sc-readme repo spec)
+  (let ((theme (sc-line (sc-get spec "theme" "")))
+        (kind (sc-line (sc-get spec "kind" ""))))
   (string-append
     "# " repo "\n\n"
-    "Green-field M4 scaffold generated from the #21 Game Spec.\n\n"
+    "Scaffold generated from the project spec"
+    (if (> (string-length kind) 0) (string-append " (kind: " kind ")") "")
+    (if (> (string-length theme) 0) (string-append " (theme: " theme ")") "")
+    ".\n\n"
+    "The entry is `game/main.aura`. A fixed seed, when the spec has one, is data inside the project. It is not an argument to `aura run` (`--seed 42` is parsed as the entry file).\n\n"
     "## Run\n\n"
     "```bash\n"
-    "aura run --headless --seed 42\n"
+    "aura run game/main.aura\n"
     "```\n\n"
     "## Test\n\n"
     "```bash\n"
@@ -95,7 +124,7 @@
     "```bash\n"
     "aura run bootstrap/run.aura\n"
     "```\n\n"
-    "See `docs/principles.md` and `docs/seed.md`.\n"))
+    "See `docs/principles.md` and `docs/seed.md`.\n")))
 
 (define (project:scaffold spec)
   (let* ((baseline (sc-baseline))
@@ -108,9 +137,9 @@
                   (list
                     (sc-file "aura.toml" (sc-aura-toml repo sha x86 arm digest))
                     (sc-file ".github/workflows/ci.yml" (sc-ci-yml digest))
-                    (sc-file "README.md" (sc-readme repo))
+                    (sc-file "README.md" (sc-readme repo spec))
                     (sc-file ".gitignore" "out/\n.deps/\n")
-                    (sc-file "game/main.aura" ";; M4 scaffold: replace with the first milestone.\n(display \"aura game scaffold\\n\")\n")
+                    (sc-file "game/main.aura" ";; Scaffold entry. Replace with the first milestone.\n(display \"scaffold\\n\")\n")
                     (sc-file "tests/smoke_test.aura" "(display \"ok\")\n(newline)\n")
                     (sc-file "tests/smoke_test.golden" "ok\n"))
                   (bootstrap:files repo))))

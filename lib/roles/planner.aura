@@ -1,16 +1,43 @@
 ;; Planner: load prompts/planner.txt, ask the LLM seam, parse the reply
 ;; into a contract and tasks. Role id on the bus stays 0 until
 ;; aura#5400 adds a planner role.
+(require "std/string")
 (require "lib/text")
 (require "lib/llm/chat")
 (require "lib/graph/query")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+
+(define *planner-dropped* '())
+
+(define (planner:dropped) *planner-dropped*)
+
+(define (planner:split-checks pairs)
+  (let loop ((xs pairs) (keep '()) (drop '()))
+    (cond
+      ((not (pair? xs)) (list (reverse keep) (reverse drop)))
+      ((and (pair? (car xs)) (contract:check? (car (car xs))))
+       (loop (cdr xs) (cons (car xs) keep) drop))
+      (else
+       (loop (cdr xs) keep
+             (cons (if (pair? (car xs)) (car (car xs)) "?") drop))))))
 
 (define (planner:parse text)
   (let loop ((lines (text:lines text)) (contract #f) (tasks '()))
     (if (not (pair? lines))
       (if (and (pair? contract) (pair? tasks))
-        (list "ok" contract (reverse tasks))
-        (list "error" "parse" "need CONTRACT and TASK"))
+        (let* ((split (planner:split-checks contract))
+               (kept (car split))
+               (dropped (cadr split)))
+          (set! *planner-dropped* dropped)
+          (if (pair? kept)
+            (list "ok" kept (reverse tasks) dropped)
+            (list "error" "contract"
+                  (string-append "dropped " (string-join dropped ","))
+                  dropped)))
+        (begin
+          (set! *planner-dropped* '())
+          (list "error" "parse" "need CONTRACT and TASK")))
       (let ((line (string-trim (car lines))))
         (cond
           ((string=? line "") (loop (cdr lines) contract tasks))
@@ -26,20 +53,36 @@
 
 (define (planner:last-hits) *planner-last-hits*)
 
-(define (planner:plan-with requirement mode graph)
-  (let* ((q (if graph
-              (graph:query-for-planner graph (query:seeds requirement) (hash))
+(define (planner:llm-error text)
+  (let ((s (string-trim (if (string? text) text ""))))
+    (if (string-prefix? s "ERROR")
+      (string-trim (substring s 5 (string-length s)))
+      #f)))
+
+(define (planner:plan-with requirement mode graph . rest)
+  (let* ((given-target (if (pair? rest) (car rest) #f))
+         (given-context (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+         (target (contract:target requirement given-target))
+         (context (if (and (string? given-context) (> (string-length given-context) 0))
+                    given-context
+                    (trial:fixture-context (contract:kind requirement))))
+         (fp (query:fingerprint target requirement))
+         (q (if graph
+              (graph:query-for-planner graph (query:seeds requirement)
+                                       (hash "fingerprint" fp))
               (hash "hint" "" "hits" '())))
          (hint (hash-ref q "hint" ""))
          (hits (hash-ref q "hits" '()))
          (system (read-file "prompts/planner.txt"))
-         (user (if (and (string? hint) (> (string-length hint) 0))
-                 (string-append requirement "\n\n" hint)
-                 requirement)))
+         (user (contract:planner-user target context requirement hint)))
     (set! *planner-last-hits* hits)
     (if (not (string? system))
       (list "error" "prompt" "missing planner prompt")
-      (planner:parse (chat:complete mode "planner" system user)))))
+      (let ((reply (chat:complete mode "planner" system user)))
+        (let ((reason (planner:llm-error reply)))
+          (if (string? reason)
+            (list "error" "llm" reason)
+            (planner:parse reply)))))))
 
 (define (planner:plan requirement mode)
   (planner:plan-with requirement mode #f))

@@ -1,4 +1,4 @@
-demo=ok
+demo=fail
 llm=mock
 workers=2
 refused=no

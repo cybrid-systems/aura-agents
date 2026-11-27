@@ -33,6 +33,7 @@ else
   export AURA_AGENTS_LLM=real
   echo "target=${AURA_REDIS_DIR}"
   echo "status=ready"
+  echo "note=invoke: AURA_AGENTS_LLM=real aura run --grant exec,network"
   echo "note=run the same orchestrate pipeline with graph=off and graph=on;"
   echo "note=collect first-pass success, rollback rate, invalidated reuse and p99 CPU time"
   echo "note=aura-redis#15 must be green before the real comparison is meaningful"

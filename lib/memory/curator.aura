@@ -8,6 +8,7 @@
 (require "lib/graph/store")
 (require "lib/graph/ingest")
 (require "lib/graph/query")
+(require "lib/roles/contract")
 (require "lib/graph/invalidate")
 (require "lib/graph/prune")
 
@@ -148,7 +149,11 @@
     ""
     (let ((q (graph:query-for-planner g requirement
                                       (hash "max-hops" 2 "max-nodes" 6
-                                            "max-chars" 600))))
+                                            "max-chars" 600
+                                            "fingerprint"
+                                            (query:fingerprint
+                                              (contract:target requirement #f)
+                                              requirement)))))
       (hash-ref q "hint" ""))))
 
 (define (memory:negative? hint)

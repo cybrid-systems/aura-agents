@@ -1,0 +1,8 @@
+alpha=1
+beta=0
+stale=0
+pattern=1
+hint-beta=0
+fp-distinct=1
+fp-safe=1
+ok

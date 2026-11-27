@@ -1,0 +1,4 @@
+name = "trial-redis"
+entry = "src/zset.aura"
+preset = "dev"
+out = "out"

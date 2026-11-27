@@ -9,11 +9,13 @@ fi
 
 export AURA_AGENTS_LLM=mock
 export AURA_AGENTS_APPROVE="${AURA_AGENTS_APPROVE:-approved}"
+# A busy host would otherwise size workers to 0 and fail the demo.
+export AURA_AGENTS_WORKERS="${AURA_AGENTS_WORKERS:-2}"
 unset LLM_API_KEY || true
 
 out="$(mktemp)"
 err="$(mktemp)"
-if ! aura run >"$out" 2>"$err"; then
+if ! aura run --grant exec >"$out" 2>"$err"; then
   echo "demo failed" >&2
   cat "$err" "$out" >&2
   exit 1
@@ -45,6 +47,25 @@ if grep -q 'http-post' "$out"; then
   exit 1
 fi
 echo "smoke=ok"
+
+# workers=0 must not look like a successful demo.
+zero="$(mktemp)"
+zeroerr="$(mktemp)"
+if AURA_AGENTS_WORKERS=0 aura run --grant exec >"$zero" 2>"$zeroerr"; then
+  echo "workers=0 exited 0" >&2
+  cat "$zeroerr" "$zero" >&2
+  exit 1
+fi
+if grep -q 'demo=ok' "$zero"; then
+  echo "workers=0 reported demo=ok" >&2
+  exit 1
+fi
+if ! grep -q 'workers=0' "$zero"; then
+  echo "workers=0 did not override the worker count" >&2
+  cat "$zero" >&2
+  exit 1
+fi
+echo "workers-zero=ok"
 
 # #12: the Score/Conductor demo must finish on the mock sections.
 score_out="$(mktemp)"

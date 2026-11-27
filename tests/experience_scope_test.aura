@@ -1,0 +1,48 @@
+;; Different requirements must not share planner hints, even in one workspace.
+(require "std/string")
+(require "lib/graph/store")
+(require "lib/graph/query")
+(require "lib/roles/contract")
+
+(define ws 9188)
+(graph:reset! ws)
+(define g (graph:new ws))
+
+(define (node type seq summary origin facts wl)
+  (let ((made (graph:make-node
+                (hash "type" type "workspace_id" ws "worldline" wl
+                      "candidate_hash" (string-append "c" (number->string seq))
+                      "contract_hash" "contract"
+                      "caps_mask" 1 "budget_snapshot" (hash)
+                      "seq" seq "timestamp_ms" seq
+                      "origin" origin
+                      "summary" summary "tags" '() "facts" facts))))
+    (graph:add-node! g (cadr made))
+    (hash-ref (cadr made) "node_id")))
+
+(define a (node "keep-evidence" 1 "scopeword alpha" "bus" (hash "req" "aaaa") 1))
+(define b (node "keep-evidence" 2 "scopeword beta" "bus" (hash "req" "bbbb") 1))
+(define c (node "keep-evidence" 3 "scopeword stale" "bus" (hash) 1))
+(define d (node "pattern" 4 "scopeword pattern" "seed" (hash) 0))
+
+(define q (graph:query-for-planner g (list "scopeword")
+                                   (hash "fingerprint" "aaaa" "max-hops" 1 "max-nodes" 8)))
+(define (hit? id)
+  (let loop ((xs (hash-ref q "hits" '())))
+    (cond ((not (pair? xs)) 0)
+          ((equal? (car xs) id) 1)
+          (else (loop (cdr xs))))))
+
+(display "alpha=") (display (hit? a)) (newline)
+(display "beta=") (display (hit? b)) (newline)
+(display "stale=") (display (hit? c)) (newline)
+(display "pattern=") (display (hit? d)) (newline)
+(display "hint-beta=")
+(display (if (string-contains? (hash-ref q "hint") "beta") 1 0))
+(newline)
+
+(define fp (query:fingerprint (contract:target "写一个单词计数命令行" #f) "写一个单词计数命令行"))
+(define fp2 (query:fingerprint (contract:target "优化 hot path" #f) "优化 hot path"))
+(display "fp-distinct=") (display (if (equal? fp fp2) 0 1)) (newline)
+(display "fp-safe=") (display (if (string-contains? fp "/") 0 1)) (newline)
+(display "ok") (newline)

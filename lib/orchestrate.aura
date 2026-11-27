@@ -10,6 +10,9 @@
 (require "lib/roles/planner")
 (require "lib/roles/worker")
 (require "lib/roles/judge")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+(require "lib/graph/query")
 (require "lib/adapt/task-board")
 (require "lib/adapt/approve")
 (require "lib/adapt/gate")
@@ -78,28 +81,32 @@
   (hash-set! flags "bus-query" (orchestrate:flag (bus:query session 1 0 0)))
   (hash-set! flags "bus-audit" (orchestrate:audit-flag session)))
 
-(define (orchestrate:fold-key key expected results)
-  (let loop ((xs results) (val expected))
-    (if (not (pair? xs))
-      val
-      (let ((got (text:lookup (car xs) key)))
-        (cond
-          ((not (string? got)) "missing")
-          ((equal? got expected) (loop (cdr xs) val))
-          (else got))))))
-
-(define (orchestrate:merged contract results)
-  (if (not (pair? results))
-    '()
-    (map (lambda (pair)
-           (list (car pair)
-                 (orchestrate:fold-key (car pair) (cadr pair) results)))
-         contract)))
-
 (define (orchestrate:worker-name i)
   (string-append "w" (number->string i)))
 
-(define (orchestrate:run-workers worker-ss mode now)
+(define (orchestrate:changes results)
+  (let loop ((xs results) (acc '()))
+    (if (not (pair? xs))
+      acc
+      (let ((ch (if (and (pair? (car xs)) (pair? (cddr (car xs))) (list? (caddr (car xs))))
+                  (caddr (car xs))
+                  '())))
+        (loop (cdr xs) (append acc ch))))))
+
+(define (orchestrate:self-tests results)
+  (let loop ((xs results) (val "none"))
+    (if (not (pair? xs))
+      val
+      (let ((got (if (and (pair? (car xs)) (pair? (cdr (car xs))))
+                   (text:lookup (cadr (car xs)) "tests")
+                   #f)))
+        (cond
+          ((not (string? got)) (loop (cdr xs) val))
+          ((equal? got "fail") "fail")
+          ((equal? val "none") (loop (cdr xs) got))
+          (else (loop (cdr xs) val)))))))
+
+(define (orchestrate:run-workers worker-ss mode now target context requirement)
   (let loop ((ss worker-ss) (i 0) (acc '()))
     (if (not (pair? ss))
       (reverse acc)
@@ -110,11 +117,15 @@
           (loop (cdr ss) (+ i 1) acc)
           (let* ((id (cadr claim))
                  (hb (task:heartbeat session id name now))
-                 (ev (if (orchestrate:ok? hb) (worker:run (task:spec id) mode) #f)))
+                 (ev (if (orchestrate:ok? hb)
+                       (worker:run (contract:worker-user target context requirement
+                                                         (task:spec id))
+                                   mode)
+                       #f)))
             (if (and (orchestrate:ok? hb) (orchestrate:ok? ev))
               (begin
                 (task:complete session id name now "done")
-                (loop (cdr ss) (+ i 1) (cons (cadr ev) acc)))
+                (loop (cdr ss) (+ i 1) (cons ev acc)))
               (begin
                 (task:fail session id name now "worker-error")
                 (loop (cdr ss) (+ i 1) acc)))))))))
@@ -130,7 +141,7 @@
       #f))
   (hash-set! flags "bus-audit" (orchestrate:audit-flag judge-s)))
 
-(define (orchestrate:deliver flags judge-s worker-ss contract tasks mode now)
+(define (orchestrate:deliver flags judge-s worker-ss contract tasks mode now ws requirement target context)
   (let ((ids (let loop ((xs tasks) (acc '()))
                (if (not (pair? xs))
                  (reverse acc)
@@ -140,19 +151,22 @@
                      (loop (cdr xs) acc)))))))
     (hash-set! flags "task-backend" (task:backend))
     (hash-set! flags "tasks" (length ids))
-    (let* ((results (orchestrate:run-workers worker-ss mode now))
-           (evidence (orchestrate:merged contract results)))
+    (let* ((results (orchestrate:run-workers worker-ss mode now target context requirement))
+           (ready (and (= (length results) (length ids)) (pair? results)))
+           (evidence (if ready
+                       (trial:verdict ws requirement contract (orchestrate:changes results))
+                       '())))
       (hash-set! flags "completed" (length results))
-      (let ((ready (and (= (length results) (length ids)) (pair? results))))
-        (hash-set! flags "bus-publish"
-                   (orchestrate:flag (bus:publish judge-s 1 (if ready 1 0))))
-        (hash-set! flags "bus-subscribe" (orchestrate:flag (bus:subscribe judge-s 1)))
-        (hash-set! flags "bus-query" (orchestrate:flag (bus:query judge-s 1 0 0)))
-        (let ((tr (bus:trial judge-s 1)))
+      (hash-set! flags "bus-publish"
+                 (orchestrate:flag (bus:publish judge-s 1 (if ready 1 0))))
+      (hash-set! flags "bus-subscribe" (orchestrate:flag (bus:subscribe judge-s 1)))
+      (hash-set! flags "bus-query" (orchestrate:flag (bus:query judge-s 1 0 0)))
+      (let ((tr (bus:trial judge-s 1)))
         (hash-set! flags "bus-trial" (orchestrate:flag tr))
         (if (orchestrate:ok? tr)
           (let ((d (judge:decide judge-s (cadr tr) contract
-                                 (if ready evidence '()))))
+                                 (if ready evidence '())
+                                 (hash "self-tests" (orchestrate:self-tests results)))))
             (hash-set! flags "gate-backend" (gate:backend))
             (if (orchestrate:ok? d)
               (let ((gate-record (car (cddr (cdr d)))))
@@ -168,12 +182,35 @@
                   (hash-set! flags "bus-rollback" (orchestrate:flag (caddr d)))))
               (hash-set! flags "gate" "fail")))
           (hash-set! flags "gate" "fail"))
-        (hash-set! flags "bus-audit" (orchestrate:audit-flag judge-s)))))))
+        (hash-set! flags "bus-audit" (orchestrate:audit-flag judge-s))))))
 
-(define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now graph)
-  (let ((plan (planner:plan-with requirement mode graph)))
+(define (orchestrate:plan-reason plan)
+  (if (and (pair? plan) (pair? (cdr plan)) (pair? (cddr plan)) (string? (caddr plan)))
+    (caddr plan)
+    "plan"))
+
+(define (orchestrate:note-dropped plan)
+  (let ((dropped (if (and (pair? plan) (pair? (cdr plan)) (pair? (cddr plan))
+                          (pair? (cdddr plan)) (list? (cadddr plan)))
+                   (cadddr plan)
+                   '())))
+    (if (pair? dropped)
+      (begin
+        (display "contract-dropped=")
+        (display (string-join dropped ","))
+        (newline))
+      #f)))
+
+(define (orchestrate:pipeline flags planner-s judge-s worker-ss requirement mode approve-mode now graph ws target context)
+  (let ((plan (planner:plan-with requirement mode graph target context)))
+    (orchestrate:note-dropped plan)
     (if (not (orchestrate:ok? plan))
-      (hash-set! flags "gate" "plan-fail")
+      (begin
+        (hash-set! flags "llm-error" (orchestrate:plan-reason plan))
+        (display "llm-error=")
+        (display (hash-ref flags "llm-error"))
+        (newline)
+        (hash-set! flags "gate" "plan-fail"))
       (let ((contract (cadr plan))
             (tasks (caddr plan))
             (deadline (+ now 5)))
@@ -190,7 +227,8 @@
                (decision (if (orchestrate:ok? st) (cadr st) "error")))
           (hash-set! flags "approve" decision)
           (if (equal? decision "approved")
-            (orchestrate:deliver flags judge-s worker-ss contract tasks mode now)
+            (orchestrate:deliver flags judge-s worker-ss contract tasks mode now
+                                 ws requirement target context)
             (orchestrate:reject flags judge-s)))))))
 
 (define (orchestrate:graph-on? cfg)
@@ -212,14 +250,27 @@
        (loop (cdr xs) (car xs)))
       (else (loop (cdr xs) best)))))
 
-(define (orchestrate:finalize-graph flags g on?)
+(define (orchestrate:stamp events fp)
+  (if (not (and (string? fp) (> (string-length fp) 0)))
+    events
+    (map (lambda (ev)
+           (if (not (hash? ev))
+             ev
+             (let ((facts (let ((f (hash-ref ev "facts" (hash))))
+                            (if (hash? f) f (hash)))))
+               (hash-set! facts "req" fp)
+               (hash-set! ev "facts" facts)
+               ev)))
+         events)))
+
+(define (orchestrate:finalize-graph flags g on? fp)
   (if (not on?)
     (begin
       (hash-set! flags "graph" "off")
       (hash-set! flags "graph-nodes" 0)
       (hash-set! flags "graph-edges" 0))
     (begin
-      (ingest:journal g (journal:events))
+      (ingest:journal g (orchestrate:stamp (journal:events) fp))
       (if (equal? (hash-ref flags "result") "rollback")
         (let ((rb (orchestrate:latest-rollback g)))
           (if rb
@@ -233,21 +284,37 @@
       (hash-set! flags "graph-nodes" (graph:node-count g))
       (hash-set! flags "graph-edges" (graph:edge-count g)))))
 
+(define (orchestrate:contract-rollback? flags)
+  (let ((g (hash-ref flags "gate" "")))
+    (or (equal? g "contract-unsatisfied")
+        (equal? g "empty-contract"))))
+
+;; demo=ok is a finished attempt: at least one worker completed, and the
+;; judge kept the trial or rolled it back because an executed check failed.
+;; gate=incomplete means the contract was not fully run (a worker missing,
+;; or a check the judge could not execute). That is not demo=ok.
+(define (orchestrate:demo-ok? flags)
+  (let ((n (hash-ref flags "completed" 0)))
+    (and (equal? (hash-ref flags "bus-host") "ok")
+         (equal? (hash-ref flags "bus-attach") "ok")
+         (equal? (hash-ref flags "bus-unhost") "ok")
+         (not (equal? (hash-ref flags "gate" "") "incomplete"))
+         (number? n)
+         (> n 0)
+         (or (equal? (hash-ref flags "result") "keep")
+             (and (equal? (hash-ref flags "result") "rollback")
+                  (orchestrate:contract-rollback? flags))))))
+
 (define (orchestrate:cleanup flags sessions ws)
   (for-each
     (lambda (s) (if (number? s) (bus:detach s) #f))
     sessions)
   (hash-set! flags "bus-unhost" (orchestrate:flag (bus:unhost ws)))
-  (if (and (equal? (hash-ref flags "bus-host") "ok")
-           (equal? (hash-ref flags "bus-attach") "ok")
-           (equal? (hash-ref flags "bus-unhost") "ok")
-           (not (equal? (hash-ref flags "gate") "plan-fail")))
-    (hash-set! flags "demo" "ok")
-    (hash-set! flags "demo" "fail"))
+  (hash-set! flags "demo" (if (orchestrate:demo-ok? flags) "ok" "fail"))
   (orchestrate:emit flags)
   flags)
 
-(define (orchestrate:hosted flags ws n requirement mode approve-mode now graph)
+(define (orchestrate:hosted flags ws n requirement mode approve-mode now graph target context fp)
   (let* ((planner-a (bus:attach "" ws 0 127 31))
          (judge-a (bus:attach "" ws 0 127 31))
          (worker-ss (orchestrate:attach-workers ws n))
@@ -259,12 +326,14 @@
       (orchestrate:cleanup flags (orchestrate:sessions planner-a judge-a worker-ss) ws)
       (begin
         (orchestrate:pipeline flags (cadr planner-a) (cadr judge-a) worker-ss
-                              requirement mode approve-mode now graph)
-        (orchestrate:finalize-graph flags graph (if graph #t #f))
+                              requirement mode approve-mode now graph
+                              ws target context)
+        (orchestrate:finalize-graph flags graph (if graph #t #f) fp)
         (orchestrate:cleanup flags (orchestrate:sessions planner-a judge-a worker-ss) ws)))))
 
 (define (orchestrate:fresh-flags sample mode host)
-  (let ((sized (supervisor:size sample)))
+  (let ((sized (supervisor:with-override (supervisor:size sample)
+                                        (getenv "AURA_AGENTS_WORKERS"))))
     (hash "demo" "fail"
           "llm" mode
           "workers" (hash-ref sized "workers")
@@ -304,6 +373,13 @@
          (approve-mode (let ((a (hash-ref cfg "approve" "approved")))
                          (if (string? a) a "approved")))
          (now (let ((n (hash-ref cfg "now" 0))) (if (number? n) n 0)))
+         (requirement (orchestrate:requirement cfg))
+         (target (contract:target requirement (hash-ref cfg "target" #f)))
+         (context (let ((given (hash-ref cfg "context" #f)))
+                    (if (and (string? given) (> (string-length given) 0))
+                      given
+                      (trial:fixture-context (contract:kind requirement)))))
+         (fp (query:fingerprint target requirement))
          (graph-on (orchestrate:graph-on? cfg))
          (graph (if graph-on (graph:open ws) #f))
          (base (if graph
@@ -316,5 +392,5 @@
     (if (not (orchestrate:ok? host))
       (begin (orchestrate:emit flags) flags)
       (orchestrate:hosted flags ws (hash-ref flags "workers")
-                          (orchestrate:requirement cfg)
-                          mode approve-mode now graph))))
+                          requirement mode approve-mode now graph
+                          target context fp))))

@@ -269,7 +269,7 @@
                   "collision_rules" (pj-collision-rules base steel)
                   "levels" (hash "count" levels "generation" "seeded")
                   "seed" (hash "strategy" "fixed-seeded" "value" 42)
-                  "entry" (hash "headless" "aura run --headless --seed 42"
+                  "entry" (hash "headless" "aura run game/main.aura"
                                 "headed" "aura run")
                   "rules" rules
                   "assertions" (project:assertions)

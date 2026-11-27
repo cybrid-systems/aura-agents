@@ -12,7 +12,8 @@ repository, tag or release.
 
 ## What the plan contains
 
-- `repo`: `aura-tank-battle` for the tank-battle spec, `aura-game` otherwise.
+- `repo`: `aura-` plus the spec theme (`aura-tank-battle` when the theme is `tank-battle`). An explicit `repo` field wins. With no theme the name is `aura-project`.
+- CI installs Aura with `echo "$(bash scripts/install-aura.sh)" >> "$GITHUB_PATH"`. The generated README runs `aura run game/main.aura`. `--seed 42` is not a flag; Aura treats `42` as the entry file.
 - `files`: `aura.toml`, `.github/workflows/ci.yml`, `README.md`,
   `.gitignore`, a placeholder `game/main.aura`, a passing
   `tests/smoke_test.aura` + golden, and the #33 bootstrap seed
