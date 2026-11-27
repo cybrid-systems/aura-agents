@@ -148,15 +148,17 @@
         (seeds (string-append (if (string? requirement) requirement "")
                               "\n"
                               (if (string? spec) spec ""))))
-    (if (not root)
+    (if (and (string? context) (string-prefix? (string-trim context) "FILE "))
       context
-      (if (orchestrate:context-given? context)
-        (let ((left (- (trial:context-budget) (string-length context))))
-          (if (<= left 0)
-            context
-            (string-append context "\n"
-                           (trial:external-context-budget root seeds left))))
-        (trial:external-context root seeds)))))
+      (if (not root)
+        context
+        (if (orchestrate:context-given? context)
+          (let ((left (- (trial:context-budget) (string-length context))))
+            (if (<= left 0)
+              context
+              (string-append context "\n"
+                             (trial:external-context-budget root seeds left))))
+          (trial:external-context root seeds))))))
 
 (define (orchestrate:invoke name spec mode target context requirement feedback retries)
   (let ((context (orchestrate:task-context context requirement spec)))
@@ -315,7 +317,9 @@
 (define (orchestrate:should-rerun? evidence attempt retries)
   (cond
     ((>= attempt retries) #f)
-    ((equal? (text:lookup evidence "redgreen") "not-red") (< attempt 1))
+    ((or (equal? (text:lookup evidence "redgreen") "not-red")
+         (equal? (text:lookup evidence "redgreen") "missing-golden"))
+     (< attempt 1))
     ((orchestrate:need-retry? evidence) #t)
     (else #f)))
 
@@ -459,19 +463,28 @@
                             ((equal? got "speed") "speed")
                             (else "pass"))))))))
 
+(define (orchestrate:kept-context context)
+  (let ((dest (trial:current-dest))
+        (rows (trial:conflict-rows (trial:last-report))))
+    (if (or (not (string? dest)) (not (pair? rows)))
+      context
+      (string-append (trial:kept-file dest (hash-ref (car rows) "path" ""))
+                     (if (string? context) context "")))))
+
 (define (orchestrate:rerun mode target context requirement feedback)
-  (let loop ((specs *orchestrate-specs*) (acc '()))
-    (if (not (pair? specs))
-      (reverse acc)
-      (let ((ev (worker:run (contract:worker-user target
-                                                   (orchestrate:task-context context requirement (car specs))
-                                                   requirement
-                                                   (car specs) feedback)
-                            mode)))
+  (let ((context (orchestrate:kept-context context)))
+    (let loop ((specs *orchestrate-specs*) (acc '()))
+      (if (not (pair? specs))
+        (reverse acc)
+        (let ((ev (worker:run (contract:worker-user target
+                                                     (orchestrate:task-context context requirement (car specs))
+                                                     requirement
+                                                     (car specs) feedback)
+                              mode)))
         (if (not (orchestrate:ok? ev))
           (orchestrate:note-error "retry" ev)
           #f)
-        (loop (cdr specs) (if (orchestrate:ok? ev) (cons ev acc) acc))))))
+        (loop (cdr specs) (if (orchestrate:ok? ev) (cons ev acc) acc)))))))
 
 (define (orchestrate:reject flags judge-s)
   (orchestrate:read-channel flags judge-s)
@@ -518,10 +531,20 @@
                                            (orchestrate:feedback-summary feedback)
                                            (orchestrate:rerun mode target context requirement feedback)))
                                   (ready1 (and (= (length again) (length ids)) (pair? again)))
-                                  (next (if ready1
-                                          (trial:verdict ws requirement contract
-                                                         (orchestrate:tag-changes again))
-                                          evidence)))
+                                  (next (if (not ready1)
+                                          evidence
+                                          (if (pair? (trial:conflict-rows (trial:last-report)))
+                                            (let ((names (map (lambda (r) (hash-ref r "task" ""))
+                                                              (trial:conflict-rows (trial:last-report))))
+                                                  (tagged (orchestrate:tag-changes again)))
+                                              (trial:apply-more (trial:current-dest)
+                                                                (filter (lambda (c)
+                                                                          (and (hash? c)
+                                                                               (member? (hash-ref c "task" "") names)))
+                                                                        tagged))
+                                              (trial:rejudge requirement contract))
+                                            (trial:verdict ws requirement contract
+                                                           (orchestrate:tag-changes again))))))
                              (retry (+ attempt 1)
                                     (if ready1 again results)
                                     next)))))))
