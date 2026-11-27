@@ -38,7 +38,7 @@
 
 (define (graph:hex n)
   ;; The id is lowercase hex without leading zeros, as it always was.
-  (number->string (if (negative? n) (- n) n) 16))
+  (number->string (if (< n 0) (- n) n) 16))
 
 (define (graph:digest text)
   (string-fnv1-32 (if (string? text) text "")))
