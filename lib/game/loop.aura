@@ -52,18 +52,51 @@
            (loop (cdr xs) (car xs) (l-get (car xs) "score" -999999999)))
           (else (loop (cdr xs) best score)))))
 
+(define (loop:spawn-ok? id)
+  (and (number? id) (> id 0)))
+
+(define (loop:finish results root)
+  (let ((winner (loop:best results)))
+    (hash "ok" (and winner (equal? (l-get winner "ok" #f) #t))
+          "winner" (if winner (l-get winner "id" "") #f)
+          "results" results
+          "state" (if winner (l-get winner "state" root) root))))
+
+;; Copy on the calling fiber before any spawn. A concurrent copy of the
+;; same hash is what makes a rehearsal fail when the machine is busy.
+(define (loop:prepare root candidates)
+  (map (lambda (c)
+         (hash "id" (l-get c "id" "candidate")
+               "step" (l-get c "step" #f)
+               "root" (loop:copy (if (hash? (l-get c "root" #f))
+                                   (l-get c "root" #f)
+                                   root))))
+       candidates))
+
 (define (loop:rehearse root candidates inputs ids)
   (if (not (pair? candidates))
     (hash "ok" #f "error" "no-candidates")
-    (let* ((fids (map (lambda (c)
-                        (fiber:spawn (lambda () (loop:run-one root c inputs ids))))
-                      candidates))
-           (results (map (lambda (fid) (fiber:join fid)) fids))
-           (winner (loop:best results)))
-      (hash "ok" (and winner (equal? (l-get winner "ok" #f) #t))
-            "winner" (if winner (l-get winner "id" "") #f)
-            "results" results
-            "state" (if winner (l-get winner "state" root) root)))))
+    (let ((prepared (loop:prepare root candidates)))
+      (let ((fids (map (lambda (c)
+                         (try (fiber:spawn (lambda () (loop:run-one root c inputs ids)))
+                              (catch (e) 0)))
+                       prepared)))
+        (if (let scan ((xs fids))
+              (cond
+                ((not (pair? xs)) #f)
+                ((not (loop:spawn-ok? (car xs))) #t)
+                (else (scan (cdr xs)))))
+          (loop:finish (map (lambda (c) (loop:run-one root c inputs ids)) prepared) root)
+          (let ((results (map (lambda (fid)
+                                (try (fiber:join fid) (catch (e) #f)))
+                              fids)))
+            (if (let bad ((xs results))
+                  (cond
+                    ((not (pair? xs)) #f)
+                    ((not (hash? (car xs))) #t)
+                    (else (bad (cdr xs)))))
+              (loop:finish (map (lambda (c) (loop:run-one root c inputs ids)) prepared) root)
+              (loop:finish results root))))))))
 
 (define (l-find-result results id)
   (let loop ((xs results))
