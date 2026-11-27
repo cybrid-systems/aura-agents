@@ -65,8 +65,6 @@ bus-unhost=ok
 part-result=rollback
 part-rule=yes
 parallel=fibers
-rebase-retry=1
-prior-diff=yes
 contract=tests=pass
 apply=first:src/n.aura:pass
 apply=second:src/n.aura:pass

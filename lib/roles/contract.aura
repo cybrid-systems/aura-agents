@@ -50,18 +50,23 @@
         (contract:has? s "p99")
         (contract:has? s "latency"))))
 
-;; Speed KEEP is separate from p99/budget. A render or "faster" task
-;; can take that path without those checks being added.
+;; Explicit performance intent only. "player-speed" and "render:board"
+;; are ordinary names, not a request to time the change.
 (define (contract:speed? text)
   (let ((s (contract:scoped (if (string? text) text ""))))
-    (or (contract:perf? text)
-        (contract:has? s "加速")
+    (or (contract:has? s "提速")
+        (contract:has? s "变快")
         (contract:has? s "更快")
+        (contract:has? s "加速")
         (contract:has? s "faster")
-        (contract:has? s "speed")
         (contract:has? s "耗时")
-        (contract:has? s "渲染")
-        (contract:has? s "render"))))
+        (contract:has? s "性能")
+        (contract:has? s "优化")
+        (contract:has? s "optimize")
+        (contract:has? s "p99")
+        (contract:has? s "latency")
+        (contract:has? s "倍")
+        (contract:has? s "降到"))))
 
 (define (contract:allows-test-edit? text)
   (let ((s (contract:scoped (if (string? text) text ""))))

@@ -183,14 +183,9 @@
                              "new" "(define (n:v) 2)"))))
 (define a2-kept (trial:kept-file (trial:current-dest) "src/n.aura"))
 (line "a2-first" (text:lookup a2 "redgreen"))
-(line "a2-kept" (if (string-contains? a2-kept "(define (n:v) 1)") "yes" "no"))
-(trial:apply-more (trial:current-dest)
-                  (list (hash "kind" "mutate" "task" "a2" "path" "src/n.aura"
-                              "old" "(define (n:v) 1)"
-                              "new" "(define (n:v) 2)")))
-(define a2b (trial:rejudge "同一文件先 A1 再 A2" '(("tests" "pass"))))
-(line "a2-rg" (text:lookup a2b "redgreen"))
-(line "a2-applied" (text:lookup a2b "applied"))
+(line "a2-kept" (if (string-contains? a2-kept "(define (n:v) 2)") "yes" "no"))
+(line "a2-rg" (text:lookup a2 "redgreen"))
+(line "a2-applied" (text:lookup a2 "applied"))
 
 (tree "out/b9-junk")
 (file-write "out/b9-junk/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")

@@ -128,10 +128,14 @@
       "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n"
       hot-test "ok\n")
 (trial:set-root! "out/b6-slow")
+(trial:use-fake! '(("(define (hot:cost) 20000)" 400)
+                   ("(define (hot:cost) 18000)" 360)
+                   ("(go (- n 1))" 20)))
 (define slow
   (trial:verdict 9821 "优化渲染耗时" '(("tests" "pass"))
                  (list (hash "kind" "patch" "task" "slow"
                              "diff" (speed-patch "18000" "ok" "ok")))))
+(trial:use-fake! #f)
 (line "slow-rg" (text:lookup slow "redgreen"))
 
 (proj "out/b6-diff"

@@ -1,0 +1,218 @@
+;; player-speed is not a benchmark, red-green beats slow, named hot path,
+;; and a stale second task replaces the current function.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (yn x)
+  (if x "yes" "no"))
+
+(line "word-speed" (yn (contract:speed? "player-speed 按距离衰减，键 speed 和 armor 只影响移动")))
+(line "word-render" (yn (contract:speed? "修 render:board 的越界，render:legend 和 render:help 保持")))
+(line "word-fast" (yn (contract:speed? "提速到 2倍")))
+(line "word-goal" (yn (contract:speed? "耗时降到 40")))
+
+(shell "rm -rf out/b12-t2 out/b12-t3 out/b12-slow out/b12-a out/b12-probe out/b12-order out/b12-half out/b12-en out/b12-fast out/b12-const")
+
+(define (tree root)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b12\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n"))
+
+(tree "out/b12-t2")
+(file-write "out/b12-t2/src/main.aura" "(require \"src/mv.aura\")\n(display (mv:step \"far\"))\n(newline)\n")
+(file-write "out/b12-t2/src/mv.aura"
+            "(define (render:legend) \"legend\")\n(define (render:help) \"help\")\n(define (mv:step s) 0)\n")
+(file-write "out/b12-t2/tests/mv_test.aura"
+            "(require \"src/mv.aura\")\n(display (mv:step \"far\"))\n(newline)\n")
+(file-write "out/b12-t2/tests/mv_test.golden" "1\n")
+(trial:set-root! "out/b12-t2")
+(trial:use-fake! '(("(define (hot:cost) 20000)" 400)
+                   ("(define (hot:cost) 18000)" 360)
+                   ("(go (- n 1))" 20)))
+(define t2
+  (trial:verdict 9940 "player-speed 按距离衰减，键 speed 和 armor 只影响移动" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t2b" "path" "src/mv.aura"
+                             "old" "(define (mv:step s) 0)"
+                             "new" "(define (mv:step s) (if (equal? s \"far\") 1 0))"))))
+(line "t2-rg" (text:lookup t2 "redgreen"))
+
+(tree "out/b12-order")
+(file-write "out/b12-order/src/main.aura" "(display \"ok\")\n(newline)\n")
+(file-write "out/b12-order/src/mv.aura" "(define (hot:cost) 20000)\n(define (mv:step s) 0)\n")
+(file-write "out/b12-order/tests/mv_test.aura"
+            "(require \"src/mv.aura\")\n(display (mv:step \"far\"))\n(newline)\n")
+(file-write "out/b12-order/tests/mv_test.golden" "1\n")
+(trial:set-root! "out/b12-order")
+(define ordered
+  (trial:verdict 9945 "优化耗时，player-speed 仍按距离衰减" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t2c" "path" "src/mv.aura"
+                             "old" "(define (mv:step s) 0)"
+                             "new" "(define (mv:step s) (if (equal? s \"far\") 1 0))"))))
+(line "order-rg" (text:lookup ordered "redgreen"))
+
+(tree "out/b12-t3")
+(file-write "out/b12-t3/src/main.aura" "(require \"src/rd.aura\")\n(display (render:board))\n(newline)\n")
+(file-write "out/b12-t3/src/rd.aura"
+            "(define (render:legend) \"legend\")\n(define (render:help) \"help\")\n(define (render:board) 0)\n")
+(file-write "out/b12-t3/tests/rd_test.aura"
+            "(require \"src/rd.aura\")\n(display (render:board))\n(newline)\n")
+(file-write "out/b12-t3/tests/rd_test.golden" "1\n")
+(trial:set-root! "out/b12-t3")
+(define t3
+  (trial:verdict 9941 "修 render:board 的越界，render:legend 和 render:help 保持" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t3a" "path" "src/rd.aura"
+                             "old" "(define (render:board) 0)"
+                             "new" "(define (render:board) 1)"))))
+(line "t3-rg" (text:lookup t3 "redgreen"))
+(trial:use-fake! #f)
+
+(trial:use-fake! '(("(define (hot:cost) 20000)" 420)
+                   ("(define (hot:cost) 14000)" 287)
+                   ("(define (hot:cost) 9000)" 202)
+                   ("(go (- n 1))" 20)))
+
+(tree "out/b12-half")
+(file-write "out/b12-half/src/main.aura" "(display \"ok\")\n(newline)\n")
+(file-write "out/b12-half/src/hot.aura"
+            "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n(define (mv:step s) \"no\")\n")
+(trial:set-root! "out/b12-half")
+(define half
+  (trial:verdict 9946 "优化耗时，至少 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 14000)")
+                       (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (mv:step s) \"no\")"
+                             "new" "(define (mv:step s) \"yes\")")
+                       (hash "kind" "patch" "task" "half" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/mv_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/hot.aura\")\n+(display (mv:step \"far\"))\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/mv_test.golden\n@@ -0,0 +1 @@\n+yes\n")))))
+(line "half-rg" (text:lookup half "redgreen"))
+
+(tree "out/b12-en")
+(file-write "out/b12-en/src/main.aura" "(display \"ok\")\n(newline)\n")
+(file-write "out/b12-en/src/hot.aura"
+            "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n(define (mv:step s) \"no\")\n")
+(trial:set-root! "out/b12-en")
+(define half-en
+  (trial:verdict 9947 "optimize hot path, 提速 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 14000)")
+                       (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (mv:step s) \"no\")"
+                             "new" "(define (mv:step s) \"yes\")")
+                       (hash "kind" "patch" "task" "half" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/mv_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/hot.aura\")\n+(display (mv:step \"far\"))\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/mv_test.golden\n@@ -0,0 +1 @@\n+yes\n")))))
+(line "half-en" (text:lookup half-en "redgreen"))
+
+(tree "out/b12-fast")
+(file-write "out/b12-fast/src/main.aura"
+            "(require \"src/hot.aura\")\n(display (hot:frame))\n(newline)\n")
+(file-write "out/b12-fast/src/hot.aura"
+            "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n")
+(trial:set-root! "out/b12-fast")
+(define fast
+  (trial:verdict 9948 "优化耗时，至少 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "fast" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 9000)")
+                       (hash "kind" "patch" "task" "fast" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/hot_test.aura\n@@ -0,0 +1,2 @@\n"
+                               "+(display \"ok\")\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/hot_test.golden\n@@ -0,0 +1 @@\n+ok\n")))))
+(line "fast-rg" (text:lookup fast "redgreen"))
+
+(tree "out/b12-const")
+(file-write "out/b12-const/src/main.aura" "(display \"ok\")\n(newline)\n")
+(file-write "out/b12-const/src/hot.aura" "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n")
+(trial:set-root! "out/b12-const")
+(define constant
+  (trial:verdict 9949 "优化耗时，至少 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "const" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 14000)")
+                       (hash "kind" "patch" "task" "const" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/hot_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/hot.aura\")\n+(display (hot:cost))\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/hot_test.golden\n@@ -0,0 +1 @@\n+14000\n")))))
+(line "const-rg" (text:lookup constant "redgreen"))
+(trial:use-fake! #f)
+
+(tree "out/b12-slow")
+(file-write "out/b12-slow/src/main.aura" "(require \"src/hot.aura\")\n(display (hot:frame))\n(newline)\n")
+(file-write "out/b12-slow/src/hot.aura" "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n")
+(file-write "out/b12-slow/tests/hot_test.aura"
+            "(require \"src/hot.aura\")\n(display (hot:frame))\n(newline)\n")
+(file-write "out/b12-slow/tests/hot_test.golden" "ok\n")
+(trial:set-root! "out/b12-slow")
+(trial:use-fake! '(("(define (hot:cost) 20000)" 400)
+                   ("(define (hot:cost) 18000)" 360)
+                   ("(go (- n 1))" 20)))
+(define slow
+  (trial:verdict 9942 "优化耗时，至少 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "slow" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 18000)"))))
+(trial:use-fake! #f)
+(line "slow-rg" (text:lookup slow "redgreen"))
+(line "slow-num" (if (and (string-contains? (trial:last-log) "speed-before=")
+                          (string-contains? (trial:last-log) "speed-after="))
+                   "yes" "no"))
+
+(tree "out/b12-a")
+(file-write "out/b12-a/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b12-a/src/n.aura" ";; KEEP-ME\n(define (n:v) 0)\n")
+(file-write "out/b12-a/tests/n_test.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b12-a/tests/n_test.golden" "2\n")
+(trial:set-root! "out/b12-a")
+(define both
+  (trial:verdict 9943 "同一文件 A1 然后 A2" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "a1" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)")
+                       (hash "kind" "mutate" "task" "a2" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 2)"))))
+(define body (file-read (string-append (trial:current-dest) "/src/n.aura")))
+(line "a-rg" (text:lookup both "redgreen"))
+(line "a-file" (if (and (string-contains? body "(define (n:v) 2)")
+                        (string-contains? body "KEEP-ME"))
+                 "yes" "no"))
+(line "a-applied" (text:lookup both "applied"))
+
+(tree "out/b12-probe")
+(file-write "out/b12-probe/src/main.aura" "(require \"src/sp.aura\")\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b12-probe/src/sp.aura" "(define (sp:has? s) \"no\")\n")
+(trial:set-root! "out/b12-probe")
+(define probed
+  (trial:verdict 9944 "判断字符串是否含有空格" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t1c" "path" "src/sp.aura"
+                             "old" "(define (sp:has? s) \"no\")"
+                             "new" "(define (sp:has? s)\n  (let loop ((i 0))\n    (if (>= i (string-length s)) \"no\"\n      (if (equal? (substring s i (+ i 1)) \" \") \"yes\" (loop (+ i 1))))))")
+                       (hash "kind" "patch" "task" "t1c" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/sp_test.aura\n@@ -0,0 +1,2 @@\n"
+                               "+(display \"ok\")\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/sp_test.golden\n@@ -0,0 +1 @@\n+ok\n")))))
+(line "probe-rg" (text:lookup probed "redgreen"))
+(line "probe-file" (if (and (file-exists? (string-append (trial:current-dest) "/tests/sp_has_probe_test.aura"))
+                            (string-contains? (file-read (string-append (trial:current-dest) "/tests/sp_has_probe_test.golden")) "yes"))
+                     "yes" "no"))

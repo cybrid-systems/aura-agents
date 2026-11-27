@@ -83,11 +83,8 @@
                        (hash "kind" "mutate" "task" "a2" "path" "src/n.aura"
                              "old" "(define (n:v) 0)"
                              "new" "(define (n:v) 2)"))))
-(define note (trial:rebase-note (trial:current-dest)
-                                (car (trial:conflict-rows (trial:last-report)))))
-(line "long-mark" (if (and (string-contains? note "MARKER-END")
-                           (string-contains? note "(define (n:v) 1)")
-                           (string-contains? note "PRIOR DIFF")
-                           (string-contains? (trial:last-log) "MARKER-END")
-                           (string-contains? (trial:last-log) "(define (n:v) 1)"))
+(define landed (file-read (string-append (trial:current-dest) "/src/n.aura")))
+(line "long-mark" (if (and (equal? (text:lookup long "redgreen") "pass")
+                           (string-contains? landed "MARKER-END")
+                           (string-contains? landed "(define (n:v) 2)"))
                   "yes" "no"))
