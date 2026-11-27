@@ -1147,15 +1147,25 @@
 (define (trial:use-fake! rules)
   (set! *trial-fake* rules))
 
+(define (trial:required-body dir own)
+  (if (not (string? own))
+    ""
+    (let ((i (string-index own "(require \"" 0)))
+      (if (or (not (number? i)) (< i 0))
+        ""
+        (let ((from (+ i 10)))
+          (let ((to (string-index own "\"" from)))
+            (if (or (not (number? to)) (< to 0))
+              ""
+              (let ((src (file-read (string-append dir "/" (substring own from to)))))
+                (if (string? src) src "")))))))))
+
 (define (trial:fake-ms dir rel)
   (if (not (pair? *trial-fake*))
     #f
     (let ((body (let ((own (file-read (string-append dir "/" rel))))
-                  (if (and (string? own) (string-contains? own "(hot:cost)"))
-                    (string-append own
-                                   (let ((src (file-read (string-append dir "/src/hot.aura"))))
-                                     (if (string? src) src "")))
-                    (if (string? own) own "")))))
+                  (string-append (if (string? own) own "")
+                                 (trial:required-body dir own)))))
       (let loop ((xs *trial-fake*))
         (if (not (pair? xs))
           #f
@@ -1809,6 +1819,18 @@
     (set! *trial-base-out* "")
     (cond
       (tamp (trial:hold "tamper" tamp))
+      ;; A speed requirement is timed before red-green. Meeting the
+      ;; ratio with the same output is speed even when the new test
+      ;; was not red. Missing it is slow even when the new test is.
+      ;; Toy still wins. Other requirements keep the red-green path.
+      ((and (contract:speed? requirement)
+            (string? toy)
+            (string-prefix? toy "rule=constant"))
+       (trial:hold "toy" toy))
+      ((and (contract:speed? requirement) green (equal? speed "speed"))
+       "speed")
+      ((and (contract:speed? requirement) green (equal? speed "slow"))
+       "slow")
       ((pair? changed)
        (let* ((red (trial:red-tree base dest changed))
               (red-fail (trial:aura-fail? red (trial:test-args changed)))

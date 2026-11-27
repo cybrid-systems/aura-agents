@@ -20,7 +20,7 @@
 (line "word-fast" (yn (contract:speed? "提速到 2倍")))
 (line "word-goal" (yn (contract:speed? "耗时降到 40")))
 
-(shell "rm -rf out/b12-t2 out/b12-t3 out/b12-slow out/b12-a out/b12-probe out/b12-order")
+(shell "rm -rf out/b12-t2 out/b12-t3 out/b12-slow out/b12-a out/b12-probe out/b12-order out/b12-half out/b12-en out/b12-fast out/b12-const")
 
 (define (tree root)
   (make-directory (string-append root "/src"))
@@ -74,6 +74,86 @@
                              "old" "(define (render:board) 0)"
                              "new" "(define (render:board) 1)"))))
 (line "t3-rg" (text:lookup t3 "redgreen"))
+(trial:use-fake! #f)
+
+(trial:use-fake! '(("(define (hot:cost) 20000)" 420)
+                   ("(define (hot:cost) 14000)" 287)
+                   ("(define (hot:cost) 9000)" 202)
+                   ("(go (- n 1))" 20)))
+
+(tree "out/b12-half")
+(file-write "out/b12-half/src/main.aura" "(display \"ok\")\n(newline)\n")
+(file-write "out/b12-half/src/hot.aura"
+            "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n(define (mv:step s) \"no\")\n")
+(trial:set-root! "out/b12-half")
+(define half
+  (trial:verdict 9946 "优化耗时，至少 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 14000)")
+                       (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (mv:step s) \"no\")"
+                             "new" "(define (mv:step s) \"yes\")")
+                       (hash "kind" "patch" "task" "half" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/mv_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/hot.aura\")\n+(display (mv:step \"far\"))\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/mv_test.golden\n@@ -0,0 +1 @@\n+yes\n")))))
+(line "half-rg" (text:lookup half "redgreen"))
+
+(tree "out/b12-en")
+(file-write "out/b12-en/src/main.aura" "(display \"ok\")\n(newline)\n")
+(file-write "out/b12-en/src/hot.aura"
+            "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n(define (mv:step s) \"no\")\n")
+(trial:set-root! "out/b12-en")
+(define half-en
+  (trial:verdict 9947 "optimize hot path, 提速 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 14000)")
+                       (hash "kind" "mutate" "task" "half" "path" "src/hot.aura"
+                             "old" "(define (mv:step s) \"no\")"
+                             "new" "(define (mv:step s) \"yes\")")
+                       (hash "kind" "patch" "task" "half" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/mv_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/hot.aura\")\n+(display (mv:step \"far\"))\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/mv_test.golden\n@@ -0,0 +1 @@\n+yes\n")))))
+(line "half-en" (text:lookup half-en "redgreen"))
+
+(tree "out/b12-fast")
+(file-write "out/b12-fast/src/main.aura"
+            "(require \"src/hot.aura\")\n(display (hot:frame))\n(newline)\n")
+(file-write "out/b12-fast/src/hot.aura"
+            "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n")
+(trial:set-root! "out/b12-fast")
+(define fast
+  (trial:verdict 9948 "优化耗时，至少 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "fast" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 9000)")
+                       (hash "kind" "patch" "task" "fast" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/hot_test.aura\n@@ -0,0 +1,2 @@\n"
+                               "+(display \"ok\")\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/hot_test.golden\n@@ -0,0 +1 @@\n+ok\n")))))
+(line "fast-rg" (text:lookup fast "redgreen"))
+
+(tree "out/b12-const")
+(file-write "out/b12-const/src/main.aura" "(display \"ok\")\n(newline)\n")
+(file-write "out/b12-const/src/hot.aura" "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n")
+(trial:set-root! "out/b12-const")
+(define constant
+  (trial:verdict 9949 "优化耗时，至少 2倍" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "const" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 20000)"
+                             "new" "(define (hot:cost) 14000)")
+                       (hash "kind" "patch" "task" "const" "diff"
+                             (string-append
+                               "--- /dev/null\n+++ b/tests/hot_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/hot.aura\")\n+(display (hot:cost))\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/hot_test.golden\n@@ -0,0 +1 @@\n+14000\n")))))
+(line "const-rg" (text:lookup constant "redgreen"))
 (trial:use-fake! #f)
 
 (tree "out/b12-slow")
