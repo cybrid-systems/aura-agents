@@ -1,0 +1,219 @@
+;; Multi-file hunks, red-then-green, external bench policy, timeout class.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/roles/contract")
+(require "lib/roles/planner")
+(require "lib/roles/worker")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(shell "rm -rf out/b5-patch out/b5-green out/b5-fix out/b5-nobench out/b5-ctx out/outside.aura")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define (row-brief r)
+  (string-append (hash-ref r "path" "")
+                 ":"
+                 (if (hash-ref r "ok" #f) "pass" "fail")
+                 ":h"
+                 (number->string (hash-ref r "hunk" 0))))
+
+(define multi
+  (string-append
+    "--- a/src/a.aura\n"
+    "+++ b/src/a.aura\n"
+    "@@ -1 +1 @@\n"
+    "-(define (a:v) 0)\n"
+    "+(define (a:v) 1)\n"
+    "--- a/src/b.aura\n"
+    "+++ b/src/b.aura\n"
+    "@@ -1 +1 @@\n"
+    "-(define (b:v) 0)\n"
+    "+(define (b:v) 2)\n"))
+
+(make-directory "out/b5-patch/src")
+(file-write "out/b5-patch/src/a.aura" "(define (a:v) 0)\n")
+(file-write "out/b5-patch/src/b.aura" "(define (b:v) 0)\n")
+(define rows (trial:apply-diff "out/b5-patch"
+                               (hash "kind" "patch" "task" "edit" "diff" multi)))
+(line "multi-n" (length rows))
+(line "multi-a" (row-brief (car rows)))
+(line "multi-b" (row-brief (cadr rows)))
+(line "multi-a-body" (string-trim (file-read "out/b5-patch/src/a.aura")))
+(line "multi-b-body" (string-trim (file-read "out/b5-patch/src/b.aura")))
+
+(define created
+  (string-append
+    "--- /dev/null\n"
+    "+++ b/src/c.aura\n"
+    "@@ -0,0 +1 @@\n"
+    "+(define (c:v) 3)\n"))
+(define crow (car (trial:apply-diff "out/b5-patch"
+                                    (hash "kind" "patch" "task" "add" "diff" created))))
+(line "new-file" (row-brief crow))
+(line "new-body" (string-trim (file-read "out/b5-patch/src/c.aura")))
+
+(define escaped
+  (string-append
+    "--- a/src/a.aura\n"
+    "+++ b/../../outside.aura\n"
+    "@@ -1 +1 @@\n"
+    "-(define (a:v) 1)\n"
+    "+(define (a:v) 9)\n"
+    "--- a/src/a.aura\n"
+    "+++ /tmp/b5-abs.aura\n"
+    "@@ -1 +1 @@\n"
+    "-(define (a:v) 1)\n"
+    "+(define (a:v) 8)\n"))
+(define erows (trial:apply-diff "out/b5-patch"
+                                (hash "kind" "patch" "task" "escape" "diff" escaped)))
+(line "escape-n" (length erows))
+(line "escape-0" (row-brief (car erows)))
+(line "escape-1" (row-brief (cadr erows)))
+(line "escape-body" (string-trim (file-read "out/b5-patch/src/a.aura")))
+(line "escape-outside" (if (file-exists? "out/outside.aura") "written" "refused"))
+(line "escape-abs" (if (file-exists? "/tmp/b5-abs.aura") "written" "refused"))
+
+(define missed
+  (string-append
+    "--- a/src/b.aura\n"
+    "+++ b/src/b.aura\n"
+    "@@ -1 +1 @@\n"
+    "-(define (b:v) missing)\n"
+    "+(define (b:v) 4)\n"))
+(define mrow (car (trial:apply-diff "out/b5-patch"
+                                    (hash "kind" "patch" "task" "miss" "diff" missed))))
+(line "miss-row" (row-brief mrow))
+(line "miss-log"
+      (if (and (string-contains? (hash-ref mrow "path" "") "src/b.aura")
+               (= (hash-ref mrow "hunk" 0) 1))
+        "file-hunk" "bad"))
+
+(define constant (hash "kind" "mutate" "task" "implement-word-count"
+                       "path" "src/wc.aura"
+                       "old" "(define (wc:count text) 0)"
+                       "new" "(define (wc:count text) 3)"))
+(define cheated (trial:verdict 9810 "写一个单词计数命令行" '(("tests" "pass"))
+                               (list constant)))
+(line "constant-tests" (text:lookup cheated "tests"))
+(line "constant-redgreen" (text:lookup cheated "redgreen"))
+(line "constant-why"
+      (if (string-contains? (trial:last-log) "修复后测试仍失败") "said" "quiet"))
+
+(define (proj root src test golden)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b5\"\nentry = \"src/n.aura\"\npreset = \"dev\"\nout = \"out\"\n")
+  (file-write (string-append root "/src/n.aura") src)
+  (file-write (string-append root "/tests/n_test.aura") test)
+  (file-write (string-append root "/tests/n_test.golden") golden))
+
+(proj "out/b5-green" "(define (n:v) 0)\n"
+      "(require \"src/n.aura\")\n(display (if (= (n:v) 0) \"ok\" \"fail\"))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b5-green")
+(define already
+  (trial:verdict 9811 "keep the marker" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "noop"
+                             "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) (+ 0 0))"))))
+(line "already-tests" (text:lookup already "tests"))
+(line "already-redgreen" (text:lookup already "redgreen"))
+(line "already-why"
+      (if (string-contains? (trial:last-log) "没有先红") "said" "quiet"))
+
+(define notred-diff
+  (string-append
+    "--- /dev/null\n"
+    "+++ b/tests/extra_test.aura\n"
+    "@@ -0,0 +1,3 @@\n"
+    "+(require \"src/n.aura\")\n"
+    "+(display (if (= (n:v) 0) \"ok\" \"fail\"))\n"
+    "+(newline)\n"
+    "--- /dev/null\n"
+    "+++ b/tests/extra_test.golden\n"
+    "@@ -0,0 +1 @@\n"
+    "+ok\n"))
+(define notred
+  (trial:verdict 9812 "add a test that already passes" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "add-test" "diff" notred-diff))))
+(line "notred-tests" (text:lookup notred "tests"))
+(line "notred-redgreen" (text:lookup notred "redgreen"))
+
+(proj "out/b5-fix" "(define (n:v) 0)\n"
+      "(require \"src/n.aura\")\n(display (if (= (n:v) 1) \"ok\" \"fail\"))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b5-fix")
+(define good-diff
+  (string-append
+    "--- a/src/n.aura\n"
+    "+++ b/src/n.aura\n"
+    "@@ -1 +1 @@\n"
+    "-(define (n:v) 0)\n"
+    "+(define (n:v) 1)\n"
+    "--- /dev/null\n"
+    "+++ b/tests/extra_test.aura\n"
+    "@@ -0,0 +1,3 @@\n"
+    "+(require \"src/n.aura\")\n"
+    "+(display (if (= (n:v) 1) \"ok\" \"fail\"))\n"
+    "+(newline)\n"
+    "--- /dev/null\n"
+    "+++ b/tests/extra_test.golden\n"
+    "@@ -0,0 +1 @@\n"
+    "+ok\n"))
+(define fixed
+  (trial:verdict 9813 "make n return one and cover it" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "fix" "diff" good-diff))))
+(line "fixed-tests" (text:lookup fixed "tests"))
+(line "fixed-redgreen" (text:lookup fixed "redgreen"))
+(line "fixed-applied" (text:lookup fixed "applied"))
+
+(proj "out/b5-nobench" "(define (n:v) 0)\n"
+      "(require \"src/n.aura\")\n(display (if (= (n:v) 1) \"ok\" \"fail\"))\n(newline)\n"
+      "ok\n")
+(trial:set-root! "out/b5-nobench")
+(define bare (contract:ensure "优化渲染" '(("tests" "pass"))))
+(line "ext-p99" (if (text:lookup bare "p99") "yes" "no"))
+(line "ext-budget" (if (text:lookup bare "budget") "yes" "no"))
+(define named (contract:ensure "把 p99 降下来" '(("tests" "pass"))))
+(line "ext-named-p99" (text:lookup named "p99"))
+(define nobench
+  (trial:verdict 9814 "把 p99 降下来" named
+                 (list (hash "kind" "mutate" "task" "fix"
+                             "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)"))))
+(line "nobench-p99" (text:lookup nobench "p99"))
+(line "nobench-why" (if (string-contains? (trial:last-log) "无 bench") "said" "quiet"))
+(trial:set-root! #f)
+
+(line "budget-default" (trial:context-budget-of ""))
+(line "budget-set" (trial:context-budget-of "32"))
+(make-directory "out/b5-ctx/src")
+(file-write "out/b5-ctx/src/tank.aura" "(define (tank:fire) 1)\n")
+(file-write "out/b5-ctx/src/other.aura" "(define (other:v) 0)\n")
+(define ctx (trial:external-context-budget "out/b5-ctx" "修复 tank:fire 的判定" 4096))
+(line "ctx-full" (if (string-contains? ctx "FILE src/tank.aura") "ok" "bad"))
+(line "ctx-body" (if (string-contains? ctx "(define (tank:fire) 1)") "ok" "bad"))
+(line "ctx-list" (if (string-contains? ctx "src/other.aura") "ok" "bad"))
+(line "ctx-abs" (if (string-contains? ctx "out/b5-ctx") "abs" "rel"))
+(define tiny (trial:external-context-budget "out/b5-ctx" "修复 tank:fire 的判定" 24))
+(line "ctx-clip" (number->string (string-length tiny)))
+
+(define timed (planner:finish "hello" "ERROR http-post: timeout"))
+(line "planner-timeout" (cadr timed))
+(line "planner-retriable" (if (planner:retriable? timed) "yes" "no"))
+(define parsed (worker:parse "not a result\n"))
+(line "parse-class" (cadr parsed))
+(line "parse-detail" (caddr parsed))
+(define invoked
+  (orchestrate:invoke "word" "implement-word-count" "mock" "local/wordcount" ""
+                      "SIMULATE-TIMEOUT 写一个单词计数命令行" "" 1))
+(line "timeout-retry" (car invoked))

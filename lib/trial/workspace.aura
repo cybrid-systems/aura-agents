@@ -84,22 +84,90 @@
                                      (trial:quote dest)))
          0))))
 
-(define (trial:external-context root)
-  (let ((listing (try (command-output
-                        (string-append "find " (trial:quote root)
-                                       " -type f -name '*.aura' | head -n 12"))
-                      (catch (e) ""))))
-    (let loop ((xs (text:lines (if (string? listing) listing ""))) (out "") (n 0))
-      (cond
-        ((or (not (pair? xs)) (>= n 2000)) (trial:clip out 2000))
-        ((string=? (string-trim (car xs)) "") (loop (cdr xs) out n))
-        (else
-          (let* ((path (string-trim (car xs)))
-                 (body (file-read path))
-                 (chunk (string-append "FILE " path "\n"
-                                       (if (string? body) (trial:clip body 400) "")
-                                       "\n")))
-            (loop (cdr xs) (string-append out chunk) (+ n (string-length chunk)))))))))
+(define (trial:context-budget-of raw)
+  (let ((n (if (and (string? raw) (> (string-length raw) 0)) (string->number raw) #f)))
+    (if (and (number? n) (> n 0))
+      (if (integer? n) n (inexact->exact (floor n)))
+      4096)))
+
+(define (trial:context-budget)
+  (trial:context-budget-of (getenv "AURA_AGENTS_CONTEXT_BUDGET")))
+
+(define (trial:context-seeds requirement)
+  (let ((s (contract:scoped (if (string? requirement) requirement ""))))
+    (let loop ((xs (string-split-words s)) (acc '()))
+      (if (not (pair? xs))
+        acc
+        (loop (cdr xs)
+              (if (>= (string-length (car xs)) 3)
+                (cons (car xs) acc)
+                acc))))))
+
+(define (trial:rel-path root abs)
+  (let ((prefix (string-append root "/")))
+    (if (and (string? abs) (string-prefix? abs prefix))
+      (substring abs (string-length prefix) (string-length abs))
+      (if (string? abs) abs ""))))
+
+(define (trial:hit? rel body seeds)
+  (let loop ((xs seeds))
+    (cond
+      ((not (pair? xs)) #f)
+      ((and (string? (car xs)) (> (string-length (car xs)) 0)
+            (or (string-contains? rel (car xs))
+                (and (string? body) (string-contains? body (car xs)))))
+       #t)
+      (else (loop (cdr xs))))))
+
+(define (trial:aura-files root)
+  (let ((out (try (command-output
+                    (string-append "find " (trial:quote root)
+                                   " -type f -name '*.aura'"))
+                  (catch (e) ""))))
+    (let loop ((xs (text:lines (if (string? out) out ""))) (acc '()))
+      (if (not (pair? xs))
+        (reverse acc)
+        (let ((p (string-trim (car xs))))
+          (loop (cdr xs) (if (string=? p "") acc (cons p acc))))))))
+
+(define (trial:take-chunk out left chunk)
+  (if (> (string-length chunk) left)
+    (list (string-append out (trial:clip chunk left)) 0)
+    (list (string-append out chunk) (- left (string-length chunk)))))
+
+;; Full text of files whose path or body matches a requirement token,
+;; then a relative-path list with whatever budget remains.
+(define (trial:external-context-budget root requirement budget)
+  (let ((seeds (trial:context-seeds requirement))
+        (abs (trial:aura-files root))
+        (limit (if (and (number? budget) (> budget 0)) budget 4096)))
+    (let ((packed (let loop ((xs abs) (hits '()) (rest '()))
+                    (if (not (pair? xs))
+                      (list (reverse hits) (reverse rest))
+                      (let* ((rel (trial:rel-path root (car xs)))
+                             (body (file-read (car xs)))
+                             (text (if (string? body) body "")))
+                        (if (trial:hit? rel text seeds)
+                          (loop (cdr xs) (cons (list rel text) hits) rest)
+                          (loop (cdr xs) hits (cons rel rest))))))))
+      (let ((full (let loop ((xs (car packed)) (out "") (left limit))
+                    (if (or (not (pair? xs)) (<= left 0))
+                      (list out left)
+                      (let ((step (trial:take-chunk
+                                    out left
+                                    (string-append "FILE " (car (car xs)) "\n"
+                                                   (cadr (car xs)) "\n"))))
+                        (loop (cdr xs) (car step) (cadr step)))))))
+        (let loop ((xs (cadr packed)) (out (car full)) (left (cadr full)) (head #t))
+          (if (or (not (pair? xs)) (<= left 0))
+            out
+            (let ((step (trial:take-chunk
+                          out left
+                          (string-append (if head "FILES\n" "") (car xs) "\n"))))
+              (loop (cdr xs) (car step) (cadr step) #f))))))))
+
+(define (trial:external-context root requirement)
+  (trial:external-context-budget root requirement (trial:context-budget)))
 
 (define (trial:dest ws kind)
   (string-append "out/trials/" (number->string (if (number? ws) ws 0)) "/"
@@ -159,42 +227,158 @@
             (file-write full (string-replace text old new))
             #t))))))
 
-(define (trial:patch-path diff)
-  (let loop ((lines (text:lines (if (string? diff) diff ""))))
+(define (trial:diff-path raw)
+  (let ((s (string-trim (if (string? raw) raw ""))))
     (cond
-      ((not (pair? lines)) #f)
-      ((string-prefix? (car lines) "+++ ")
-       (let ((raw (string-trim (text:after (car lines) "+++ "))))
-         (cond
-           ((string-prefix? raw "b/") (text:after raw "b/"))
-           ((string-prefix? raw "a/") (text:after raw "a/"))
-           (else raw))))
-      (else (loop (cdr lines))))))
+      ((string=? s "/dev/null") "/dev/null")
+      ((string-prefix? s "a/") (substring s 2 (string-length s)))
+      ((string-prefix? s "b/") (substring s 2 (string-length s)))
+      (else s))))
+
+(define (trial:join-nl xs)
+  (if (pair? xs) (string-join (reverse xs) "\n") ""))
+
+(define (trial:flush-hunk hunks hunk)
+  (if hunk (cons (reverse hunk) hunks) hunks))
+
+(define (trial:flush-file path new? hunks hunk files)
+  (if path
+    (cons (list path new? (reverse (trial:flush-hunk hunks hunk))) files)
+    files))
+
+;; One unified diff becomes ((path new? hunk-line-lists) ...) in file order.
+(define (trial:split-diff text)
+  (let loop ((xs (text:lines (if (string? text) text "")))
+             (old-path #f)
+             (path #f)
+             (new? #f)
+             (hunks '())
+             (hunk #f)
+             (files '()))
+    (if (not (pair? xs))
+      (reverse (trial:flush-file path new? hunks hunk files))
+      (let ((line (car xs)))
+        (cond
+          ((string-prefix? line "--- ")
+           (loop (cdr xs) (trial:diff-path (text:after line "--- "))
+                 path new? hunks hunk files))
+          ((string-prefix? line "+++ ")
+           (let* ((np (trial:diff-path (text:after line "+++ ")))
+                  (use (if (string=? np "/dev/null")
+                         (if (string? old-path) old-path "")
+                         np))
+                  (created (string=? (if (string? old-path) old-path "") "/dev/null")))
+             (loop (cdr xs) old-path use created '() #f
+                   (trial:flush-file path new? hunks hunk files))))
+          ((string-prefix? line "@@")
+           (loop (cdr xs) old-path path new?
+                 (trial:flush-hunk hunks hunk) '() files))
+          ((or (not path) (string-prefix? line "diff ") (string-prefix? line "index ")
+               (string-prefix? line "\\"))
+           (loop (cdr xs) old-path path new? hunks hunk files))
+          (else
+           (loop (cdr xs) old-path path new? hunks (cons line (if hunk hunk '())) files)))))))
+
+(define (trial:patch-path diff)
+  (let ((files (trial:split-diff diff)))
+    (if (pair? files) (car (car files)) #f)))
 
 (define (trial:patch-body diff sign)
-  (let loop ((lines (text:lines (if (string? diff) diff ""))) (acc '()))
+  sign
+  "")
+
+(define (trial:hunk-pair lines)
+  (let loop ((xs lines) (old '()) (new '()))
+    (if (not (pair? xs))
+      (list (trial:join-nl old) (trial:join-nl new))
+      (let ((line (car xs)))
+        (cond
+          ((or (string=? line "") (string-prefix? line "@@") (string-prefix? line "\\"))
+           (loop (cdr xs) old new))
+          ((string-prefix? line "+")
+           (loop (cdr xs) old (cons (substring line 1 (string-length line)) new)))
+          ((string-prefix? line "-")
+           (loop (cdr xs) (cons (substring line 1 (string-length line)) old) new))
+          ((string-prefix? line " ")
+           (let ((body (substring line 1 (string-length line))))
+             (loop (cdr xs) (cons body old) (cons body new))))
+          (else (loop (cdr xs) old new)))))))
+
+(define (trial:ensure-nl body)
+  (let ((t (if (string? body) body "")))
+    (let ((n (string-length t)))
+      (if (and (> n 0) (string=? (substring t (- n 1) n) "\n"))
+        t
+        (string-append t "\n")))))
+
+(define (trial:write-new dest path body)
+  (let ((full (string-append dest "/" path)))
+    (make-directory (path-dirname full))
+    (file-write full (trial:ensure-nl body))
+    #t))
+
+(define (trial:apply-hunk dest path new? hunk n)
+  (let* ((pair (trial:hunk-pair hunk))
+         (old (car pair))
+         (neu (cadr pair))
+         (full (string-append dest "/" path))
+         (text (file-read full)))
     (cond
-      ((not (pair? lines))
-       (if (pair? acc) (string-join (reverse acc) "\n") ""))
-      ((or (string-prefix? (car lines) "+++")
-           (string-prefix? (car lines) "---")
-           (string-prefix? (car lines) "@@")
-           (string=? (car lines) ""))
-       (loop (cdr lines) acc))
-      ((and (> (string-length (car lines)) 0)
-            (string-prefix? (car lines) sign))
-       (loop (cdr lines)
-             (cons (substring (car lines) 1 (string-length (car lines))) acc)))
-      (else (loop (cdr lines) acc)))))
+      ((not (trial:safe-path? path))
+       (hash "ok" #f "hunk" n "old" path "now" "refused path"))
+      ((and new? (or (not (string? text)) (string=? text "")) (string=? old ""))
+       (begin (trial:write-new dest path neu)
+              (hash "ok" #t "hunk" n "old" "" "now" (trial:clip neu 240))))
+      ((not (string? text))
+       (hash "ok" #f "hunk" n "old" (trial:clip old 160) "now" "missing file"))
+      ((string=? old "")
+       (hash "ok" #f "hunk" n "old" "" "now" (trial:clip text 240)))
+      ((not (string-contains? text old))
+       (hash "ok" #f "hunk" n "old" (trial:clip old 160) "now" (trial:clip text 240)))
+      (else
+       (begin
+         (file-write full (string-replace text old neu))
+         (hash "ok" #t "hunk" n "old" "" "now" ""))))))
+
+(define (trial:apply-diff dest change)
+  (let ((task (hash-ref change "task" ""))
+        (files (trial:split-diff (hash-ref change "diff" ""))))
+    (if (not (pair? files))
+      (list (hash "task" task "path" "" "ok" #f "hunk" 0
+                  "prior" #f "old" "empty diff" "now" ""))
+      (let file-loop ((fs files) (acc '()))
+        (if (not (pair? fs))
+          acc
+          (let* ((file (car fs))
+                 (path (car file))
+                 (new? (cadr file))
+                 (hunks (caddr file)))
+            (if (not (pair? hunks))
+              (file-loop (cdr fs)
+                         (append acc (list (hash "task" task "path" path "ok" #f
+                                                 "hunk" 0 "prior" #f
+                                                 "old" "no hunk" "now" ""))))
+              (let hunk-loop ((hs hunks) (n 1) (rows '()) (failed #f))
+                (if (or failed (not (pair? hs)))
+                  (file-loop (cdr fs) (append acc (reverse rows)))
+                  (let ((row (trial:apply-hunk dest path new? (car hs) n)))
+                    (hunk-loop (cdr hs) (+ n 1)
+                               (cons (hash "task" task "path" path
+                                           "ok" (hash-ref row "ok" #f)
+                                           "hunk" (hash-ref row "hunk" n)
+                                           "prior" #f
+                                           "old" (hash-ref row "old" "")
+                                           "now" (hash-ref row "now" ""))
+                                     rows)
+                               (not (hash-ref row "ok" #f)))))))))))))
 
 (define (trial:patch! dest change)
-  (let ((diff (hash-ref change "diff" ""))
-        (path (trial:patch-path (hash-ref change "diff" ""))))
-    (let ((old (trial:patch-body diff "-"))
-          (new (trial:patch-body diff "+")))
-      (if (or (not (trial:safe-path? path)) (string=? old ""))
-        #f
-        (trial:mutate! dest (hash "path" path "old" old "new" new))))))
+  (let ((rows (trial:apply-diff dest change)))
+    (let loop ((xs rows))
+      (cond
+        ((not (pair? xs)) #t)
+        ((hash-ref (car xs) "ok" #f) (loop (cdr xs)))
+        (else #f)))))
 
 (define (trial:apply-one dest change)
   (if (not (hash? change))
@@ -217,28 +401,51 @@
       old
       (trial:patch-body (hash-ref change "diff" "") "-"))))
 
+(define (trial:mutate-row dest change)
+  (let* ((path (if (hash? change) (trial:change-path change) ""))
+         (ok (and (hash? change) (trial:apply-one dest change)))
+         (now (file-read (string-append dest "/" path))))
+    (list (hash "task" (if (hash? change) (hash-ref change "task" "") "")
+                "path" path
+                "ok" (if ok #t #f)
+                "hunk" 0
+                "prior" #f
+                "old" (trial:clip (if (hash? change) (trial:change-old change) "") 160)
+                "now" (trial:clip (if (string? now) now "") 240)))))
+
+(define (trial:seen? path seen)
+  (let loop ((ys seen))
+    (cond
+      ((not (pair? ys)) #f)
+      ((equal? (car ys) path) #t)
+      (else (loop (cdr ys))))))
+
+(define (trial:mark-prior rows seen)
+  (map (lambda (r)
+         (if (and (hash? r) (trial:seen? (hash-ref r "path" "") seen))
+           (begin (hash-set! r "prior" #t) r)
+           r))
+       rows))
+
 (define (trial:apply-report dest changes)
   (let loop ((xs (if (pair? changes) changes '())) (acc '()) (seen '()))
     (if (not (pair? xs))
       (reverse acc)
       (let* ((change (car xs))
-             (path (if (hash? change) (trial:change-path change) ""))
-             (prior (let scan ((ys seen))
-                      (cond
-                        ((not (pair? ys)) #f)
-                        ((equal? (car ys) path) #t)
-                        (else (scan (cdr ys))))))
-             (ok (and (hash? change) (trial:apply-one dest change)))
-             (now (file-read (string-append dest "/" path))))
+             (raw (if (and (hash? change) (equal? (hash-ref change "kind" "") "patch"))
+                    (trial:apply-diff dest change)
+                    (trial:mutate-row dest change)))
+             (rows (trial:mark-prior raw seen)))
         (loop (cdr xs)
-              (cons (hash "task" (if (hash? change) (hash-ref change "task" "") "")
-                          "path" path
-                          "ok" (if ok #t #f)
-                          "prior" prior
-                          "old" (trial:clip (if (hash? change) (trial:change-old change) "") 160)
-                          "now" (trial:clip (if (string? now) now "") 240))
-                    acc)
-              (if (and ok (> (string-length path) 0)) (cons path seen) seen))))))
+              (append (reverse rows) acc)
+              (let add ((rs rows) (seen seen))
+                (if (not (pair? rs))
+                  seen
+                  (let ((path (hash-ref (car rs) "path" "")))
+                    (add (cdr rs)
+                         (if (and (hash-ref (car rs) "ok" #f) (> (string-length path) 0))
+                           (cons path seen)
+                           seen))))))))))
 
 (define (trial:applied-word report)
   (let loop ((xs report) (n 0) (bad 0))
@@ -259,6 +466,10 @@
                 "apply task=" (hash-ref r "task" "")
                 " path=" (hash-ref r "path" "")
                 " result=" (if (hash-ref r "ok" #f) "pass" "fail")
+                (let ((h (hash-ref r "hunk" 0)))
+                  (if (and (number? h) (> h 0) (not (hash-ref r "ok" #f)))
+                    (string-append " hunk=" (number->string h))
+                    ""))
                 "\n"
                 (if (hash-ref r "ok" #f)
                   ""
@@ -334,6 +545,9 @@
           (loop (cdr lines) (append acc (text:pairs line)))
           (loop (cdr lines) acc))))))
 
+(define (trial:has-bench? dest)
+  (file-exists? (string-append dest "/bench.aura")))
+
 (define (trial:observe dest contract)
   (let ((ran (if (or (trial:wants? contract "tests")
                      (not (pair? contract)))
@@ -341,7 +555,11 @@
                '()))
         (benched (if (or (trial:wants? contract "p99")
                          (trial:wants? contract "budget"))
-                   (trial:parse-bench (trial:bench dest))
+                   (if (trial:has-bench? dest)
+                     (trial:parse-bench (trial:bench dest))
+                     (append
+                       (if (trial:wants? contract "p99") '(("p99" "no-bench")) '())
+                       (if (trial:wants? contract "budget") '(("budget" "no-bench")) '())))
                    '())))
     (trial:capture! dest)
     (let ((observed (append ran benched)))
@@ -354,6 +572,103 @@
 ;; that does not apply is recorded; it does not skip the test. The
 ;; evidence includes applied=all|partial|none so a passing test cannot
 ;; hide a patch that never landed.
+(define (trial:snapshot! dest)
+  (let ((base (string-append dest "-base")))
+    (trial:shell (string-append "rm -rf " (trial:quote base)))
+    (if (= (trial:shell (string-append "cp -a " (trial:quote dest) " " (trial:quote base))) 0)
+      base
+      #f)))
+
+(define (trial:aura-fail? dir args)
+  (not (= (trial:shell (string-append "cd " (trial:quote dir)
+                                      " && aura test " args
+                                      " >test.out 2>test.err"))
+          0)))
+
+(define (trial:changed-tests base dest)
+  (let ((out (try (command-output
+                    (string-append "cd " (trial:quote dest)
+                                   " && { find tests -type f -name '*.aura'; find tests -type f -name '*.golden'; } 2>/dev/null"))
+                  (catch (e) ""))))
+    (let loop ((xs (text:lines (if (string? out) out ""))) (acc '()))
+      (if (not (pair? xs))
+        (reverse acc)
+        (let ((rel (string-trim (car xs))))
+          (if (or (string=? rel "") (not (trial:safe-path? rel)))
+            (loop (cdr xs) acc)
+            (let ((a (file-read (string-append dest "/" rel)))
+                  (b (file-read (string-append base "/" rel))))
+              (loop (cdr xs)
+                    (if (equal? a b) acc (cons rel acc))))))))))
+
+(define (trial:aura-name? rel)
+  (let ((n (string-length rel)))
+    (and (> n 5) (string=? (substring rel (- n 5) n) ".aura"))))
+
+(define (trial:test-args files)
+  (let loop ((xs files) (acc '()))
+    (if (not (pair? xs))
+      (if (pair? acc) (string-join (reverse acc) " ") "")
+      (loop (cdr xs)
+            (if (trial:aura-name? (car xs)) (cons (car xs) acc) acc)))))
+
+(define (trial:red-tree base dest files)
+  (let ((red (string-append base "-red")))
+    (trial:shell (string-append "rm -rf " (trial:quote red)))
+    (trial:shell (string-append "cp -a " (trial:quote base) " " (trial:quote red)))
+    (for-each (lambda (rel)
+                (make-directory (path-dirname (string-append red "/" rel)))
+                (file-write (string-append red "/" rel)
+                            (let ((t (file-read (string-append dest "/" rel))))
+                              (if (string? t) t ""))))
+              files)
+    red))
+
+(define (trial:redgreen-why rg)
+  (cond
+    ((equal? rg "pass") "redgreen=pass 修复前测试失败，修复后通过\n")
+    ((equal? rg "bench") "redgreen=bench 修复前 bench 未达标，修复后达标\n")
+    ((equal? rg "not-red") "redgreen=not-red 修复前测试已经通过，没有先红\n")
+    ((equal? rg "still-red") "redgreen=still-red 修复后测试仍失败\n")
+    ((equal? rg "no-bench") "redgreen=no-bench 无 bench\n")
+    (else (string-append "redgreen=" (if (string? rg) rg "") "\n"))))
+
+(define (trial:no-bench-note evidence)
+  (let loop ((xs evidence))
+    (cond
+      ((not (pair? xs)) "")
+      ((and (pair? (car xs)) (equal? (cadr (car xs)) "no-bench"))
+       "无 bench\n")
+      (else (loop (cdr xs))))))
+
+;; New or modified tests must fail on the untouched sources and the
+;; full suite must pass after the edit. A pure metric change can
+;; instead show a bench that was not ok before and is ok after.
+(define (trial:redgreen base dest contract)
+  (let ((changed (trial:changed-tests base dest))
+        (green (not (trial:aura-fail? dest "")))
+        (metric (or (trial:wants? contract "p99") (trial:wants? contract "budget"))))
+    (cond
+      ((pair? changed)
+       (let ((red (trial:red-tree base dest changed)))
+         (cond
+           ((not green) "still-red")
+           ((not (trial:aura-fail? red (trial:test-args changed))) "not-red")
+           (else "pass"))))
+      ((and metric (trial:has-bench? dest))
+       (let ((before (trial:parse-bench (trial:bench base)))
+             (after (trial:parse-bench (trial:bench dest))))
+         (let ((b (text:lookup before "p99"))
+               (a (text:lookup after "p99")))
+           (cond
+             ((not (string? a)) "no-bench")
+             ((and (equal? a "ok") (not (equal? b "ok"))) "bench")
+             ((not green) "still-red")
+             (else "not-red")))))
+      ((not green) "still-red")
+      ((not (trial:aura-fail? base "")) "not-red")
+      (else "pass"))))
+
 (define (trial:prepare ws requirement)
   (let ((root (trial:root))
         (kind (contract:kind requirement))
@@ -371,15 +686,19 @@
         (trial:note! "isolate failed")
         (append (map (lambda (p) (list (car p) "missing")) contract)
                 (list (list "applied" "none"))))
-      (let* ((report (trial:apply-report dest (if (pair? changes) changes '())))
+      (let* ((base (trial:snapshot! dest))
+             (report (trial:apply-report dest (if (pair? changes) changes '())))
              (tests (trial:observe dest contract))
-             (word (trial:applied-word report)))
+             (word (trial:applied-word report))
+             (rg (if base (trial:redgreen base dest contract) "not-red")))
         (set! *trial-report* report)
         (trial:note! (string-append (trial:format-report report)
+                                    (trial:redgreen-why rg)
+                                    (trial:no-bench-note tests)
                                     (trial:unbound-hint (trial:last-log))
                                     "TEST\n"
                                     (trial:last-log)))
-        (append tests (list (list "applied" word)))))))
+        (append tests (list (list "applied" word) (list "redgreen" rg)))))))
 
 ;; ── deterministic worker reply (mock) ─────────────────────────
 ;; The strings match fixtures/trials. A cheat reply still says tests=pass
@@ -450,7 +769,14 @@
                       "(define (marker:done?) #f)"
                       "(define (marker:done?) #t)"))))))
 
+(define (trial:timeout? text)
+  (and (trial:has? text "SIMULATE-TIMEOUT")
+       (not (trial:has? text "previous reply"))
+       (not (trial:has? text "FEEDBACK"))))
+
 (define (trial:worker-reply text)
-  (if (and (trial:has? text "SIMULATE-GARBAGE") (not (trial:has? text "FEEDBACK")))
-    "<tool_call>{\"name\":\"edit\"}</tool_call>\n"
-    (string-append (trial:result-line text) (trial:change-block text))))
+  (cond
+    ((trial:timeout? text) "ERROR http-post: timeout\n")
+    ((and (trial:has? text "SIMULATE-GARBAGE") (not (trial:has? text "FEEDBACK")))
+     "<tool_call>{\"name\":\"edit\"}</tool_call>\n")
+    (else (string-append (trial:result-line text) (trial:change-block text)))))

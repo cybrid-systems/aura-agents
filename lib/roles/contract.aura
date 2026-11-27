@@ -112,11 +112,44 @@
       (contract:has? (contract:scoped requirement) "测试")
       (contract:has? (contract:scoped requirement) "test")))
 
+(define (contract:named-p99? requirement)
+  (let ((s (contract:scoped requirement)))
+    (or (contract:has? s "p99")
+        (contract:has? s "latency")
+        (contract:has? s "延迟"))))
+
+(define (contract:named-budget? requirement)
+  (let ((s (contract:scoped requirement)))
+    (or (contract:has? s "预算")
+        (contract:has? s "budget"))))
+
+;; An external tree is whatever AURA_AGENTS_TARGET copied in. Fixture
+;; runs leave the root unset, so they keep the old p99/budget defaults.
+(define (contract:external?)
+  (let ((root (try (trial:root) (catch (e) #f))))
+    (and (string? root) (> (string-length root) 0))))
+
+(define (contract:bench-text)
+  (let ((root (try (trial:root) (catch (e) #f))))
+    (if (and (string? root) (> (string-length root) 0))
+      (let ((t (file-read (string-append root "/bench.aura"))))
+        (if (string? t) t #f))
+      #f)))
+
+(define (contract:bench-mentions? needle)
+  (let ((t (contract:bench-text)))
+    (and (string? t) (string-contains? t needle))))
+
 (define (contract:wants-p99? requirement)
-  (or (contract:has? (contract:scoped requirement) "p99")
-      (contract:has? (contract:scoped requirement) "latency")
-      (contract:has? (contract:scoped requirement) "延迟")
-      (contract:perf? requirement)))
+  (or (contract:named-p99? requirement)
+      (contract:bench-mentions? "p99")
+      (and (not (contract:external?)) (contract:perf? requirement))))
+
+(define (contract:add-budget? requirement)
+  (or (contract:bench-mentions? "budget")
+      (if (contract:external?)
+        (contract:named-budget? requirement)
+        (contract:budget? requirement))))
 
 ;; Put back an executable check the requirement asked for and the model
 ;; omitted. An explicit value, including p99=skip, is left alone.
@@ -130,7 +163,7 @@
                                (contract:missing? with-tests "p99"))
                         (append with-tests (list (list "p99" "ok")))
                         with-tests)))
-        (if (and (contract:budget? requirement)
+        (if (and (contract:add-budget? requirement)
                  (contract:missing? with-p99 "budget"))
           (append with-p99 (list (list "budget" "ok")))
           with-p99)))))

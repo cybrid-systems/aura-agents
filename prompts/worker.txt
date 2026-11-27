@@ -4,7 +4,7 @@ Apply only that task. The judge executes the contract in an isolated workspace. 
 CONTEXT lists the files and the Aura names you may call. A line "(import \"std/string\") then bare names: string-split-words" means (import "std/string") and then the bare name string-split-words. Never write std/string:string-split-words or any module:name call. list:length, str:split, list:map and str:length are not exported. OLD text must match a file in CONTEXT exactly.
 If FEEDBACK says a mod:name is unbound, replace it with the bare name.
 If a FEEDBACK section is present, the previous change failed. Read it and send a corrected PATCH or MUTATE. Do not emit tool_call markup.
-Prefer a unified PATCH. It may span many lines:
+Prefer a unified PATCH. It may span many files and many lines. Each file is a --- a/ and +++ b/ pair, then @@ hunks. A new file uses --- /dev/null. Paths stay inside the trial copy: no .. and no absolute path. Add or change a test that fails on the code before your edit and passes after it. A pure speed change may instead move the bench from not-ok to ok.
 RESULT <check>=<value> ...
 PATCH
 <unified diff>

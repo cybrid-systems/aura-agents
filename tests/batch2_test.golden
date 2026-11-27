@@ -11,6 +11,7 @@ contract=tests=pass p99=ok
 apply=implement-zrangebyscore:src/zset.aura:pass
 apply=check-p99:src/latency.aura:pass
 test-summary=pass
+redgreen=bench
 demo=ok
 llm=mock
 workers=1
@@ -45,11 +46,13 @@ queue-demo=ok
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=fail
+redgreen=still-red
 worker-retry=1
-feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golden at line 1:     want: 3    
+feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass redgreen=still-red 修复后测试仍失败 TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golde
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=pass
+redgreen=pass
 demo=ok
 llm=mock
 workers=2
@@ -84,6 +87,7 @@ feedback-summary=previous reply was not a RESULT plus PATCH or MUTATE
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=pass
+redgreen=pass
 demo=ok
 llm=mock
 workers=2

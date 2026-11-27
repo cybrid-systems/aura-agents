@@ -65,10 +65,21 @@
     (cadddr parsed)
     '()))
 
+(define (planner:retriable? plan)
+  (and (pair? plan)
+       (equal? (car plan) "error")
+       (or (equal? (cadr plan) "llm")
+           (equal? (cadr plan) "http-timeout"))))
+
 (define (planner:finish requirement reply)
   (let ((reason (planner:llm-error reply)))
     (if (string? reason)
-      (list "error" "llm" reason)
+      (list "error"
+            (if (or (string-contains? reason "timeout")
+                    (string-contains? reason "timed out"))
+              "http-timeout"
+              "llm")
+            reason)
       (let ((parsed (planner:parse reply)))
         (if (not (and (pair? parsed) (equal? (car parsed) "ok")))
           parsed
@@ -101,7 +112,7 @@
     (if (not (string? system))
       (list "error" "prompt" "missing planner prompt")
       (let ((first (planner:ask requirement mode system user)))
-        (if (and (pair? first) (equal? (car first) "error") (equal? (cadr first) "llm"))
+        (if (planner:retriable? first)
           (begin
             (display "planner-retry=1")
             (newline)
