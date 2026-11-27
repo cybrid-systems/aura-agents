@@ -1,0 +1,258 @@
+;; Isolated trial workspace. The seed under fixtures/trials is never
+;; written. Each attempt gets its own directory under out/trials (the
+;; overlay). The worker's MUTATE form or unified PATCH is applied only
+;; there. The judge then runs aura test, and a bench when the contract
+;; asks for p99 or a budget. The worker RESULT line is not consulted.
+(require "std/string")
+(require "std/fs")
+(require "std/process")
+(require "lib/text")
+(require "lib/roles/contract")
+
+(define trial:files
+  (hash "redis" '("aura.toml" "src/zset.aura" "src/latency.aura"
+                  "tests/zset_test.aura" "tests/zset_test.golden" "bench.aura")
+        "wordcount" '("aura.toml" "src/wc.aura"
+                      "tests/wc_test.aura" "tests/wc_test.golden")
+        "perf" '("aura.toml" "src/hot.aura"
+                 "tests/hot_test.aura" "tests/hot_test.golden" "bench.aura")
+        "generic" '("aura.toml" "src/marker.aura"
+                    "tests/marker_test.aura" "tests/marker_test.golden")))
+
+(define (trial:dest ws kind)
+  (string-append "out/trials/" (number->string (if (number? ws) ws 0)) "/"
+                 (if (string? kind) kind "generic")))
+
+(define (trial:safe-path? path)
+  (and (string? path)
+       (> (string-length path) 0)
+       (not (string-prefix? path "/"))
+       (not (string-contains? path ".."))))
+
+(define (trial:quote path)
+  (string-append "'" path "'"))
+
+(define (trial:shell cmd)
+  (try (shell cmd) (catch (e) 1)))
+
+(define (trial:reset-dir! dest)
+  (if (and (string? dest) (string-prefix? dest "out/trials/"))
+    (trial:shell (string-append "rm -rf " (trial:quote dest)))
+    1))
+
+(define (trial:isolate kind dest)
+  (let ((files (hash-ref trial:files kind #f)))
+    (if (not (pair? files))
+      #f
+      (begin
+        (trial:reset-dir! dest)
+        (make-directory dest)
+        (let loop ((xs files) (ok #t))
+          (if (or (not ok) (not (pair? xs)))
+            ok
+            (let* ((rel (car xs))
+                   (from (string-append "fixtures/trials/" kind "/" rel))
+                   (to (string-append dest "/" rel))
+                   (text (file-read from)))
+              (make-directory (path-dirname to))
+              (if (not (string? text))
+                #f
+                (begin
+                  (file-write to text)
+                  (loop (cdr xs) #t))))))))))
+
+(define (trial:mutate! dest change)
+  (let ((path (hash-ref change "path" ""))
+        (old (hash-ref change "old" ""))
+        (new (hash-ref change "new" "")))
+    (if (or (not (trial:safe-path? path))
+            (not (string? old)) (string=? old "")
+            (not (string? new)))
+      #f
+      (let* ((full (string-append dest "/" path))
+             (text (file-read full)))
+        (if (or (not (string? text)) (not (string-contains? text old)))
+          #f
+          (begin
+            (file-write full (string-replace text old new))
+            #t))))))
+
+(define (trial:patch-path diff)
+  (let loop ((lines (text:lines (if (string? diff) diff ""))))
+    (cond
+      ((not (pair? lines)) #f)
+      ((string-prefix? (car lines) "+++ ")
+       (let ((raw (string-trim (text:after (car lines) "+++ "))))
+         (cond
+           ((string-prefix? raw "b/") (text:after raw "b/"))
+           ((string-prefix? raw "a/") (text:after raw "a/"))
+           (else raw))))
+      (else (loop (cdr lines))))))
+
+(define (trial:patch-body diff sign)
+  (let loop ((lines (text:lines (if (string? diff) diff ""))) (acc '()))
+    (cond
+      ((not (pair? lines))
+       (if (pair? acc) (string-join (reverse acc) "\n") ""))
+      ((or (string-prefix? (car lines) "+++")
+           (string-prefix? (car lines) "---")
+           (string-prefix? (car lines) "@@")
+           (string=? (car lines) ""))
+       (loop (cdr lines) acc))
+      ((and (> (string-length (car lines)) 0)
+            (string-prefix? (car lines) sign))
+       (loop (cdr lines)
+             (cons (substring (car lines) 1 (string-length (car lines))) acc)))
+      (else (loop (cdr lines) acc)))))
+
+(define (trial:patch! dest change)
+  (let ((diff (hash-ref change "diff" ""))
+        (path (trial:patch-path (hash-ref change "diff" ""))))
+    (let ((old (trial:patch-body diff "-"))
+          (new (trial:patch-body diff "+")))
+      (if (or (not (trial:safe-path? path)) (string=? old ""))
+        #f
+        (trial:mutate! dest (hash "path" path "old" old "new" new))))))
+
+(define (trial:apply-one dest change)
+  (if (not (hash? change))
+    #f
+    (cond
+      ((equal? (hash-ref change "kind" "") "mutate") (trial:mutate! dest change))
+      ((equal? (hash-ref change "kind" "") "patch") (trial:patch! dest change))
+      (else #f))))
+
+(define (trial:apply-all dest changes)
+  (let loop ((xs changes))
+    (cond
+      ((not (pair? xs)) #t)
+      ((trial:apply-one dest (car xs)) (loop (cdr xs)))
+      (else #f))))
+
+(define (trial:wants? contract key)
+  (let loop ((xs contract))
+    (cond
+      ((not (pair? xs)) #f)
+      ((and (pair? (car xs)) (equal? (car (car xs)) key)) #t)
+      (else (loop (cdr xs))))))
+
+(define (trial:aura-test dest)
+  ;; Redirects are opened after cd, so they stay inside the overlay.
+  (= (trial:shell (string-append "cd " (trial:quote dest)
+                                 " && aura test >test.out 2>test.err"))
+     0))
+
+(define (trial:bench dest)
+  (let ((out (try (command-output
+                    (string-append "cd " (trial:quote dest)
+                                   " && aura run --quiet bench.aura >bench.out 2>/dev/null && cat bench.out"))
+                  (catch (e) ""))))
+    (if (string? out) out "")))
+
+(define (trial:parse-bench text)
+  (let loop ((lines (text:lines (if (string? text) text ""))) (acc '()))
+    (if (not (pair? lines))
+      acc
+      (let ((line (string-trim (car lines))))
+        (if (or (string-prefix? line "p99=")
+                (string-prefix? line "budget=")
+                (string-prefix? line "tests="))
+          (loop (cdr lines) (append acc (text:pairs line)))
+          (loop (cdr lines) acc))))))
+
+(define (trial:observe dest contract)
+  (let ((ran (if (or (trial:wants? contract "tests")
+                     (not (pair? contract)))
+               (list (list "tests" (if (trial:aura-test dest) "pass" "fail")))
+               '()))
+        (benched (if (or (trial:wants? contract "p99")
+                         (trial:wants? contract "budget"))
+                   (trial:parse-bench (trial:bench dest))
+                   '())))
+    (let ((observed (append ran benched)))
+      (map (lambda (p)
+             (let ((got (text:lookup observed (car p))))
+               (list (car p) (if (string? got) got "missing"))))
+           contract))))
+
+;; Copy the seed, apply every change, return execution evidence aligned
+;; with the contract. A change that does not apply yields missing checks
+;; so a self-reported pass cannot be kept.
+(define (trial:verdict ws requirement contract changes)
+  (let* ((kind (contract:kind requirement))
+         (dest (trial:dest ws kind))
+         (ready (trial:isolate kind dest)))
+    (if (or (not ready)
+            (not (trial:apply-all dest (if (pair? changes) changes '()))))
+      (map (lambda (p) (list (car p) "missing")) contract)
+      (trial:observe dest contract))))
+
+;; ── deterministic worker reply (mock) ─────────────────────────
+;; The strings match fixtures/trials. A cheat reply still says tests=pass
+;; and writes a form that the fixture's own test rejects.
+
+(define (trial:has? text needle)
+  (and (string? text) (string-contains? text needle)))
+
+(define (trial:fail? text) (trial:has? text "SIMULATE-FAIL"))
+(define (trial:cheat? text) (trial:has? text "SIMULATE-CHEAT"))
+
+(define (trial:task-name text)
+  (cond
+    ((trial:has? text "implement-zrangebyscore") "implement-zrangebyscore")
+    ((trial:has? text "check-p99") "check-p99")
+    ((trial:has? text "implement-word-count") "implement-word-count")
+    ((trial:has? text "optimize-hot-path") "optimize-hot-path")
+    ((trial:has? text "implement-change") "implement-change")
+    (else "implement-change")))
+
+(define (trial:result-line text)
+  (cond
+    ((trial:fail? text) "RESULT tests=fail p99=ok\n")
+    ((equal? (contract:kind text) "redis") "RESULT tests=pass p99=ok\n")
+    ((equal? (contract:kind text) "perf")
+     (if (contract:budget? text)
+       "RESULT tests=pass p99=ok budget=ok\n"
+       "RESULT tests=pass p99=ok\n"))
+    (else "RESULT tests=pass\n")))
+
+(define (trial:block path old new)
+  (string-append "MUTATE " path "\nOLD " old "\nNEW " new "\n"))
+
+(define (trial:change-block text)
+  (let ((bad (or (trial:fail? text) (trial:cheat? text)))
+        (task (trial:task-name text)))
+    (cond
+      ((equal? task "implement-zrangebyscore")
+       (trial:block "src/zset.aura"
+                    "(define (zset:zrangebyscore key min max) \"missing\")"
+                    (if bad
+                      "(define (zset:zrangebyscore key min max) \"wrong\")"
+                      "(define (zset:zrangebyscore key min max) \"1,2,3\")")))
+      ((equal? task "check-p99")
+       (trial:block "src/latency.aura"
+                    "(define (latency:floor?) #f)"
+                    (if bad
+                      "(define (latency:floor?) #f)"
+                      "(define (latency:floor?) #t)")))
+      ((equal? task "implement-word-count")
+       (trial:block "src/wc.aura"
+                    "(define (wc:count text) 0)"
+                    (if bad
+                      "(define (wc:count text) -1)"
+                      "(define (wc:count text) (length (string-split-words text)))")))
+      ((equal? task "optimize-hot-path")
+       (trial:block "src/hot.aura"
+                    "(define (hot:cost) 100)"
+                    (if bad
+                      "(define (hot:cost) 1000)"
+                      "(define (hot:cost) 10)")))
+      (else
+       (trial:block "src/marker.aura"
+                    "(define (marker:done?) #f)"
+                    (if bad
+                      "(define (marker:done?) #f)"
+                      "(define (marker:done?) #t)"))))))
+
+(define (trial:worker-reply text)
+  (string-append (trial:result-line text) (trial:change-block text)))

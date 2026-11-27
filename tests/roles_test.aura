@@ -17,8 +17,11 @@
 (line "prompts"
       (if (and (has "prompts/planner.txt" "CONTRACT")
                (has "prompts/worker.txt" "RESULT")
+               (has "prompts/worker.txt" "self-report")
                (has "prompts/judge.txt" "gate")
-               (has "demo/requirement.txt" "ZRANGEBYSCORE"))
+               (has "demo/requirement.txt" "ZRANGEBYSCORE")
+               (not (has "prompts/planner.txt" "aura-redis"))
+               (not (has "prompts/worker.txt" "aura-redis")))
         "ok"
         "bad"))
 
@@ -30,9 +33,10 @@
 
 (define plan (planner:parse a))
 (line "plan" (if (equal? (car plan) "ok") "ok" "bad"))
-(line "tasks" (length (caddr plan)))
-(line "contract-tests" (cadr (car (cadr plan))))
-(line "contract-p99" (cadr (cadr (cadr plan))))
+(line "generic-tasks" (length (caddr plan)))
+(line "generic-tests" (cadr (car (cadr plan))))
+(line "generic-not-redis"
+      (if (equal? (car (caddr plan)) "implement-change") "ok" "bad"))
 
 (define worker (worker:parse (mock:complete "worker" "implement-zrangebyscore")))
 (line "worker" (if (equal? (car worker) "ok") "ok" "bad"))
@@ -43,8 +47,12 @@
 
 (define planned (planner:plan "给 aura-redis 加 ZRANGEBYSCORE，p99 不退化。" "mock"))
 (line "planner-plan" (if (equal? (car planned) "ok") "ok" "bad"))
+(line "planner-tasks" (length (caddr planned)))
+(line "planner-p99" (cadr (cadr (cadr planned))))
+(line "planner-task" (car (caddr planned)))
 (define ran (worker:run "implement-zrangebyscore" "mock"))
 (line "worker-run" (if (equal? (car ran) "ok") "ok" "bad"))
+(line "worker-change" (if (pair? (caddr ran)) "ok" "bad"))
 
 (line "mode-default" (chat:mode-of #f #f))
 (line "mode-key" (chat:mode-of #f #t))

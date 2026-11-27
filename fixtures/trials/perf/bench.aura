@@ -1,0 +1,8 @@
+(require "src/hot.aura")
+(define (hot:ok?) (<= (hot:cost) 40))
+(display "p99=")
+(display (if (hot:ok?) "ok" "regressed"))
+(newline)
+(display "budget=")
+(display (if (hot:ok?) "ok" "over"))
+(newline)

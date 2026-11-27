@@ -37,4 +37,13 @@
 (line "ci-pinned" (string-contains? ci (string-append "aura-ci@" digest)))
 (line "ci-test" (string-contains? ci "aura test"))
 (line "readme" (string-prefix? readme (string-append "# " (hash-ref sc "repo"))))
+(line "readme-run" (string-contains? readme "aura run game/main.aura"))
+(line "readme-bad" (string-contains? readme "aura run --headless --seed 42"))
+(line "ci-path" (string-contains? ci "GITHUB_PATH"))
 (line "forbidden" (string-join (hash-ref sc "forbidden" '()) ","))
+
+(define cli (project:scaffold (hash "theme" "cli-tool" "kind" "tool-spec" "source" "count words")))
+(define cli-readme (project:scaffold-file cli "README.md"))
+(line "cli-repo" (hash-ref cli "repo"))
+(line "cli-game" (if (string-contains? cli-readme "Game Spec") "yes" "no"))
+(line "cli-named" (if (string-contains? (hash-ref cli "repo") "aura-game") "yes" "no"))

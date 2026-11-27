@@ -1,0 +1,3 @@
+(require "src/hot.aura")
+(display (if (<= (hot:cost) 40) "ok" "fail"))
+(newline)

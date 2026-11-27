@@ -1,19 +1,56 @@
-;; Worker: load prompts/worker.txt and turn one task into evidence pairs.
+;; Worker: load prompts/worker.txt and turn one task into a self-report
+;; plus a patch or a form replacement. The self-report is not the verdict.
 ;; Role id on the bus stays 0 until aura#5400 adds a worker role.
+(require "std/string")
 (require "lib/text")
 (require "lib/llm/chat")
 
+(define (worker:finish pairs changes patch buf)
+  (let ((all (if patch
+               (cons (hash "kind" "patch"
+                           "diff" (string-join (reverse buf) "\n"))
+                     changes)
+               changes)))
+    (if (pair? pairs)
+      (list "ok" pairs (reverse all))
+      (list "error" "parse" "no RESULT"))))
+
 (define (worker:parse text)
-  (let loop ((lines (text:lines text)))
-    (if (not (pair? lines))
-      (list "error" "parse" "no RESULT")
-      (let ((line (string-trim (car lines))))
-        (if (string-prefix? line "RESULT ")
-          (let ((pairs (text:pairs (text:after line "RESULT "))))
-            (if (pair? pairs)
-              (list "ok" pairs)
-              (list "error" "parse" "RESULT has no checks")))
-          (loop (cdr lines)))))))
+  (let loop ((xs (text:lines (if (string? text) text "")))
+             (pairs #f)
+             (changes '())
+             (patch #f)
+             (buf '()))
+    (cond
+      ((not (pair? xs))
+       (worker:finish pairs changes patch buf))
+      (patch
+       (if (string=? (string-trim (car xs)) "END")
+         (loop (cdr xs) pairs
+               (cons (hash "kind" "patch"
+                           "diff" (string-join (reverse buf) "\n"))
+                     changes)
+               #f '())
+         (loop (cdr xs) pairs changes #t (cons (car xs) buf))))
+      ((string=? (string-trim (car xs)) "PATCH")
+       (loop (cdr xs) pairs changes #t '()))
+      ((string-prefix? (string-trim (car xs)) "RESULT ")
+       (loop (cdr xs)
+             (text:pairs (text:after (string-trim (car xs)) "RESULT "))
+             changes #f '()))
+      ((and (string-prefix? (string-trim (car xs)) "MUTATE ")
+            (pair? (cdr xs))
+            (pair? (cddr xs))
+            (string-prefix? (string-trim (cadr xs)) "OLD ")
+            (string-prefix? (string-trim (caddr xs)) "NEW "))
+       (loop (cdddr xs) pairs
+             (cons (hash "kind" "mutate"
+                         "path" (string-trim (text:after (string-trim (car xs)) "MUTATE "))
+                         "old" (text:after (string-trim (cadr xs)) "OLD ")
+                         "new" (text:after (string-trim (caddr xs)) "NEW "))
+                   changes)
+             #f '()))
+      (else (loop (cdr xs) pairs changes #f '())))))
 
 (define (worker:run spec mode)
   (let ((system (read-file "prompts/worker.txt")))

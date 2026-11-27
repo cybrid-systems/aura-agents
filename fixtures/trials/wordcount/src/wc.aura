@@ -1,0 +1,1 @@
+(define (wc:count text) 0)

@@ -1,0 +1,4 @@
+name = "trial-wordcount"
+entry = "src/wc.aura"
+preset = "dev"
+out = "out"

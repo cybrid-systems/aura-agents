@@ -3,11 +3,40 @@
 ;; Keep and rollback are the real bus verbs. The gate itself is the
 ;; stand-in in lib/adapt/gate.aura until aura#5391 and aura#5402.
 (require "std/bus")
+(require "std/string")
 (require "lib/adapt/gate")
 (require "lib/adapt/journal")
 
-(define (judge:decide session worldline contract evidence)
-  (let ((prompt (read-file "prompts/judge.txt")))
+(define (judge:token? s)
+  (and (string? s)
+       (> (string-length s) 0)
+       (< (string-length s) 64)
+       (not (string-contains? s "/"))
+       (not (string-contains? s " "))))
+
+;; Execution evidence is what the gate sees. Optional extra facts (the
+;; worker self-report) are recorded beside it and do not affect the gate.
+(define (judge:facts evidence extra gate-word)
+  (let ((h (hash "gate" gate-word "source" "exec")))
+    (if (hash? extra)
+      (for-each (lambda (k)
+                  (let ((v (hash-ref extra k)))
+                    (if (and (judge:token? k) (judge:token? v))
+                      (hash-set! h k v)
+                      #f)))
+                (hash-keys extra))
+      #f)
+    (for-each (lambda (p)
+                (if (and (pair? p) (pair? (cdr p))
+                         (judge:token? (car p)) (judge:token? (cadr p)))
+                  (hash-set! h (car p) (cadr p))
+                  #f))
+              (if (list? evidence) evidence '()))
+    h))
+
+(define (judge:decide session worldline contract evidence . rest)
+  (let ((prompt (read-file "prompts/judge.txt"))
+        (extra (if (and (pair? rest) (hash? (car rest))) (car rest) (hash))))
     (if (not (string? prompt))
       (list "error" "prompt" "missing judge prompt")
       (let ((g (gate:evidence session contract evidence)))
@@ -16,7 +45,7 @@
             (journal:emit! "gate-keep" 0 worldline
                            (hash "summary" "gate keep"
                                  "contract_hash" "judged-contract"
-                                 "facts" (hash "gate" "satisfied")))
+                                 "facts" (judge:facts evidence extra "satisfied")))
             (list "ok" "keep" (bus:keep session worldline 0 1) g))
           (begin
             (journal:emit! "gate-rollback" 0 worldline
@@ -24,5 +53,5 @@
                                  "contract_hash" "judged-contract"
                                  "reason" (if (and (pair? g) (pair? (cdr g)))
                                             (cadr g) "gate")
-                                 "facts" (hash "gate" "rejected")))
+                                 "facts" (judge:facts evidence extra "rejected")))
             (list "ok" "rollback" (bus:rollback session worldline) g)))))))

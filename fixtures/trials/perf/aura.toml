@@ -1,0 +1,4 @@
+name = "trial-perf"
+entry = "src/hot.aura"
+preset = "dev"
+out = "out"

@@ -103,3 +103,25 @@
           "cpu-free" cpu-free
           "mem-slots" mem-slots
           "reason" reason)))
+
+;; AURA_AGENTS_WORKERS replaces the sized count, including zero.
+;; Empty or non-numeric text leaves the sized result alone.
+(define (supervisor:env-workers text)
+  (if (not (string? text))
+    #f
+    (let ((s (string-trim text)))
+      (if (string=? s "")
+        #f
+        (let ((n (string->number s)))
+          (if (and (number? n) (>= n 0))
+            (if (integer? n) n (inexact->exact (floor n)))
+            #f))))))
+
+(define (supervisor:with-override sized text)
+  (let ((n (supervisor:env-workers text)))
+    (if (not (number? n))
+      sized
+      (hash "workers" n
+            "cpu-free" (hash-ref sized "cpu-free" 0)
+            "mem-slots" (hash-ref sized "mem-slots" 0)
+            "reason" "override"))))

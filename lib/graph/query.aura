@@ -85,13 +85,52 @@
           (hash-set! seen (car rest) #t)
           (loop (cdr rest) seen (cons (car rest) acc)))))))
 
+(define (query:req-of node)
+  (let ((facts (hash-ref node "facts" (hash))))
+    (let ((r (if (hash? facts) (hash-ref facts "req" "") "")))
+      (if (string? r) r ""))))
+
+(define (query:scoped? g)
+  (let loop ((xs (graph:all-nodes g)))
+    (cond
+      ((not (pair? xs)) #f)
+      ((> (string-length (query:req-of (car xs))) 0) #t)
+      (else (loop (cdr xs))))))
+
+;; A fingerprint query hides nodes stamped for a different requirement.
+;; Once any node carries a fingerprint, unstamped evidence is hidden too
+;; so a legacy workspace cannot keep leaking into the next requirement.
+;; Data-free seed patterns stay visible.
+(define (query:in-scope? node fp scoped)
+  (if (not (and (string? fp) (> (string-length fp) 0)))
+    #t
+    (let ((got (query:req-of node)))
+      (cond
+        ((> (string-length got) 0) (string=? got fp))
+        ((or (equal? (hash-ref node "type" "") "pattern")
+             (equal? (hash-ref node "origin" "") "seed"))
+         #t)
+        (scoped #f)
+        (else #t)))))
+
+(define (query:fingerprint target requirement)
+  (graph:hex (graph:digest
+               (string-append (if (string? target) target "")
+                              "\n"
+                              (if (string? requirement) requirement "")))))
+
 ;; Bounded multi-hop walk from seed nodes. Returns (positive invalid).
 (define (query:walk g seeds opts)
   (let* ((max-hops (let ((n (hash-ref opts "max-hops" 2)))
                      (if (number? n) n 2)))
          (max-nodes (let ((n (hash-ref opts "max-nodes" 8)))
                       (if (number? n) n 8)))
-         (start (query:take max-nodes (query:seed-nodes g seeds))))
+         (fp (let ((v (hash-ref opts "fingerprint" "")))
+               (if (string? v) v "")))
+         (scoped (if (> (string-length fp) 0) (query:scoped? g) #f))
+         (start (query:take max-nodes
+                            (filter (lambda (n) (query:in-scope? n fp scoped))
+                                    (query:seed-nodes g seeds)))))
     (let loop ((frontier (map (lambda (n) (list (hash-ref n "node_id") 0)) start))
                (seen (hash))
                (positive '())
@@ -111,7 +150,7 @@
               (let ((node (graph:get-node g id)))
                 (begin
                   (hash-set! seen id #t)
-                  (if (not node)
+                  (if (or (not node) (not (query:in-scope? node fp scoped)))
                     (loop (cdr frontier) seen positive negative count)
                     (let ((next (if (< depth max-hops)
                                   (append

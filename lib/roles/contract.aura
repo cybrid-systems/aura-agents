@@ -1,0 +1,96 @@
+;; Requirement → contract. The target, the repository context and the
+;; requirement are parameters. Nothing here assumes aura-redis.
+(require "std/string")
+
+(define (contract:has? text needle)
+  (and (string? text) (string? needle) (string-contains? text needle)))
+
+(define (contract:redis? text)
+  (or (contract:has? text "aura-redis")
+      (contract:has? text "ZRANGEBYSCORE")
+      (contract:has? text "zrangebyscore")))
+
+(define (contract:wordcount? text)
+  (or (contract:has? text "单词")
+      (contract:has? text "词数")
+      (contract:has? text "word count")
+      (contract:has? text "wordcount")
+      (contract:has? text "word-count")
+      (contract:has? text "count words")))
+
+(define (contract:budget? text)
+  (or (contract:has? text "budget")
+      (contract:has? text "预算")
+      (contract:has? text "性能")
+      (contract:has? text "优化")
+      (contract:has? text "optimize")))
+
+(define (contract:perf? text)
+  (or (contract:budget? text)
+      (contract:has? text "p99")
+      (contract:has? text "latency")))
+
+(define (contract:kind text)
+  (cond
+    ((contract:redis? text) "redis")
+    ((contract:wordcount? text) "wordcount")
+    ((contract:perf? text) "perf")
+    (else "generic")))
+
+(define (contract:target requirement given)
+  (if (and (string? given) (> (string-length given) 0))
+    given
+    (cond
+      ((contract:redis? requirement) "cybrid-systems/aura-redis")
+      ((contract:wordcount? requirement) "local/wordcount")
+      ((contract:perf? requirement) "local/perf")
+      (else "local/project"))))
+
+(define (contract:context given)
+  (if (and (string? given) (> (string-length given) 0)) given "none"))
+
+(define (contract:planner-user target context requirement hint)
+  (string-append
+    "TARGET " (if (string? target) target "") "\n"
+    "CONTEXT " (if (string? context) context "") "\n"
+    "REQUIREMENT\n"
+    (if (string? requirement) requirement "")
+    (if (and (string? hint) (> (string-length hint) 0))
+      (string-append "\n\n" hint)
+      "")))
+
+(define (contract:worker-user target context requirement task)
+  (string-append
+    "TARGET " (if (string? target) target "") "\n"
+    "CONTEXT " (if (string? context) context "") "\n"
+    "TASK " (if (string? task) task "") "\n"
+    "REQUIREMENT\n"
+    (if (string? requirement) requirement "")))
+
+(define (contract:redis-reply p99)
+  (string-append
+    "CONTRACT tests=pass p99=" p99 "\n"
+    "TASK implement-zrangebyscore\n"
+    "TASK check-p99\n"))
+
+;; Deterministic CONTRACT/TASK text. Real models reply in this shape;
+;; the mock uses the same rules so a non-redis requirement cannot come
+;; back as the aura-redis contract.
+(define (contract:reply text)
+  (cond
+    ((contract:has? text "SIMULATE-LLM-ERROR")
+     "ERROR connection refused\n")
+    ((and (contract:has? text "SIMULATE-P99")
+          (not (contract:has? text "AVOID p99")))
+     (contract:redis-reply "skip"))
+    ((contract:redis? text)
+     (contract:redis-reply "ok"))
+    ((contract:wordcount? text)
+     "CONTRACT tests=pass\nTASK implement-word-count\n")
+    ((contract:perf? text)
+     (string-append
+       "CONTRACT tests=pass p99=ok"
+       (if (contract:budget? text) " budget=ok" "")
+       "\nTASK optimize-hot-path\n"))
+    (else
+     "CONTRACT tests=pass\nTASK implement-change\n")))

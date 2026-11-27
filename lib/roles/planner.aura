@@ -1,9 +1,11 @@
 ;; Planner: load prompts/planner.txt, ask the LLM seam, parse the reply
 ;; into a contract and tasks. Role id on the bus stays 0 until
 ;; aura#5400 adds a planner role.
+(require "std/string")
 (require "lib/text")
 (require "lib/llm/chat")
 (require "lib/graph/query")
+(require "lib/roles/contract")
 
 (define (planner:parse text)
   (let loop ((lines (text:lines text)) (contract #f) (tasks '()))
@@ -26,20 +28,34 @@
 
 (define (planner:last-hits) *planner-last-hits*)
 
-(define (planner:plan-with requirement mode graph)
-  (let* ((q (if graph
-              (graph:query-for-planner graph (query:seeds requirement) (hash))
+(define (planner:llm-error text)
+  (let ((s (string-trim (if (string? text) text ""))))
+    (if (string-prefix? s "ERROR")
+      (string-trim (substring s 5 (string-length s)))
+      #f)))
+
+(define (planner:plan-with requirement mode graph . rest)
+  (let* ((given-target (if (pair? rest) (car rest) #f))
+         (given-context (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+         (target (contract:target requirement given-target))
+         (context (contract:context given-context))
+         (fp (query:fingerprint target requirement))
+         (q (if graph
+              (graph:query-for-planner graph (query:seeds requirement)
+                                       (hash "fingerprint" fp))
               (hash "hint" "" "hits" '())))
          (hint (hash-ref q "hint" ""))
          (hits (hash-ref q "hits" '()))
          (system (read-file "prompts/planner.txt"))
-         (user (if (and (string? hint) (> (string-length hint) 0))
-                 (string-append requirement "\n\n" hint)
-                 requirement)))
+         (user (contract:planner-user target context requirement hint)))
     (set! *planner-last-hits* hits)
     (if (not (string? system))
       (list "error" "prompt" "missing planner prompt")
-      (planner:parse (chat:complete mode "planner" system user)))))
+      (let ((reply (chat:complete mode "planner" system user)))
+        (let ((reason (planner:llm-error reply)))
+          (if (string? reason)
+            (list "error" "llm" reason)
+            (planner:parse reply)))))))
 
 (define (planner:plan requirement mode)
   (planner:plan-with requirement mode #f))

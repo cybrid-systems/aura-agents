@@ -7,7 +7,9 @@
 ;; deepseek-flash, the DeepSeek V4.1 Flash preset used by aura-runner.
 ;; AURA_AGENTS_LLM=mock forces the mock even if a key is present.
 ;; AURA_AGENTS_LLM=real forces llm:chat. Unset uses real only when a
-;; key is present, otherwise the mock.
+;; key is present, otherwise the mock. A real run needs
+;; `aura run --grant network`; without that grant the call fails closed
+;; and the planner surfaces the llm error.
 (require "std/llm")
 (require "lib/llm/mock")
 
@@ -33,21 +35,29 @@
 (define (chat:model)
   (chat:model-of (getenv "LLM_MODEL")))
 
+(define (chat:err e)
+  (cond
+    ((string? e) e)
+    ((and (pair? e) (pair? (cdr e)) (string? (cadr e))) (cadr e))
+    (else "llm-exception")))
+
 (define (chat:real system user)
-  (let* ((model (chat:model))
-         (from-env (getenv "LLM_MODEL"))
-         (extra (if (and (string? from-env) (> (string-length from-env) 0))
-                  (hash "temperature" 0)
-                  (hash "model" model "temperature" 0)))
-         (r (llm:chat (if (string? system) system "")
-                      (if (string? user) user "")
-                      extra)))
-    (cond
-      ((and (hash? r) (hash-ref r "ok" #f))
-       (let ((content (hash-ref r "content" "")))
-         (if (string? content) content "")))
-      ((hash? r) (string-append "ERROR " (hash-ref r "error" "llm")))
-      (else "ERROR llm"))))
+  (try
+    (let* ((model (chat:model))
+           (from-env (getenv "LLM_MODEL"))
+           (extra (if (and (string? from-env) (> (string-length from-env) 0))
+                    (hash "temperature" 0)
+                    (hash "model" model "temperature" 0)))
+           (r (llm:chat (if (string? system) system "")
+                        (if (string? user) user "")
+                        extra)))
+      (cond
+        ((and (hash? r) (hash-ref r "ok" #f))
+         (let ((content (hash-ref r "content" "")))
+           (if (string? content) content "")))
+        ((hash? r) (string-append "ERROR " (hash-ref r "error" "llm")))
+        (else "ERROR llm")))
+    (catch (e) (string-append "ERROR " (chat:err e)))))
 
 (define (chat:complete mode role system user)
   (if (equal? mode "real")

@@ -1,0 +1,3 @@
+(require "src/marker.aura")
+(display (if (marker:done?) "ok" "fail"))
+(newline)
