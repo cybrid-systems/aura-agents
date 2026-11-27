@@ -73,7 +73,7 @@
         (if (not (and (pair? parsed) (equal? (car parsed) "ok")))
           parsed
           (list "ok"
-                (cadr parsed)
+                (contract:ensure requirement (cadr parsed))
                 (contract:limit-tasks requirement (caddr parsed)
                                       (getenv "AURA_AGENTS_TASKS"))
                 (planner:dropped-of parsed)))))))

@@ -1,6 +1,7 @@
 ;; Requirement → contract. The target, the repository context and the
 ;; requirement are parameters. Nothing here assumes aura-redis.
 (require "std/string")
+(require "lib/text")
 
 (define (contract:has? text needle)
   (and (string? text) (string? needle) (string-contains? text needle)))
@@ -100,6 +101,39 @@
     (if (and (number? n) (> n 0))
       (if (integer? n) n (inexact->exact (floor n)))
       (if (contract:redis? requirement) 2 1))))
+
+(define (contract:missing? pairs key)
+  (not (string? (text:lookup pairs key))))
+
+(define (contract:wants-tests? requirement)
+  (or (contract:redis? requirement)
+      (contract:wordcount? requirement)
+      (contract:perf? requirement)
+      (contract:has? (contract:scoped requirement) "测试")
+      (contract:has? (contract:scoped requirement) "test")))
+
+(define (contract:wants-p99? requirement)
+  (or (contract:has? (contract:scoped requirement) "p99")
+      (contract:has? (contract:scoped requirement) "latency")
+      (contract:has? (contract:scoped requirement) "延迟")
+      (contract:perf? requirement)))
+
+;; Put back an executable check the requirement asked for and the model
+;; omitted. An explicit value, including p99=skip, is left alone.
+(define (contract:ensure requirement pairs)
+  (let ((base (if (pair? pairs) pairs '())))
+    (let ((with-tests (if (and (contract:wants-tests? requirement)
+                               (contract:missing? base "tests"))
+                        (append base (list (list "tests" "pass")))
+                        base)))
+      (let ((with-p99 (if (and (contract:wants-p99? requirement)
+                               (contract:missing? with-tests "p99"))
+                        (append with-tests (list (list "p99" "ok")))
+                        with-tests)))
+        (if (and (contract:budget? requirement)
+                 (contract:missing? with-p99 "budget"))
+          (append with-p99 (list (list "budget" "ok")))
+          with-p99)))))
 
 (define (contract:limit-tasks requirement tasks env)
   (let ((cap (contract:task-cap-of requirement env)))

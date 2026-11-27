@@ -28,7 +28,9 @@
 (file-write "out/stdlib-mini/list.aura" "(export map filter)\n")
 (define mini (stdlib:reference-from "out/stdlib-mini" 500))
 (line "mini-words" (if (string-contains? mini "string-split-words") "ok" "bad"))
-(line "mini-list" (if (string-contains? mini "std/list:") "ok" "bad"))
+(line "mini-list" (if (and (string-contains? mini "(import \"std/list\")")
+                           (not (string-contains? mini "std/list:")))
+                    "ok" "bad"))
 (line "mini-deny" (if (string-contains? mini "NOT-EXPORTED: list:length") "ok" "bad"))
 
 (define sample1 (hash "cpus" 2 "load" 0 "mem-available-kb" 8000000))

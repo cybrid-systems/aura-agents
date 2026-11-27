@@ -77,10 +77,12 @@ contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=fail
 worker-retry=1
+feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golden at line 1:     want: 3    
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=fail
 worker-retry=2
+feedback-summary=apply task=implement-word-count path=src/wc.aura result=pass TEST  FAIL tests/wc_test.aura — stdout differs from tests/wc_test.golden at line 1:     want: 3    
 contract=tests=pass
 apply=implement-word-count:src/wc.aura:pass
 test-summary=fail

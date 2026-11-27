@@ -1,0 +1,62 @@
+;; Bare stdlib names, restored checks, parallel cap, external tree, constant cheat.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/roles/contract")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define hint (trial:unbound-hint "error: unbound variable: std/string:string-split-words"))
+(line "unbound-hint" (if (and (string-contains? hint "bare name")
+                              (string-contains? hint "string-split-words"))
+                       "ok" "bad"))
+(line "unbound-quiet" (if (string=? (trial:unbound-hint "tests=pass") "") "ok" "bad"))
+
+(define restored (contract:ensure "优化 hot path，预算内" '(("tests" "pass"))))
+(line "restored-budget" (text:lookup restored "budget"))
+(line "restored-p99" (text:lookup restored "p99"))
+(line "kept-skip"
+      (text:lookup (contract:ensure "SIMULATE-P99 add ZRANGEBYSCORE p99"
+                                    '(("tests" "pass") ("p99" "skip")))
+                   "p99"))
+
+(line "parallel-cap" (orchestrate:parallel-cap 4))
+(define both (orchestrate:map-parallel (list (lambda () 1) (lambda () 2))))
+(line "parallel-vals" (string-append (number->string (car both)) (number->string (cadr both))))
+
+(define constant (hash "kind" "mutate" "task" "implement-word-count"
+                       "path" "src/wc.aura"
+                       "old" "(define (wc:count text) 0)"
+                       "new" "(define (wc:count text) 3)"))
+(define cheated (trial:verdict 9801 "写一个单词计数命令行" '(("tests" "pass"))
+                               (list constant)))
+(line "constant-tests" (text:lookup cheated "tests"))
+
+(make-directory "out/ext-src/src")
+(make-directory "out/ext-src/tests")
+(file-write "out/ext-src/aura.toml" "name = \"ext\"\nentry = \"src/n.aura\"\npreset = \"dev\"\nout = \"out\"\n")
+(file-write "out/ext-src/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/ext-src/tests/n_test.aura" "(require \"src/n.aura\")\n(display (if (= (n:v) 1) \"ok\" \"fail\"))\n(newline)\n")
+(file-write "out/ext-src/tests/n_test.golden" "ok\n")
+(define before (file-read "out/ext-src/src/n.aura"))
+(trial:set-root! "out/ext-src")
+(define ext (trial:verdict 9802 "count words in the external tree" '(("tests" "pass"))
+                           (list (hash "kind" "mutate" "task" "implement-change"
+                                       "path" "src/n.aura"
+                                       "old" "(define (n:v) 0)"
+                                       "new" "(define (n:v) 1)"))))
+(trial:set-root! #f)
+(define after (file-read "out/ext-src/src/n.aura"))
+(line "ext-tests" (text:lookup ext "tests"))
+(line "ext-source" (if (equal? before after) "untouched" "written"))
+(line "ext-overlay"
+      (if (string-contains? (file-read "out/trials/9802/external/src/n.aura") "(define (n:v) 1)")
+        "changed" "same"))
+
+(orchestrate:feedback-summary "unbound variable: std/string:string-split-words")

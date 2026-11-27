@@ -51,6 +51,56 @@
       (string-append (substring all 0 trial:context-limit) "\n...truncated\n")
       all)))
 
+(define *trial-root* #f)
+
+(define (trial:set-root! path)
+  (set! *trial-root* path))
+
+;; AURA_AGENTS_TARGET is a local Aura project. Reads copy it into
+;; out/trials; the source directory is never written.
+(define (trial:root)
+  (if (and (string? *trial-root*) (> (string-length *trial-root*) 0))
+    *trial-root*
+    (let ((env (getenv "AURA_AGENTS_TARGET")))
+      (if (and (string? env) (> (string-length (string-trim env)) 0))
+        (string-trim env)
+        #f))))
+
+(define (trial:safe-dest? dest)
+  (and (string? dest) (string-prefix? dest "out/trials/")))
+
+(define (trial:copy-tree src dest)
+  (if (or (not (trial:safe-dest? dest))
+          (not (string? src))
+          (string=? src "")
+          (string-contains? src ".."))
+    #f
+    (begin
+      (trial:reset-dir! dest)
+      (make-directory dest)
+      (= (trial:shell (string-append "cp -a "
+                                     (trial:quote (string-append src "/."))
+                                     " "
+                                     (trial:quote dest)))
+         0))))
+
+(define (trial:external-context root)
+  (let ((listing (try (command-output
+                        (string-append "find " (trial:quote root)
+                                       " -type f -name '*.aura' | head -n 12"))
+                      (catch (e) ""))))
+    (let loop ((xs (text:lines (if (string? listing) listing ""))) (out "") (n 0))
+      (cond
+        ((or (not (pair? xs)) (>= n 2000)) (trial:clip out 2000))
+        ((string=? (string-trim (car xs)) "") (loop (cdr xs) out n))
+        (else
+          (let* ((path (string-trim (car xs)))
+                 (body (file-read path))
+                 (chunk (string-append "FILE " path "\n"
+                                       (if (string? body) (trial:clip body 400) "")
+                                       "\n")))
+            (loop (cdr xs) (string-append out chunk) (+ n (string-length chunk)))))))))
+
 (define (trial:dest ws kind)
   (string-append "out/trials/" (number->string (if (number? ws) ws 0)) "/"
                  (if (string? kind) kind "generic")))
@@ -241,7 +291,16 @@
     (if (<= (string-length t) n) t (substring t 0 n))))
 
 (define (trial:note! s)
-  (set! *trial-log* (trial:clip s 800)))
+  (set! *trial-log* (trial:clip s 1200)))
+
+;; An unbound "std/string:string-split-words" is the model joining the
+;; import hint to the bare name. Say so in the feedback.
+(define (trial:unbound-hint text)
+  (if (and (string? text)
+           (string-contains? text "unbound")
+           (string-contains? text ":"))
+    "HINT: an unbound mod:name is not a call. After (import \"std/string\") use the bare name, for example string-split-words.\n"
+    ""))
 
 (define (trial:capture! dest)
   (let ((err (file-read (string-append dest "/test.err")))
@@ -295,10 +354,17 @@
 ;; that does not apply is recorded; it does not skip the test. The
 ;; evidence includes applied=all|partial|none so a passing test cannot
 ;; hide a patch that never landed.
+(define (trial:prepare ws requirement)
+  (let ((root (trial:root))
+        (kind (contract:kind requirement))
+        (dest (trial:dest ws (if (trial:root) "external" (contract:kind requirement)))))
+    (if root
+      (if (trial:copy-tree root dest) dest #f)
+      (if (trial:isolate kind dest) dest #f))))
+
 (define (trial:verdict ws requirement contract changes)
-  (let* ((kind (contract:kind requirement))
-         (dest (trial:dest ws kind))
-         (ready (trial:isolate kind dest)))
+  (let* ((dest (trial:prepare ws requirement))
+         (ready (string? dest)))
     (if (not ready)
       (begin
         (set! *trial-report* '())
@@ -310,6 +376,7 @@
              (word (trial:applied-word report)))
         (set! *trial-report* report)
         (trial:note! (string-append (trial:format-report report)
+                                    (trial:unbound-hint (trial:last-log))
                                     "TEST\n"
                                     (trial:last-log)))
         (append tests (list (list "applied" word)))))))
