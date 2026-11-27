@@ -79,7 +79,7 @@ digests and `aura-ci` digest into `aura-perf`, `aura-harness`,
 Each branch is a normal reviewed PR; a failed target CI is a real
 compatibility signal, not something the generator hides.
 
-All seven repos are pinned at `8004cc70b` and the follow-nightly workflow
-is live in each of them. A new nightly is picked up within 15 minutes;
-the baseline still records an immutable build, so a consumer that starts
-during the roll keeps the same bytes.
+All seven repos carry the baseline and the follow-nightly workflow. A new
+nightly is picked up within 15 minutes; the baseline still records an
+immutable build, so a consumer that starts during the roll keeps the same
+bytes.
