@@ -1,0 +1,13 @@
+unbound-hint=ok
+unbound-quiet=ok
+restored-budget=ok
+restored-p99=ok
+kept-skip=skip
+parallel-cap=4
+parallel=fibers
+parallel-vals=12
+constant-tests=fail
+ext-tests=pass
+ext-source=untouched
+ext-overlay=changed
+feedback-summary=unbound variable: std/string:string-split-words

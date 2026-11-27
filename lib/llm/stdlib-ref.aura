@@ -33,12 +33,16 @@
       ((equal? (car ys) name) #t)
       (else (loop (cdr ys))))))
 
+;; "(import \"std/string\") then bare names: string-split-words"
+;; A "std/string: name" line makes models call the unbound
+;; std/string:string-split-words.
 (define (stdlib:line file text)
   (let ((names (stdlib:exports text))
         (mod (substring file 0 (- (string-length file) 5))))
     (if (not (pair? names))
       ""
-      (string-append "std/" mod ": " (string-join names " ") "\n"))))
+      (string-append "(import \"std/" mod "\") then bare names: "
+                     (string-join names " ") "\n"))))
 
 (define (stdlib:push acc chunk limit)
   (if (or (string=? chunk "") (>= (string-length acc) limit))
@@ -53,7 +57,7 @@
 ;; first. The result is capped at limit characters.
 (define (stdlib:reference-from dir limit)
   (let* ((cap (if (and (number? limit) (> limit 0)) limit 1200))
-         (header "STDLIB exported names only. builtins: length map filter string-append car cdr cons\nNOT-EXPORTED: list:length str:split list:map str:length\n")
+         (header "STDLIB: after (import \"std/<module>\") call the bare name. Do not write module:name.\nbuiltins: length map filter string-append car cdr cons\nNOT-EXPORTED: list:length str:split list:map str:length\n")
          (have (if (and (string? dir) (> (string-length dir) 0))
                  (try (dir-list dir) (catch (e) '()))
                  '())))

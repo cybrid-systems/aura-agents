@@ -1,3 +1,4 @@
+parallel=fibers
 contract=tests=pass p99=ok
 apply=implement-zrangebyscore:src/zset.aura:pass
 apply=check-p99:src/latency.aura:pass
@@ -64,6 +65,7 @@ bus-audit=ok
 bus-unhost=ok
 timeout-result=rollback
 timeout-nodes=3
+parallel=fibers
 contract=tests=pass p99=skip
 apply=implement-zrangebyscore:src/zset.aura:pass
 apply=check-p99:src/latency.aura:pass

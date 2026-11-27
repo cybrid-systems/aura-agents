@@ -130,11 +130,12 @@
         (begin
           (orchestrate:note-error name ev)
           (if (< try retries)
-            (begin
+            (let ((note "previous reply was not a RESULT plus PATCH or MUTATE"))
               (display "worker-retry=")
               (display (+ try 1))
               (newline)
-              (loop (+ try 1) "previous reply was not a RESULT plus PATCH or MUTATE"))
+              (orchestrate:feedback-summary note)
+              (loop (+ try 1) note))
             ev))))))
 
 ;; One claim for this worker. #f when the queue is empty or the reply
@@ -163,20 +164,68 @@
             (task:fail session id name now "worker-error")
             #f))))))
 
+;; Claim one open task. The board stays single-threaded; the model
+;; calls for a wave run together afterwards.
+(define (orchestrate:claim-slot session i now)
+  (let* ((name (orchestrate:worker-name i))
+         (claim (task:claim session name now)))
+    (if (not (orchestrate:ok? claim))
+      #f
+      (let* ((id (cadr claim))
+             (hb (task:heartbeat session id name now)))
+        (if (orchestrate:ok? hb)
+          (list name id (task:spec id) session)
+          (begin
+            (orchestrate:note-error name (list "error" "lease" "heartbeat rejected"))
+            (task:fail session id name now "worker-error")
+            #f))))))
+
+(define (orchestrate:claim-wave worker-ss now cap)
+  (let loop ((ss worker-ss) (i 0) (left cap) (acc '()))
+    (if (or (not (pair? ss)) (<= left 0))
+      (reverse acc)
+      (let ((slot (orchestrate:claim-slot (car ss) i now)))
+        (if (not slot)
+          (reverse acc)
+          (loop (cdr ss) (+ i 1) (- left 1) (cons slot acc)))))))
+
+(define (orchestrate:finish-slot slot ev now)
+  (let ((name (car slot))
+        (id (cadr slot))
+        (spec (caddr slot))
+        (session (cadddr slot)))
+    (if (orchestrate:ok? ev)
+      (begin
+        (task:complete session id name now "done")
+        (set! *orchestrate-specs* (append *orchestrate-specs* (list spec)))
+        ev)
+      (begin
+        (task:fail session id name now "worker-error")
+        #f))))
+
 (define (orchestrate:run-workers worker-ss mode now target context requirement feedback retries)
   (set! *orchestrate-specs* '())
-  (let wave ((acc '()))
-    (let ((step (let each ((ss worker-ss) (i 0) (acc acc) (progress #f))
-                  (if (not (pair? ss))
-                    (list acc progress)
-                    (let ((ev (orchestrate:claim-one (car ss) i mode now target context
-                                                     requirement feedback retries)))
-                      (each (cdr ss) (+ i 1)
-                            (if (orchestrate:ok? ev) (cons ev acc) acc)
-                            (or progress (orchestrate:ok? ev))))))))
-      (if (cadr step)
-        (wave (car step))
-        (reverse (car step))))))
+  (let ((cap (orchestrate:parallel-cap (length (filter number? worker-ss)))))
+    (let wave ((acc '()))
+      (let ((slots (orchestrate:claim-wave worker-ss now cap)))
+        (if (not (pair? slots))
+          (reverse acc)
+          (let* ((evs (orchestrate:map-parallel
+                        (map (lambda (slot)
+                               (lambda ()
+                                 (orchestrate:invoke (car slot) (caddr slot) mode target
+                                                     context requirement feedback retries)))
+                             slots)))
+                 (step (let each ((ss slots) (es evs) (acc acc) (progress #f))
+                         (if (or (not (pair? ss)) (not (pair? es)))
+                           (list acc progress)
+                           (let ((done (orchestrate:finish-slot (car ss) (car es) now)))
+                             (each (cdr ss) (cdr es)
+                                   (if (orchestrate:ok? done) (cons done acc) acc)
+                                   (or progress (orchestrate:ok? done))))))))
+            (if (cadr step)
+              (wave (car step))
+              (reverse (car step)))))))))
 
 (define (orchestrate:tests-failed? evidence)
   (let ((got (text:lookup evidence "tests")))
@@ -201,6 +250,58 @@
                                (begin (hash-set! c "task" (car ss)) c)
                                c))
                            chs)))))))
+
+(define (orchestrate:feedback-summary text)
+  (let ((flat (string-replace (trial:clip (if (string? text) text "") 160) "\n" " ")))
+    (display "feedback-summary=")
+    (display flat)
+    (newline)))
+
+(define (orchestrate:parallel-cap nworkers)
+  (let ((env (getenv "AURA_AGENTS_PARALLEL")))
+    (let ((n (if (and (string? env) (> (string-length env) 0)) (string->number env) #f)))
+      (let ((cap (if (and (number? n) (> n 0))
+                   (if (integer? n) n (inexact->exact (floor n)))
+                   nworkers)))
+        (if (<= nworkers 0) 0 (min nworkers cap))))))
+
+(define (orchestrate:spawn-ok? id)
+  (and (number? id) (> id 0)))
+
+;; Run thunks together when fibers exist. Join in spawn order.
+;; A failed spawn runs the thunks one by one instead.
+(define (orchestrate:map-parallel thunks)
+  (if (not (pair? thunks))
+    '()
+    (if (not (pair? (cdr thunks)))
+      (list ((car thunks)))
+      (let ((probe (try (fiber:spawn (lambda () #t)) (catch (e) 0))))
+        (if (not (orchestrate:spawn-ok? probe))
+          (begin
+            (display "parallel=serial")
+            (newline)
+            (map (lambda (th) (th)) thunks))
+          (begin
+            (try (fiber:join probe) (catch (e) #f))
+            (let ((ids (map (lambda (th)
+                              (try (fiber:spawn th) (catch (e) 0)))
+                            thunks)))
+              (if (let scan ((xs ids))
+                    (cond
+                      ((not (pair? xs)) #f)
+                      ((not (orchestrate:spawn-ok? (car xs))) #t)
+                      (else (scan (cdr xs)))))
+                (begin
+                  (display "parallel=serial")
+                  (newline)
+                  (map (lambda (th) (th)) thunks))
+                (begin
+                  (display "parallel=fibers")
+                  (newline)
+                  (map (lambda (id)
+                         (try (fiber:join id)
+                              (catch (e) (list "error" "fiber" "join"))))
+                       ids))))))))))
 
 (define (orchestrate:show-trial contract evidence)
   (display "contract=")
@@ -280,7 +381,9 @@
                            (display (+ attempt 1))
                            (newline)
                            (let* ((feedback (trial:last-log))
-                                  (again (orchestrate:rerun mode target context requirement feedback))
+                                  (again (begin
+                                           (orchestrate:feedback-summary feedback)
+                                           (orchestrate:rerun mode target context requirement feedback)))
                                   (ready1 (and (= (length again) (length ids)) (pair? again)))
                                   (next (if ready1
                                           (trial:verdict ws requirement contract
@@ -526,7 +629,10 @@
          (context (let ((given (hash-ref cfg "context" #f)))
                     (if (and (string? given) (> (string-length given) 0))
                       given
-                      (trial:fixture-context (contract:kind requirement)))))
+                      (let ((root (trial:root)))
+                        (if root
+                          (trial:external-context root)
+                          (trial:fixture-context (contract:kind requirement)))))))
          (fp (query:fingerprint target requirement))
          (graph-on (orchestrate:graph-on? cfg))
          (graph (if graph-on (graph:open ws) #f))
