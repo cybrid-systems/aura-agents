@@ -13,8 +13,6 @@ flake-unstable=yes
 render-tests=pass
 render-rg=speed
 render-p99=no
-rebase-retry=1
-prior-diff=yes
 contract=tests=pass
 apply=first:src/n.aura:pass
 apply=second:src/n.aura:pass

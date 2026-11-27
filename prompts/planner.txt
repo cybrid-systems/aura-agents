@@ -10,5 +10,5 @@ Use tests=pass when the requirement needs the project's checks to pass.
 Use p99=ok when the requirement says latency or p99 must not regress, or when CONTEXT shows a bench.
 Use budget=ok when the requirement states a budget, or when the bench prints a budget.
 Do not invent checks. An external project does not get p99 or budget just because the wording says optimize. CONTEXT shows the files the judge will run.
-Emit one TASK for a small requirement. A second TASK is only for a different file. Never put two tasks on the same file.
+Emit one TASK for a small requirement. A second TASK is only for a different file. Never put two tasks on the same file; fold those edits into one task that replaces the whole function.
 Do not widen the change beyond that contract. Do not touch the Aura C++ kernel.

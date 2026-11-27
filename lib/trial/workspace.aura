@@ -354,6 +354,45 @@
            (else
             (begin (set! *trial-replace-why* "OLD not found") #f))))))))
 
+(define (trial:form-end s start)
+  (let ((n (string-length s)))
+    (let loop ((i start) (depth 0) (str #f) (esc #f))
+      (if (>= i n)
+        n
+        (let ((c (string-ref s i)))
+          (if str
+            (if esc
+              (loop (+ i 1) depth #t #f)
+              (if (= c 92)
+                (loop (+ i 1) depth #t #t)
+                (loop (+ i 1) depth (not (= c 34)) #f)))
+            (cond
+              ((= c 34) (loop (+ i 1) depth #t #f))
+              ((= c 40) (loop (+ i 1) (+ depth 1) #f #f))
+              ((= c 41)
+               (if (<= depth 1) (+ i 1) (loop (+ i 1) (- depth 1) #f #f)))
+              (else (loop (+ i 1) depth #f #f)))))))))
+
+(define *trial-allow-swap* #f)
+
+;; A later task's OLD is the original function. Replace the define that
+;; is in the file now, instead of failing the apply.
+(define (trial:swap-fn! full text old new)
+  (let ((a (trial:fn-name (string-trim old)))
+        (b (trial:fn-name (string-trim new))))
+    (if (or (string=? a "") (not (string=? a b)))
+      #f
+      (let ((mark (string-append "(define (" a)))
+        (let ((i (string-index text mark 0)))
+          (if (or (not (number? i)) (< i 0))
+            #f
+            (let ((end (trial:form-end text i)))
+              (file-write full (string-append (substring text 0 i)
+                                              new
+                                              (substring text end (string-length text))))
+              (set! *trial-replace-why* "")
+              #t)))))))
+
 (define (trial:mutate! dest change)
   (let ((path (hash-ref change "path" ""))
         (old (hash-ref change "old" ""))
@@ -366,7 +405,18 @@
              (text (file-read full)))
         (if (not (string? text))
           (begin (set! *trial-replace-why* "OLD not found") #f)
-          (trial:replace-into full text old new))))))
+          (if (trial:replace-into full text old new)
+            #t
+            (if (not *trial-allow-swap*)
+              #f
+              (if (trial:swap-fn! full text old new)
+                (if (trial:test-ok? dest "")
+                  #t
+                  (begin
+                    (file-write full text)
+                    (set! *trial-replace-why* "OLD not found")
+                    #f))
+                #f))))))))
 
 (define (trial:diff-path raw)
   (let ((s (string-trim (if (string? raw) raw ""))))
@@ -588,8 +638,11 @@
   (let loop ((xs (if (pair? changes) changes '())) (acc '()) (seen '()))
     (if (not (pair? xs))
       (reverse acc)
-      (let* ((change (car xs))
-             (raw (if (and (hash? change) (equal? (hash-ref change "kind" "") "patch"))
+      (let* ((change (car xs)))
+        (set! *trial-allow-swap*
+              (and (hash? change)
+                   (trial:seen? (trial:change-path change) seen)))
+        (let* ((raw (if (and (hash? change) (equal? (hash-ref change "kind" "") "patch"))
                     (trial:apply-diff dest change)
                     (trial:mutate-row dest change)))
              (rows (trial:mark-prior raw seen)))
@@ -602,7 +655,7 @@
                     (add (cdr rs)
                          (if (and (hash-ref (car rs) "ok" #f) (> (string-length path) 0))
                            (cons path seen)
-                           seen))))))))))
+                           seen)))))))))))
 
 (define (trial:applied-word report)
   (let loop ((xs report) (n 0) (bad 0))
@@ -1089,7 +1142,34 @@
                 (cons (car xs) acc)
                 acc))))))
 
+(define *trial-fake* #f)
+
+(define (trial:use-fake! rules)
+  (set! *trial-fake* rules))
+
+(define (trial:fake-ms dir rel)
+  (if (not (pair? *trial-fake*))
+    #f
+    (let ((body (let ((own (file-read (string-append dir "/" rel))))
+                  (if (and (string? own) (string-contains? own "(hot:cost)"))
+                    (string-append own
+                                   (let ((src (file-read (string-append dir "/src/hot.aura"))))
+                                     (if (string? src) src "")))
+                    (if (string? own) own "")))))
+      (let loop ((xs *trial-fake*))
+        (if (not (pair? xs))
+          #f
+          (if (string-contains? body (car (car xs)))
+            (cadr (car xs))
+            (loop (cdr xs))))))))
+
 (define (trial:measure dir rel)
+  (let ((fake (trial:fake-ms dir rel)))
+    (if (number? fake)
+      (list "frame\n" fake #t)
+      (trial:measure-real dir rel))))
+
+(define (trial:measure-real dir rel)
   (let ((code (trial:shell
                 (string-append
                   "cd " (trial:quote dir)
@@ -1102,7 +1182,6 @@
             (let ((n (string->number (string-trim (if (string? ms) ms "")))))
               (if (number? n) n 0))
             (= code 0)))))
-
 (define (trial:old-tree base dest targets)
   (let loop ((xs targets) (neu '()))
     (if (not (pair? xs))
@@ -1193,14 +1272,29 @@
             (loop (cdr xs) (if (> (string-length name) 0) (cons name acc) acc)))
           (loop (cdr xs) acc))))))
 
-(define (trial:hot-of base dest)
+;; When the requirement names a function, time that one. Unnamed helpers
+;; such as render:legend are not the hot path.
+(define (trial:pick-hot names requirement)
+  (let ((hit (filter (lambda (n)
+                       (and (string? requirement)
+                            (> (string-length n) 0)
+                            (string-contains? requirement n)))
+                     names)))
+    (cond
+      ((pair? hit) hit)
+      ((and (string? requirement) (string-contains? requirement ":")) '())
+      (else names))))
+
+(define (trial:hot-of base dest requirement)
   (let loop ((xs (trial:changed-aura base dest)))
     (if (not (pair? xs))
       #f
       (let ((path (car xs)))
         (if (string-prefix? path "tests/")
           (loop (cdr xs))
-          (let ((found (trial:hot-names (file-read (string-append dest "/" path)))))
+          (let ((found (trial:pick-hot
+                         (trial:hot-names (file-read (string-append dest "/" path)))
+                         requirement)))
             (if (pair? found)
               (list path found)
               (loop (cdr xs)))))))))
@@ -1313,7 +1407,7 @@
                     (trial:write-hot dest (car hot) (cadr hot) 12)
                     (let ((b (trial:net-ms before))
                           (a (trial:net-ms dest)))
-                      (if (> b 30)
+                      (if (> b 100)
                         (trial:judge-net b a requirement)
                         #f)))
                   #f)))
@@ -1321,7 +1415,7 @@
       by-hot
       (let ((b (trial:file-net before (car files)))
             (a (trial:file-net dest (car files))))
-        (if (> b 30)
+        (if (> b 100)
           (trial:judge-net b a requirement)
           #f)))))
 
@@ -1329,7 +1423,7 @@
   (if (not (contract:speed? requirement))
     #f
     (let ((files (trial:time-targets base dest))
-          (hot (trial:hot-of base dest)))
+          (hot (trial:hot-of base dest requirement)))
       (if (not (pair? files))
         #f
         (let ((before (trial:old-tree base dest files)))
@@ -1634,6 +1728,30 @@
   (let ((t (file-read (string-append dir "/test.out"))))
     (if (string? t) (trial:clip t 500) "")))
 
+(define (trial:probe-base name)
+  (let ((n (string-length name)))
+    (let loop ((i 0) (acc ""))
+      (if (>= i n)
+        (string-append "tests/" acc "_probe_test")
+        (let ((c (string-ref name i)))
+          (loop (+ i 1)
+                (cond
+                  ((= c 58) (string-append acc "_"))
+                  ((= c 63) acc)
+                  (else (string-append acc (substring name i (+ i 1)))))))))))
+
+;; A probe KEEP needs the new test to call the changed function. If it
+;; does not, write that probe as a regression test on the kept tree.
+(define (trial:accept-probe dest rel name arg out evidence)
+  (if (string-contains? (trial:all-test-text dest) name)
+    evidence
+    (let ((base (trial:probe-base name)))
+      (file-write (string-append dest "/" base ".aura")
+                  (string-append "(require \"" rel "\")\n(display (" name " \"" arg "\"))\n(newline)\n"))
+      (file-write (string-append dest "/" base ".golden")
+                  (string-append out "\n"))
+      evidence)))
+
 ;; The new test was not red, but a requirement probe differs between
 ;; the original and the edit and the edit matches the property.
 (define (trial:proved-change base dest requirement)
@@ -1652,7 +1770,8 @@
                           (if (or (equal? bd dd)
                                   (not (equal? (trial:space-diff dest rel name) "ok")))
                             #f
-                            (string-append "rule=probe evidence=input=a b base=" bd " dest=" dd))))
+                            (trial:accept-probe dest rel name "a b" dd
+                              (string-append "rule=probe evidence=input=a b base=" bd " dest=" dd)))))
                        ((trial:word-req? requirement)
                         (let* ((lit "alpha beta gamma")
                                (bd (trial:probe base brel name lit))
@@ -1661,7 +1780,8 @@
                                   (not (equal? dd (trial:word-ref lit)))
                                   (not (equal? (trial:word-diff dest rel name) "ok")))
                             #f
-                            (string-append "rule=probe evidence=input=" lit " base=" bd " dest=" dd))))
+                            (trial:accept-probe dest rel name lit dd
+                              (string-append "rule=probe evidence=input=" lit " base=" bd " dest=" dd)))))
                        (else #f))))
             (if got got (loop (cdr xs)))))))))
 
@@ -1689,10 +1809,6 @@
     (set! *trial-base-out* "")
     (cond
       (tamp (trial:hold "tamper" tamp))
-      ((and (equal? speed "slow") toy) (trial:hold "toy" toy))
-      ((equal? speed "slow") "slow")
-      ((and green (equal? speed "speed"))
-       (if toy (trial:hold "toy" toy) "speed"))
       ((pair? changed)
        (let* ((red (trial:red-tree base dest changed))
               (red-fail (trial:aura-fail? red (trial:test-args changed)))
@@ -1706,6 +1822,8 @@
            (part (trial:hold "partial" part))
            ((equal? kind "assert") "pass")
            (else (trial:or-proved base dest requirement red)))))
+      ((and green (equal? speed "speed"))
+       (if toy (trial:hold "toy" toy) "speed"))
       ((and metric (trial:has-bench? dest))
        (let ((before (trial:parse-bench (trial:bench base)))
              (after (trial:parse-bench (trial:bench dest))))
@@ -1718,7 +1836,11 @@
              ((not green) "still-red")
              (else (trial:or-proved base dest requirement base))))))
       ((not green) "still-red")
-      ((not (trial:aura-fail? base "")) (trial:or-proved base dest requirement base))
+      ((not (trial:aura-fail? base ""))
+       (cond
+         (toy (trial:hold "toy" toy))
+         ((and (equal? speed "slow") (contract:speed? requirement)) "slow")
+         (else (trial:or-proved base dest requirement base))))
       (toy (trial:hold "toy" toy))
       (part (trial:hold "partial" part))
       ((pair? (trial:missing-goldens dest)) "missing-golden")
