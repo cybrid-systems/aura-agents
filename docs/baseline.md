@@ -41,7 +41,9 @@ workflow's job.
 
 `scripts/follow-nightly.py --repo .` reads the nightly manifest, pins the
 immutable assets, and patches `aura.toml`, `AURA_REF`, the workflow
-`aura-ci` digests and the `third_party/aura` gitlink when present. It is
+`aura-ci` digests and the `third_party/aura` gitlink when present. It also
+checks the manifest commit's latest CI push run and does nothing while that
+run is pending, cancelled, or failed. It is
 wrapped by the reusable workflow `.github/workflows/follow-nightly.yml`;
 every member/stage repo calls it on a 15-minute schedule and pushes only
 when the manifest moved. The bot verifies `check-baseline.py --self`
