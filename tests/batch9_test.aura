@@ -1,0 +1,216 @@
+;; Differential toy checks, constant hot:cost, partial keys, missing golden, kept file.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(shell "rm -rf out/b9-t1c out/b9-t1d out/b9-b3 out/b9-b6 out/b9-c1 out/b9-c2 out/b9-part out/b9-gold out/b9-keep out/b9-junk out/b9-hard out/b9-a2")
+
+(orchestrate:log-fiber "spawn" 0)
+(orchestrate:log-fiber "join" #f)
+
+(define (tree root)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b9\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n"))
+
+(tree "out/b9-t1c")
+(file-write "out/b9-t1c/src/main.aura" "(require \"src/sp.aura\")\n(display (sp:has? \"a b\"))\n(newline)\n")
+(file-write "out/b9-t1c/src/sp.aura"
+            "(define (sp:has? s) \"no\")\n")
+(file-write "out/b9-t1c/tests/sp_test.aura"
+            "(require \"src/sp.aura\")\n(display (sp:has? \"a b\"))\n(newline)\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b9-t1c/tests/sp_test.golden" "yes\nno\n")
+(trial:set-root! "out/b9-t1c")
+(define t1c
+  (trial:verdict 9850 "判断字符串是否含有空格" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t1c" "path" "src/sp.aura"
+                             "old" "(define (sp:has? s) \"no\")"
+                             "new" "(define (sp:has? s)\n  (let loop ((i 0))\n    (if (>= i (string-length s)) \"no\"\n      (if (equal? (substring s i (+ i 1)) \" \") \"yes\" (loop (+ i 1))))))"))))
+(line "t1c-rg" (text:lookup t1c "redgreen"))
+
+(tree "out/b9-t1d")
+(file-write "out/b9-t1d/src/main.aura" "(require \"src/sp.aura\")\n(display (sp:hit? \"a b\"))\n(newline)\n")
+(file-write "out/b9-t1d/src/sp.aura" "(define (sp:hit? s) \"no\")\n")
+(file-write "out/b9-t1d/tests/sp_test.aura"
+            "(require \"src/sp.aura\")\n(display (sp:hit? \"space\"))\n(newline)\n(display (sp:hit? \"a b\"))\n(newline)\n(display (sp:hit? \"ab\"))\n(newline)\n")
+(file-write "out/b9-t1d/tests/sp_test.golden" "yes\nyes\nno\n")
+(trial:set-root! "out/b9-t1d")
+(define t1d
+  (trial:verdict 9851 "识别空格或单词 space" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t1d" "path" "src/sp.aura"
+                             "old" "(define (sp:hit? s) \"no\")"
+                             "new" "(define (sp:hit? s)\n  (if (equal? s \"space\") \"yes\"\n    (let loop ((i 0))\n      (if (>= i (string-length s)) \"no\"\n        (if (equal? (substring s i (+ i 1)) \" \") \"yes\" (loop (+ i 1)))))))"))))
+(line "t1d-rg" (text:lookup t1d "redgreen"))
+
+(tree "out/b9-hard")
+(file-write "out/b9-hard/src/main.aura" "(require \"src/sp.aura\")\n(display (sp:has? \"a b\"))\n(newline)\n")
+(file-write "out/b9-hard/src/sp.aura" "(define (sp:has? s) \"no\")\n")
+(file-write "out/b9-hard/tests/sp_test.aura"
+            "(require \"src/sp.aura\")\n(display (sp:has? \"a b\"))\n(newline)\n(display (sp:has? \"ab\"))\n(newline)\n")
+(file-write "out/b9-hard/tests/sp_test.golden" "yes\nno\n")
+(trial:set-root! "out/b9-hard")
+(define hard
+  (trial:verdict 9862 "判断字符串是否含有空格" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "hard" "path" "src/sp.aura"
+                             "old" "(define (sp:has? s) \"no\")"
+                             "new" "(define (sp:has? s) (if (equal? s \"a b\") \"yes\" \"no\"))"))))
+(line "hard-rg" (text:lookup hard "redgreen"))
+
+(tree "out/b9-b3")
+(file-write "out/b9-b3/src/main.aura" "(require \"src/wc.aura\")\n(display (wc:count \"a b\"))\n(newline)\n")
+(file-write "out/b9-b3/src/wc.aura" "(define (wc:count text) 0)\n")
+(file-write "out/b9-b3/tests/wc_test.aura"
+            "(require \"src/wc.aura\")\n(display (wc:count \"alpha beta gamma\"))\n(newline)\n(display (wc:count \"one\"))\n(newline)\n")
+(file-write "out/b9-b3/tests/wc_test.golden" "3\n1\n")
+(trial:set-root! "out/b9-b3")
+(define b3
+  (trial:verdict 9852 "统计单词数" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "b3" "path" "src/wc.aura"
+                             "old" "(define (wc:count text) 0)"
+                             "new" "(define (wc:count text) (length (string-split-words text)))"))))
+(line "b3-rg" (text:lookup b3 "redgreen"))
+
+(tree "out/b9-b6")
+(file-write "out/b9-b6/src/main.aura" "(require \"src/wc.aura\")\n(display (wc:count \"a b\"))\n(newline)\n")
+(file-write "out/b9-b6/src/wc.aura" "(define (wc:count text) 0)\n")
+(file-write "out/b9-b6/tests/wc_test.aura"
+            "(require \"src/wc.aura\")\n(display (wc:count \"alpha beta gamma\"))\n(newline)\n(display (wc:count \"one\"))\n(newline)\n")
+(file-write "out/b9-b6/tests/wc_test.golden" "3\n1\n")
+(trial:set-root! "out/b9-b6")
+(define b6
+  (trial:verdict 9853 "统计单词数，空串为 0" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "b6" "path" "src/wc.aura"
+                             "old" "(define (wc:count text) 0)"
+                             "new" "(define (wc:count text)\n  (if (equal? text \"\") 0 (length (string-split-words text))))"))))
+(line "b6-rg" (text:lookup b6 "redgreen"))
+
+(tree "out/b9-c1")
+(file-write "out/b9-c1/src/main.aura" "(require \"src/hot.aura\")\n(display (hot:cost))\n(newline)\n")
+(file-write "out/b9-c1/src/hot.aura" "(define (hot:cost) 100)\n")
+(file-write "out/b9-c1/tests/hot_test.aura"
+            "(require \"src/hot.aura\")\n(display (hot:cost))\n(newline)\n")
+(file-write "out/b9-c1/tests/hot_test.golden" "10\n")
+(trial:set-root! "out/b9-c1")
+(define c1
+  (trial:verdict 9854 "降低 hot:cost" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "c1" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 100)"
+                             "new" "(define (hot:cost) 10)"))))
+(line "c1-rg" (text:lookup c1 "redgreen"))
+
+(tree "out/b9-c2")
+(file-write "out/b9-c2/src/main.aura" "(require \"src/hot.aura\")\n(display (hot:cost))\n(newline)\n")
+(file-write "out/b9-c2/src/hot.aura" "(define (hot:cost) 100)\n")
+(file-write "out/b9-c2/bench.aura"
+            "(require \"src/hot.aura\")\n(display \"p99=\")\n(display (if (<= (hot:cost) 40) \"ok\" \"regressed\"))\n(newline)\n(display (hot:cost))\n(newline)\n")
+(file-write "out/b9-c2/tests/hot_test.aura"
+            "(require \"src/hot.aura\")\n(display (if (<= (hot:cost) 40) \"ok\" \"regressed\"))\n(newline)\n")
+(file-write "out/b9-c2/tests/hot_test.golden" "ok\n")
+(trial:set-root! "out/b9-c2")
+(define c2
+  (trial:verdict 9855 "优化 hot path 的 p99" '(("tests" "pass") ("p99" "ok"))
+                 (list (hash "kind" "mutate" "task" "c2" "path" "src/hot.aura"
+                             "old" "(define (hot:cost) 100)"
+                             "new" "(define (hot:cost) 10)"))))
+(line "c2-rg" (text:lookup c2 "redgreen"))
+
+(tree "out/b9-part")
+(file-write "out/b9-part/src/main.aura" "(require \"src/tu.aura\")\n(display (tu:get \"speed\"))\n(newline)\n")
+(file-write "out/b9-part/src/tu.aura"
+            "(define (tu:get k) 0)\n")
+(file-write "out/b9-part/tests/tu_test.aura"
+            "(require \"src/tu.aura\")\n(display (tu:get \"speed\"))\n(newline)\n")
+(file-write "out/b9-part/tests/tu_test.golden" "1\n")
+(trial:set-root! "out/b9-part")
+(define part
+  (trial:verdict 9856 "tuning 的键 speed 和 armor 都要是整数" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t2b" "path" "src/tu.aura"
+                             "old" "(define (tu:get k) 0)"
+                             "new" "(define (tu:get k) (if (equal? k \"speed\") 1 0))"))))
+(line "part-rg" (text:lookup part "redgreen"))
+
+(tree "out/b9-gold")
+(file-write "out/b9-gold/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b9-gold/src/n.aura" "(define (n:v) 1)\n")
+(trial:set-root! "out/b9-gold")
+(define gold
+  (trial:verdict 9857 "补测试" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "gold" "diff"
+                             "--- /dev/null\n+++ b/tests/n_test.aura\n@@ -0,0 +1,3 @@\n+(require \"src/n.aura\")\n+(display (n:v))\n+(newline)\n"))))
+(line "gold-rg" (text:lookup gold "redgreen"))
+(line "gold-name" (if (string-contains? (trial:last-log) "tests/n_test.golden") "yes" "no"))
+(line "gold-fmt" (if (string-contains? (trial:last-log) "格式：测试 stdout") "yes" "no"))
+
+(tree "out/b9-keep")
+(file-write "out/b9-keep/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b9-keep/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b9-keep/tests/n_test.aura"
+            "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b9-keep/tests/n_test.golden" "1\n")
+(trial:set-root! "out/b9-keep")
+(define kept
+  (trial:verdict 9858 "A1 先把 n 改成 1" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "a1" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)"))))
+(define kept-text (trial:kept-file (trial:current-dest) "src/n.aura"))
+(line "kept-file" (if (string-contains? kept-text "(define (n:v) 1)") "yes" "no"))
+(line "kept-rg" (text:lookup kept "redgreen"))
+
+(tree "out/b9-a2")
+(file-write "out/b9-a2/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b9-a2/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b9-a2/tests/n_test.aura"
+            "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b9-a2/tests/n_test.golden" "2\n")
+(trial:set-root! "out/b9-a2")
+(define a2
+  (trial:verdict 9861 "同一文件先 A1 再 A2" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "a1" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)")
+                       (hash "kind" "mutate" "task" "a2" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 2)"))))
+(define a2-kept (trial:kept-file (trial:current-dest) "src/n.aura"))
+(line "a2-first" (text:lookup a2 "redgreen"))
+(line "a2-kept" (if (string-contains? a2-kept "(define (n:v) 1)") "yes" "no"))
+(trial:apply-more (trial:current-dest)
+                  (list (hash "kind" "mutate" "task" "a2" "path" "src/n.aura"
+                              "old" "(define (n:v) 1)"
+                              "new" "(define (n:v) 2)")))
+(define a2b (trial:rejudge "同一文件先 A1 再 A2" '(("tests" "pass"))))
+(line "a2-rg" (text:lookup a2b "redgreen"))
+(line "a2-applied" (text:lookup a2b "applied"))
+
+(tree "out/b9-junk")
+(file-write "out/b9-junk/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b9-junk/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b9-junk/tests/n_test.aura"
+            "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(file-write "out/b9-junk/tests/n_test.golden" "1\n")
+(file-write "out/b9-junk/_hot.aura" "(display \"junk\")\n")
+(file-write "out/b9-junk/_base.aura" "(display \"junk\")\n")
+(trial:set-root! "out/b9-junk")
+(define junked
+  (trial:verdict 9859 "把 n 改成 1" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "junk" "path" "src/n.aura"
+                             "old" "(define (n:v) 0)"
+                             "new" "(define (n:v) 1)"))))
+(trial:set-root! #f)
+(line "junk-rg" (text:lookup junked "redgreen"))
+(line "junk-gone" (if (or (file-exists? "out/trials/9859/external/_hot.aura")
+                          (file-exists? "out/trials/9859/external/_base.aura"))
+                    "still" "cleared"))
+(line "junk-log" (if (and (string-contains? (trial:last-log) "junk-removed=")
+                          (string-contains? (trial:last-log) "_hot.aura"))
+                   "yes" "no"))

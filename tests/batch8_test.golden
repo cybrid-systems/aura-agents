@@ -7,7 +7,7 @@ render-rg=speed
 render-p99=no
 const-rg=toy
 single-rg=toy
-table-rg=toy
+table-rg=pass
 contract=tests=pass
 apply=rewrite-assert:src/n.aura:pass
 apply=rewrite-assert:tests/n_test.aura:pass
