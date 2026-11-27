@@ -93,11 +93,10 @@
     "+++ b/bench.aura\n"
     "@@ -0,0 +1,7 @@\n"
     "+(require \"src/hot.aura\")\n"
+    "+(let loop ((i 0) (s \"\"))\n"
+    "+  (if (>= i (hot:cost)) s (loop (+ i 1) (string-append s \"x\"))))\n"
     "+(display \"out=\")\n"
     "+(display (hot:frame))\n"
-    "+(newline)\n"
-    "+(display \"ms=\")\n"
-    "+(display (hot:cost))\n"
     "+(newline)\n"))
 
 (define (speed-patch cost-new frame-old frame-new)
@@ -107,18 +106,18 @@
     "@@ -1,2 +1,2 @@\n"
     "-(define (hot:frame) \"" frame-old "\")\n"
     "+(define (hot:frame) \"" frame-new "\")\n"
-    "-(define (hot:cost) 5900)\n"
+    "-(define (hot:cost) 20000)\n"
     "+(define (hot:cost) " cost-new ")\n"
     bench-diff))
 
 (proj "out/b6-speed"
-      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n"
       hot-test "ok\n")
 (trial:set-root! "out/b6-speed")
 (define sped
   (trial:verdict 9820 "优化渲染耗时" '(("tests" "pass"))
                  (list (hash "kind" "patch" "task" "speed"
-                             "diff" (speed-patch "80" "ok" "ok")))))
+                             "diff" (speed-patch "1" "ok" "ok")))))
 (line "speed-tests" (text:lookup sped "tests"))
 (line "speed-rg" (text:lookup sped "redgreen"))
 (line "speed-applied" (text:lookup sped "applied"))
@@ -126,17 +125,17 @@
 (line "speed-budget" (if (text:lookup sped "budget") "yes" "no"))
 
 (proj "out/b6-slow"
-      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n"
       hot-test "ok\n")
 (trial:set-root! "out/b6-slow")
 (define slow
   (trial:verdict 9821 "优化渲染耗时" '(("tests" "pass"))
                  (list (hash "kind" "patch" "task" "slow"
-                             "diff" (speed-patch "4000" "ok" "ok")))))
+                             "diff" (speed-patch "18000" "ok" "ok")))))
 (line "slow-rg" (text:lookup slow "redgreen"))
 
 (proj "out/b6-diff"
-      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n"
       hot-test "ok\n")
 (trial:set-root! "out/b6-diff")
 (define drifted
@@ -147,7 +146,7 @@
 (line "drift-rg" (text:lookup drifted "redgreen"))
 
 (proj "out/b6-miss"
-      "(define (hot:frame) \"ok\")\n(define (hot:cost) 5900)\n"
+      "(define (hot:frame) \"ok\")\n(define (hot:cost) 20000)\n"
       hot-test "ok\n")
 (trial:set-root! "out/b6-miss")
 (define missed
