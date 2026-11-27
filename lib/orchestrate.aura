@@ -182,6 +182,52 @@
   (let ((got (text:lookup evidence "tests")))
     (or (not (string? got)) (equal? got "fail") (equal? got "missing"))))
 
+(define (orchestrate:need-retry? evidence)
+  (or (orchestrate:tests-failed? evidence)
+      (let ((applied (text:lookup evidence "applied")))
+        (and (string? applied) (not (equal? applied "all"))))))
+
+(define (orchestrate:tag-changes results)
+  (let loop ((rs results) (ss *orchestrate-specs*) (acc '()))
+    (if (or (not (pair? rs)) (not (pair? ss)))
+      acc
+      (let ((chs (if (and (pair? (cddr (car rs))) (list? (caddr (car rs))))
+                   (caddr (car rs))
+                   '())))
+        (loop (cdr rs) (cdr ss)
+              (append acc
+                      (map (lambda (c)
+                             (if (hash? c)
+                               (begin (hash-set! c "task" (car ss)) c)
+                               c))
+                           chs)))))))
+
+(define (orchestrate:show-trial contract evidence)
+  (display "contract=")
+  (display (string-join (map (lambda (p) (string-append (car p) "=" (cadr p)))
+                             contract)
+                        " "))
+  (newline)
+  (for-each
+    (lambda (r)
+      (display "apply=")
+      (display (hash-ref r "task" ""))
+      (display ":")
+      (display (hash-ref r "path" ""))
+      (display ":")
+      (display (if (hash-ref r "ok" #f) "pass" "fail"))
+      (newline))
+    (trial:last-report))
+  (display "test-summary=")
+  (let ((t (text:lookup evidence "tests")))
+    (display (if (string? t) t "missing")))
+  (newline))
+
+(define (orchestrate:with-applied contract)
+  (if (text:lookup contract "applied")
+    contract
+    (append contract (list (list "applied" "all")))))
+
 (define (orchestrate:rerun mode target context requirement feedback)
   (let loop ((specs *orchestrate-specs*) (acc '()))
     (if (not (pair? specs))
@@ -221,26 +267,28 @@
                                (results first)
                                (evidence (if ready0
                                            (trial:verdict ws requirement contract
-                                                          (orchestrate:changes first))
-                                           '())))
-                     (if (or (not ready0)
-                             (>= attempt retries)
-                             (not (orchestrate:tests-failed? evidence)))
-                       (list results evidence)
-                       (begin
-                         (display "worker-retry=")
-                         (display (+ attempt 1))
-                         (newline)
-                         (let* ((feedback (trial:last-log))
-                                (again (orchestrate:rerun mode target context requirement feedback))
-                                (ready1 (and (= (length again) (length ids)) (pair? again)))
-                                (next (if ready1
-                                        (trial:verdict ws requirement contract
-                                                       (orchestrate:changes again))
-                                        evidence)))
-                           (retry (+ attempt 1)
-                                  (if ready1 again results)
-                                  next))))))
+                                                          (orchestrate:tag-changes first))
+                                           (begin (trial:clear!) '()))))
+                     (begin
+                       (orchestrate:show-trial contract evidence)
+                       (if (or (not ready0)
+                               (>= attempt retries)
+                               (not (orchestrate:need-retry? evidence)))
+                         (list results evidence)
+                         (begin
+                           (display "worker-retry=")
+                           (display (+ attempt 1))
+                           (newline)
+                           (let* ((feedback (trial:last-log))
+                                  (again (orchestrate:rerun mode target context requirement feedback))
+                                  (ready1 (and (= (length again) (length ids)) (pair? again)))
+                                  (next (if ready1
+                                          (trial:verdict ws requirement contract
+                                                         (orchestrate:tag-changes again))
+                                          evidence)))
+                             (retry (+ attempt 1)
+                                    (if ready1 again results)
+                                    next)))))))
            (results (car passed))
            (evidence (cadr passed))
            (ready (and (= (length results) (length ids)) (pair? results))))
@@ -252,7 +300,8 @@
       (let ((tr (bus:trial judge-s 1)))
         (hash-set! flags "bus-trial" (orchestrate:flag tr))
         (if (orchestrate:ok? tr)
-          (let ((d (judge:decide judge-s (cadr tr) contract
+          (let ((d (judge:decide judge-s (cadr tr)
+                                 (if ready (orchestrate:with-applied contract) contract)
                                  (if ready evidence '())
                                  (hash "self-tests" (orchestrate:self-tests results)))))
             (hash-set! flags "gate-backend" (gate:backend))

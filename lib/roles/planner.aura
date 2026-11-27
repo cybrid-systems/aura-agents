@@ -59,6 +59,28 @@
       (string-trim (substring s 5 (string-length s)))
       #f)))
 
+(define (planner:dropped-of parsed)
+  (if (and (pair? parsed) (pair? (cdr parsed)) (pair? (cddr parsed))
+           (pair? (cdddr parsed)) (list? (cadddr parsed)))
+    (cadddr parsed)
+    '()))
+
+(define (planner:finish requirement reply)
+  (let ((reason (planner:llm-error reply)))
+    (if (string? reason)
+      (list "error" "llm" reason)
+      (let ((parsed (planner:parse reply)))
+        (if (not (and (pair? parsed) (equal? (car parsed) "ok")))
+          parsed
+          (list "ok"
+                (cadr parsed)
+                (contract:limit-tasks requirement (caddr parsed)
+                                      (getenv "AURA_AGENTS_TASKS"))
+                (planner:dropped-of parsed)))))))
+
+(define (planner:ask requirement mode system user)
+  (planner:finish requirement (chat:complete mode "planner" system user)))
+
 (define (planner:plan-with requirement mode graph . rest)
   (let* ((given-target (if (pair? rest) (car rest) #f))
          (given-context (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
@@ -78,11 +100,13 @@
     (set! *planner-last-hits* hits)
     (if (not (string? system))
       (list "error" "prompt" "missing planner prompt")
-      (let ((reply (chat:complete mode "planner" system user)))
-        (let ((reason (planner:llm-error reply)))
-          (if (string? reason)
-            (list "error" "llm" reason)
-            (planner:parse reply)))))))
+      (let ((first (planner:ask requirement mode system user)))
+        (if (and (pair? first) (equal? (car first) "error") (equal? (cadr first) "llm"))
+          (begin
+            (display "planner-retry=1")
+            (newline)
+            (planner:ask requirement mode system user))
+          first)))))
 
 (define (planner:plan requirement mode)
   (planner:plan-with requirement mode #f))

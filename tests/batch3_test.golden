@@ -1,0 +1,16 @@
+planner-default=150
+cap-small=1
+cap-redis=2
+cap-env=3
+limit=1
+partial-tests=pass
+partial-applied=partial
+partial-keep=no
+feedback-path=ok
+feedback-old=ok
+feedback-now=ok
+feedback-bare=no
+conflict-tests=pass
+conflict-applied=partial
+conflict-earlier=ok
+conflict-keep=no

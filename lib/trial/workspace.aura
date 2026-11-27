@@ -154,12 +154,70 @@
       ((equal? (hash-ref change "kind" "") "patch") (trial:patch! dest change))
       (else #f))))
 
-(define (trial:apply-all dest changes)
-  (let loop ((xs changes))
-    (cond
-      ((not (pair? xs)) #t)
-      ((trial:apply-one dest (car xs)) (loop (cdr xs)))
-      (else #f))))
+(define (trial:change-path change)
+  (let ((path (hash-ref change "path" #f)))
+    (if (and (string? path) (> (string-length path) 0))
+      path
+      (let ((from-diff (trial:patch-path (hash-ref change "diff" ""))))
+        (if (string? from-diff) from-diff "")))))
+
+(define (trial:change-old change)
+  (let ((old (hash-ref change "old" #f)))
+    (if (and (string? old) (> (string-length old) 0))
+      old
+      (trial:patch-body (hash-ref change "diff" "") "-"))))
+
+(define (trial:apply-report dest changes)
+  (let loop ((xs (if (pair? changes) changes '())) (acc '()) (seen '()))
+    (if (not (pair? xs))
+      (reverse acc)
+      (let* ((change (car xs))
+             (path (if (hash? change) (trial:change-path change) ""))
+             (prior (let scan ((ys seen))
+                      (cond
+                        ((not (pair? ys)) #f)
+                        ((equal? (car ys) path) #t)
+                        (else (scan (cdr ys))))))
+             (ok (and (hash? change) (trial:apply-one dest change)))
+             (now (file-read (string-append dest "/" path))))
+        (loop (cdr xs)
+              (cons (hash "task" (if (hash? change) (hash-ref change "task" "") "")
+                          "path" path
+                          "ok" (if ok #t #f)
+                          "prior" prior
+                          "old" (trial:clip (if (hash? change) (trial:change-old change) "") 160)
+                          "now" (trial:clip (if (string? now) now "") 240))
+                    acc)
+              (if (and ok (> (string-length path) 0)) (cons path seen) seen))))))
+
+(define (trial:applied-word report)
+  (let loop ((xs report) (n 0) (bad 0))
+    (if (not (pair? xs))
+      (cond
+        ((= n 0) "none")
+        ((= bad 0) "all")
+        (else "partial"))
+      (loop (cdr xs) (+ n 1) (if (hash-ref (car xs) "ok" #f) bad (+ bad 1))))))
+
+(define (trial:format-report report)
+  (let loop ((xs report) (out ""))
+    (if (not (pair? xs))
+      out
+      (let ((r (car xs)))
+        (loop (cdr xs)
+              (string-append out
+                "apply task=" (hash-ref r "task" "")
+                " path=" (hash-ref r "path" "")
+                " result=" (if (hash-ref r "ok" #f) "pass" "fail")
+                "\n"
+                (if (hash-ref r "ok" #f)
+                  ""
+                  (string-append
+                    (if (hash-ref r "prior" #f)
+                      "file already changed by an earlier task\n"
+                      "")
+                    "OLD not found:\n" (hash-ref r "old" "") "\n"
+                    "file now:\n" (hash-ref r "now" "") "\n"))))))))
 
 (define (trial:wants? contract key)
   (let loop ((xs contract))
@@ -169,8 +227,14 @@
       (else (loop (cdr xs))))))
 
 (define *trial-log* "")
+(define *trial-report* '())
 
 (define (trial:last-log) *trial-log*)
+(define (trial:last-report) *trial-report*)
+
+(define (trial:clear!)
+  (set! *trial-log* "")
+  (set! *trial-report* '()))
 
 (define (trial:clip s n)
   (let ((t (if (string? s) s "")))
@@ -227,19 +291,28 @@
                (list (car p) (if (string? got) got "missing"))))
            contract))))
 
-;; Copy the seed, apply every change, return execution evidence aligned
-;; with the contract. A change that does not apply yields missing checks
-;; so a self-reported pass cannot be kept.
+;; Copy the seed, apply what fits, and still run the checks. A change
+;; that does not apply is recorded; it does not skip the test. The
+;; evidence includes applied=all|partial|none so a passing test cannot
+;; hide a patch that never landed.
 (define (trial:verdict ws requirement contract changes)
   (let* ((kind (contract:kind requirement))
          (dest (trial:dest ws kind))
          (ready (trial:isolate kind dest)))
-    (if (or (not ready)
-            (not (trial:apply-all dest (if (pair? changes) changes '()))))
+    (if (not ready)
       (begin
-        (trial:note! "apply failed")
-        (map (lambda (p) (list (car p) "missing")) contract))
-      (trial:observe dest contract))))
+        (set! *trial-report* '())
+        (trial:note! "isolate failed")
+        (append (map (lambda (p) (list (car p) "missing")) contract)
+                (list (list "applied" "none"))))
+      (let* ((report (trial:apply-report dest (if (pair? changes) changes '())))
+             (tests (trial:observe dest contract))
+             (word (trial:applied-word report)))
+        (set! *trial-report* report)
+        (trial:note! (string-append (trial:format-report report)
+                                    "TEST\n"
+                                    (trial:last-log)))
+        (append tests (list (list "applied" word)))))))
 
 ;; ── deterministic worker reply (mock) ─────────────────────────
 ;; The strings match fixtures/trials. A cheat reply still says tests=pass
