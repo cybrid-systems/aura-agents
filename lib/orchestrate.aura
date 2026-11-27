@@ -287,11 +287,13 @@
         (for-each
           (lambda (row)
             (let* ((task (hash-ref row "task" ""))
+                   (path (hash-ref row "path" ""))
+                   ;; CONTEXT is the file after the earlier task landed,
+                   ;; not the untouched source tree.
+                   (kept (trial:kept-file dest path))
                    (note (trial:rebase-note dest row))
                    (ev (worker:run (contract:worker-user
-                                     target
-                                     (orchestrate:task-context context requirement task)
-                                     requirement task note)
+                                     target kept requirement task note)
                                    mode)))
               (if (orchestrate:ok? ev)
                 (trial:apply-more dest (orchestrate:changes-of ev task))
@@ -307,6 +309,15 @@
   (or (orchestrate:tests-failed? evidence)
       (let ((applied (text:lookup evidence "applied")))
         (and (string? applied) (not (equal? applied "all"))))))
+
+;; A test that did not fail on the original code gets one rewrite.
+;; Other failures keep the normal retry budget.
+(define (orchestrate:should-rerun? evidence attempt retries)
+  (cond
+    ((>= attempt retries) #f)
+    ((equal? (text:lookup evidence "redgreen") "not-red") (< attempt 1))
+    ((orchestrate:need-retry? evidence) #t)
+    (else #f)))
 
 (define (orchestrate:tag-changes results)
   (let loop ((rs results) (ss *orchestrate-specs*) (acc '()))
@@ -340,6 +351,17 @@
 (define (orchestrate:spawn-ok? id)
   (and (number? id) (> id 0)))
 
+(define (orchestrate:log-fiber kind value)
+  (display "fiber-")
+  (display kind)
+  (display "=")
+  (display (cond
+             ((number? value) (number->string value))
+             ((string? value) value)
+             ((equal? value #f) "#f")
+             (else "?")))
+  (newline))
+
 ;; Run thunks together when fibers exist. Join in spawn order.
 ;; A failed spawn runs the thunks one by one instead.
 (define (orchestrate:map-parallel thunks)
@@ -350,6 +372,7 @@
       (let ((probe (try (fiber:spawn (lambda () #t)) (catch (e) 0))))
         (if (not (orchestrate:spawn-ok? probe))
           (begin
+            (orchestrate:log-fiber "spawn" probe)
             (display "parallel=serial")
             (newline)
             (map (lambda (th) (th)) thunks))
@@ -364,6 +387,11 @@
                       ((not (orchestrate:spawn-ok? (car xs))) #t)
                       (else (scan (cdr xs)))))
                 (begin
+                  (for-each (lambda (id)
+                              (if (not (orchestrate:spawn-ok? id))
+                                (orchestrate:log-fiber "spawn" id)
+                                #f))
+                            ids)
                   (display "parallel=serial")
                   (newline)
                   (map (lambda (th) (th)) thunks))
@@ -371,8 +399,14 @@
                   (display "parallel=fibers")
                   (newline)
                   (map (lambda (id)
-                         (try (fiber:join id)
-                              (catch (e) (list "error" "fiber" "join"))))
+                         (let ((joined (try (fiber:join id)
+                                            (catch (e) #f))))
+                           (if (not joined)
+                             (orchestrate:log-fiber "join" joined)
+                             #f)
+                           (if joined
+                             joined
+                             (list "error" "fiber" "join"))))
                        ids))))))))))
 
 (define (orchestrate:show-trial contract evidence)
@@ -473,8 +507,7 @@
                      (begin
                        (orchestrate:show-trial contract evidence)
                        (if (or (not ready0)
-                               (>= attempt retries)
-                               (not (orchestrate:need-retry? evidence)))
+                               (not (orchestrate:should-rerun? evidence attempt retries)))
                          (list results evidence)
                          (begin
                            (display "worker-retry=")

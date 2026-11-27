@@ -1,0 +1,127 @@
+;; Net timing, assertion rewrite, kept-file rebase context, toy KEEP, fiber logs.
+(require "std/string")
+(require "std/fs")
+(require "lib/text")
+(require "lib/game/loop")
+(require "lib/trial/workspace")
+(require "lib/orchestrate")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(shell "rm -rf out/b8-render out/b8-const out/b8-single out/b8-table out/b8-notred out/b8-stuck")
+
+(line "drowned"
+      (if (and (not (<= (* 80 2) 140))
+               (trial:net-faster? 140 80 60 60))
+        "yes" "no"))
+(line "net-slow" (if (trial:net-faster? 200 180 60 60) "yes" "no"))
+
+(loop:log-lost "spawn" 0)
+(loop:log-lost "join" #f)
+
+(define (proj root)
+  (make-directory (string-append root "/src"))
+  (make-directory (string-append root "/tests"))
+  (file-write (string-append root "/aura.toml")
+              "name = \"b8\"\nentry = \"src/main.aura\"\npreset = \"dev\"\nout = \"out\"\n"))
+
+(proj "out/b8-render")
+(file-write "out/b8-render/src/render.aura"
+            "(define (render:cost) 4000)\n(define (render:frame)\n  (let loop ((i 0))\n    (if (>= i (render:cost)) \"f\" (loop (+ i 1)))))\n")
+(file-write "out/b8-render/src/main.aura"
+            "(require \"src/render.aura\")\n(define (ticks n)\n  (if (<= n 0) \"\" (string-append (render:frame) (ticks (- n 1)))))\n(display (ticks 4))\n(newline)\n")
+(file-write "out/b8-render/tests/render_test.aura"
+            "(require \"src/render.aura\")\n(display (render:frame))\n(newline)\n")
+(file-write "out/b8-render/tests/render_test.golden" "f\n")
+(trial:set-root! "out/b8-render")
+(define rendered
+  (trial:verdict 9840 "加速 tank-battle 的 render，只跑 4 个 tick，输出保持 f" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "t3"
+                             "path" "src/render.aura"
+                             "old" "(define (render:cost) 4000)"
+                             "new" "(define (render:cost) 1)"))))
+(line "render-tests" (text:lookup rendered "tests"))
+(line "render-rg" (text:lookup rendered "redgreen"))
+(line "render-p99" (if (text:lookup rendered "p99") "yes" "no"))
+
+(proj "out/b8-const")
+(file-write "out/b8-const/src/main.aura" "(require \"src/cost.aura\")\n(display (cost:v \"a\"))\n(newline)\n")
+(file-write "out/b8-const/src/cost.aura" "(define (cost:v text) 0)\n")
+(file-write "out/b8-const/tests/cost_test.aura"
+            "(require \"src/cost.aura\")\n(display (cost:v \"a\"))\n(newline)\n(display (cost:v \"bbbb\"))\n(newline)\n")
+(file-write "out/b8-const/tests/cost_test.golden" "3\n3\n")
+(trial:set-root! "out/b8-const")
+(define constant
+  (trial:verdict 9841 "实现 cost" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "c1"
+                             "path" "src/cost.aura"
+                             "old" "(define (cost:v text) 0)"
+                             "new" "(define (cost:v text) 3)"))))
+(line "const-rg" (text:lookup constant "redgreen"))
+
+(proj "out/b8-single")
+(file-write "out/b8-single/src/main.aura" "(require \"src/f.aura\")\n(display (f:n \"only\"))\n(newline)\n")
+(file-write "out/b8-single/src/f.aura" "(define (f:n s) 0)\n")
+(trial:set-root! "out/b8-single")
+(define single
+  (trial:verdict 9842 "实现 f" '(("tests" "pass"))
+                 (list (hash "kind" "patch" "task" "one" "diff"
+                             (string-append
+                               "--- a/src/f.aura\n+++ b/src/f.aura\n@@ -1 +1 @@\n"
+                               "-(define (f:n s) 0)\n+(define (f:n s) (string-length s))\n"
+                               "--- /dev/null\n+++ b/tests/f_test.aura\n@@ -0,0 +1,3 @@\n"
+                               "+(require \"src/f.aura\")\n+(display (f:n \"only\"))\n+(newline)\n"
+                               "--- /dev/null\n+++ b/tests/f_test.golden\n@@ -0,0 +1 @@\n+4\n")))))
+(line "single-rg" (text:lookup single "redgreen"))
+
+(proj "out/b8-table")
+(file-write "out/b8-table/src/main.aura" "(require \"src/f.aura\")\n(display (f:n \"aa\"))\n(newline)\n")
+(file-write "out/b8-table/src/f.aura" "(define (f:n s) 0)\n")
+(file-write "out/b8-table/tests/f_test.aura"
+            "(require \"src/f.aura\")\n(display (f:n \"aa\"))\n(newline)\n(display (f:n \"bbb\"))\n(newline)\n")
+(file-write "out/b8-table/tests/f_test.golden" "1\n2\n")
+(trial:set-root! "out/b8-table")
+(define table
+  (trial:verdict 9843 "按输入查表" '(("tests" "pass"))
+                 (list (hash "kind" "mutate" "task" "a2"
+                             "path" "src/f.aura"
+                             "old" "(define (f:n s) 0)"
+                             "new" "(define (f:n s) (if (equal? s \"aa\") 1 (if (equal? s \"bbb\") 2 0)))"))))
+(line "table-rg" (text:lookup table "redgreen"))
+
+(proj "out/b8-notred")
+(file-write "out/b8-notred/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b8-notred/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(trial:set-root! "out/b8-notred")
+(define rewritten
+  (orchestrate:run (hash "requirement" "SIMULATE-NOT-RED 让 n 在新测试里先失败再通过"
+                         "sample" (hash "cpus" 2 "load" 0 "mem-available-kb" 8000000)
+                         "mode" "mock"
+                         "workspace" 9844
+                         "approve" "approved"
+                         "now" 0
+                         "retries" 3
+                         "graph" "off")))
+(line "rewrite-result" (hash-ref rewritten "result"))
+(line "rewrite-gate" (hash-ref rewritten "gate"))
+
+(proj "out/b8-stuck")
+(file-write "out/b8-stuck/src/n.aura" "(define (n:v) 0)\n")
+(file-write "out/b8-stuck/src/main.aura" "(require \"src/n.aura\")\n(display (n:v))\n(newline)\n")
+(trial:set-root! "out/b8-stuck")
+(define stuck
+  (orchestrate:run (hash "requirement" "SIMULATE-NOT-RED-STUCK 断言不改"
+                         "sample" (hash "cpus" 2 "load" 0 "mem-available-kb" 8000000)
+                         "mode" "mock"
+                         "workspace" 9845
+                         "approve" "approved"
+                         "now" 0
+                         "retries" 3
+                         "graph" "off")))
+(trial:set-root! #f)
+(line "stuck-result" (hash-ref stuck "result"))
+(line "stuck-gate" (hash-ref stuck "gate"))
