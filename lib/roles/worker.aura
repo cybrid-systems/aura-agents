@@ -56,7 +56,7 @@
       (list "error" "parse" "no RESULT"))))
 
 (define (worker:parse text)
-  (let loop ((xs (text:lines (if (string? text) text "")))
+  (let loop ((xs (text:lines (text:strip-noise (if (string? text) text ""))))
              (pairs #f)
              (changes '())
              (patch #f)

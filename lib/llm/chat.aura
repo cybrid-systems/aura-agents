@@ -35,19 +35,43 @@
 (define (chat:model)
   (chat:model-of (getenv "LLM_MODEL")))
 
+;; Role timeout in seconds. An explicit role value wins, then the
+;; shared AURA_AGENTS_LLM_TIMEOUT, then 180 for a worker and 60 for
+;; everyone else. llm:chat treats "timeout" as the transport budget.
+(define (chat:pick-timeout role role-n global-n)
+  (cond
+    ((and (number? role-n) (> role-n 0)) role-n)
+    ((and (number? global-n) (> global-n 0)) global-n)
+    ((equal? role "worker") 180)
+    (else 60)))
+
+(define (chat:env-seconds name)
+  (let ((v (getenv name)))
+    (if (and (string? v) (> (string-length v) 0))
+      (let ((n (string->number v)))
+        (if (and (number? n) (> n 0)) n #f))
+      #f)))
+
+(define (chat:timeout-of role)
+  (chat:pick-timeout role
+                     (chat:env-seconds (if (equal? role "worker")
+                                         "AURA_AGENTS_WORKER_TIMEOUT"
+                                         "AURA_AGENTS_PLANNER_TIMEOUT"))
+                     (chat:env-seconds "AURA_AGENTS_LLM_TIMEOUT")))
+
 (define (chat:err e)
   (cond
     ((string? e) e)
     ((and (pair? e) (pair? (cdr e)) (string? (cadr e))) (cadr e))
     (else "llm-exception")))
 
-(define (chat:real system user)
+(define (chat:real role system user)
   (try
     (let* ((model (chat:model))
            (from-env (getenv "LLM_MODEL"))
            (extra (if (and (string? from-env) (> (string-length from-env) 0))
-                    (hash "temperature" 0)
-                    (hash "model" model "temperature" 0)))
+                    (hash "temperature" 0 "timeout" (chat:timeout-of role))
+                    (hash "model" model "temperature" 0 "timeout" (chat:timeout-of role))))
            (r (llm:chat (if (string? system) system "")
                         (if (string? user) user "")
                         extra)))
@@ -61,5 +85,5 @@
 
 (define (chat:complete mode role system user)
   (if (equal? mode "real")
-    (chat:real system user)
+    (chat:real role system user)
     (mock:complete role user)))

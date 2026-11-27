@@ -8,6 +8,7 @@
 (require "std/process")
 (require "lib/text")
 (require "lib/roles/contract")
+(require "lib/llm/stdlib-ref")
 
 (define trial:files
   (hash "redis" '("aura.toml" "src/zset.aura" "src/latency.aura"
@@ -24,22 +25,31 @@
 
 ;; Default CONTEXT: the target fixture's own files, not the word "none".
 ;; Truncated so a larger tree cannot blow the prompt.
-(define (trial:fixture-context kind)
+(define (trial:files-text kind limit)
   (let ((files (hash-ref trial:files (if (string? kind) kind "") '())))
     (let loop ((xs files) (out ""))
       (cond
         ((not (pair? xs)) out)
-        ((>= (string-length out) trial:context-limit)
-         (string-append (substring out 0 trial:context-limit) "\n...truncated\n"))
+        ((>= (string-length out) limit)
+         (string-append (substring out 0 limit) "\n...truncated\n"))
         (else
           (let* ((rel (car xs))
                  (text (file-read (string-append "fixtures/trials/" kind "/" rel)))
                  (body (if (string? text) text ""))
                  (chunk (string-append "FILE " rel "\n" body "\n"))
                  (next (string-append out chunk)))
-            (if (> (string-length next) trial:context-limit)
-              (string-append (substring next 0 trial:context-limit) "\n...truncated\n")
+            (if (> (string-length next) limit)
+              (string-append (substring next 0 limit) "\n...truncated\n")
               (loop (cdr xs) next))))))))
+
+;; Fixture sources first, then a capped stdlib export list.
+(define (trial:fixture-context kind)
+  (let* ((files (trial:files-text kind 2600))
+         (lib (stdlib:brief 1400))
+         (all (string-append files "\n" lib)))
+    (if (> (string-length all) trial:context-limit)
+      (string-append (substring all 0 trial:context-limit) "\n...truncated\n")
+      all)))
 
 (define (trial:dest ws kind)
   (string-append "out/trials/" (number->string (if (number? ws) ws 0)) "/"
@@ -158,6 +168,25 @@
       ((and (pair? (car xs)) (equal? (car (car xs)) key)) #t)
       (else (loop (cdr xs))))))
 
+(define *trial-log* "")
+
+(define (trial:last-log) *trial-log*)
+
+(define (trial:clip s n)
+  (let ((t (if (string? s) s "")))
+    (if (<= (string-length t) n) t (substring t 0 n))))
+
+(define (trial:note! s)
+  (set! *trial-log* (trial:clip s 800)))
+
+(define (trial:capture! dest)
+  (let ((err (file-read (string-append dest "/test.err")))
+        (out (file-read (string-append dest "/test.out"))))
+    (trial:note! (string-append
+                   (if (string? err) err "")
+                   "\n"
+                   (if (string? out) out "")))))
+
 (define (trial:aura-test dest)
   ;; Redirects are opened after cd, so they stay inside the overlay.
   (= (trial:shell (string-append "cd " (trial:quote dest)
@@ -191,6 +220,7 @@
                          (trial:wants? contract "budget"))
                    (trial:parse-bench (trial:bench dest))
                    '())))
+    (trial:capture! dest)
     (let ((observed (append ran benched)))
       (map (lambda (p)
              (let ((got (text:lookup observed (car p))))
@@ -206,7 +236,9 @@
          (ready (trial:isolate kind dest)))
     (if (or (not ready)
             (not (trial:apply-all dest (if (pair? changes) changes '()))))
-      (map (lambda (p) (list (car p) "missing")) contract)
+      (begin
+        (trial:note! "apply failed")
+        (map (lambda (p) (list (car p) "missing")) contract))
       (trial:observe dest contract))))
 
 ;; ── deterministic worker reply (mock) ─────────────────────────
@@ -218,6 +250,8 @@
 
 (define (trial:fail? text) (trial:has? text "SIMULATE-FAIL"))
 (define (trial:cheat? text) (trial:has? text "SIMULATE-CHEAT"))
+(define (trial:retry-bad? text)
+  (and (trial:has? text "SIMULATE-RETRY") (not (trial:has? text "FEEDBACK"))))
 
 (define (trial:task-name text)
   (cond
@@ -242,7 +276,7 @@
   (string-append "MUTATE " path "\nOLD " old "\nNEW " new "\n"))
 
 (define (trial:change-block text)
-  (let ((bad (or (trial:fail? text) (trial:cheat? text)))
+  (let ((bad (or (trial:fail? text) (trial:cheat? text) (trial:retry-bad? text)))
         (task (trial:task-name text)))
     (cond
       ((equal? task "implement-zrangebyscore")
@@ -277,4 +311,6 @@
                       "(define (marker:done?) #t)"))))))
 
 (define (trial:worker-reply text)
-  (string-append (trial:result-line text) (trial:change-block text)))
+  (if (and (trial:has? text "SIMULATE-GARBAGE") (not (trial:has? text "FEEDBACK")))
+    "<tool_call>{\"name\":\"edit\"}</tool_call>\n"
+    (string-append (trial:result-line text) (trial:change-block text))))

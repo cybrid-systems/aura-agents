@@ -78,13 +78,17 @@
       (string-append "\n\n" hint)
       "")))
 
-(define (contract:worker-user target context requirement task)
-  (string-append
-    "TARGET " (if (string? target) target "") "\n"
-    "CONTEXT " (if (string? context) context "") "\n"
-    "TASK " (if (string? task) task "") "\n"
-    "REQUIREMENT\n"
-    (if (string? requirement) requirement "")))
+(define (contract:worker-user target context requirement task . rest)
+  (let ((feedback (if (and (pair? rest) (string? (car rest))) (car rest) "")))
+    (string-append
+      "TARGET " (if (string? target) target "") "\n"
+      "CONTEXT " (if (string? context) context "") "\n"
+      "TASK " (if (string? task) task "") "\n"
+      "REQUIREMENT\n"
+      (if (string? requirement) requirement "")
+      (if (> (string-length feedback) 0)
+        (string-append "\nFEEDBACK\n" feedback)
+        ""))))
 
 (define (contract:redis-reply p99)
   (string-append

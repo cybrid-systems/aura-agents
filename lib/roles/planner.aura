@@ -23,7 +23,7 @@
              (cons (if (pair? (car xs)) (car (car xs)) "?") drop))))))
 
 (define (planner:parse text)
-  (let loop ((lines (text:lines text)) (contract #f) (tasks '()))
+  (let loop ((lines (text:lines (text:strip-noise text))) (contract #f) (tasks '()))
     (if (not (pair? lines))
       (if (and (pair? contract) (pair? tasks))
         (let* ((split (planner:split-checks contract))
