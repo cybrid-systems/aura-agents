@@ -1065,6 +1065,7 @@
     ((equal? rg "bench") "redgreen=bench 修复前 bench 未达标，修复后达标\n")
     ((equal? rg "speed") "redgreen=speed 输出一致且耗时改善超过阈值\n")
     ((equal? rg "slow") (string-append "redgreen=slow 耗时未达到相对阈值\n" *trial-speed-note*))
+    ((equal? rg "unmeasured") (string-append "redgreen=unmeasured 噪声不足以判断提速；不要据此认为改动没有提速\n" *trial-rule* *trial-speed-note*))
     ((equal? rg "apply-failed") "redgreen=apply-failed 补丁没有落地\n")
     ((equal? rg "not-red") (string-append "redgreen=not-red 测试在原代码上未失败，没有先红。请重写断言，使新测试在原代码上失败、在改后的代码上通过\n原码输出:\n" *trial-base-out* "\n"))
     ((equal? rg "toy") (string-append "redgreen=toy 常量实现，或新测试只覆盖单一输入，或变体输入不符合需求\n" *trial-rule*))
@@ -1431,13 +1432,13 @@
 (define (trial:decide-speed-hot before dest hot requirement)
   (let loop ((rungs trial:timing-rungs))
     (if (not (pair? rungs))
-      #f
+      "unmeasured"
       (let ((b (trial:hot-net-before before hot (car rungs))))
         (cond
           ((> b trial:timing-floor-ms)
            (trial:judge-net b (trial:hot-net-after dest hot (car rungs)) requirement))
           ;; No measurable hot work yet: more iterations cannot expose it.
-          ((<= b 0) #f)
+          ((<= b 0) "unmeasured")
           (else (loop (cdr rungs))))))))
 
 (define (trial:decide-speed before dest files hot requirement)
@@ -1450,7 +1451,7 @@
             (a (trial:file-net dest (car files))))
         (if (> b trial:timing-floor-ms)
           (trial:judge-net b a requirement)
-          #f)))))
+          "unmeasured")))))
 
 (define (trial:harness-speed base dest requirement)
   (if (not (contract:speed? requirement))
@@ -1850,6 +1851,10 @@
             (string? toy)
             (string-prefix? toy "rule=constant"))
        (trial:hold "toy" toy))
+      ((and (contract:speed? requirement) green (equal? speed "unmeasured"))
+       (trial:hold "unmeasured"
+                   (string-append "rule=noise evidence=before-net<="
+                                  (number->string trial:timing-floor-ms) "ms")))
       ((and (contract:speed? requirement) green (equal? speed "speed"))
        "speed")
       ((and (contract:speed? requirement) green (equal? speed "slow"))
