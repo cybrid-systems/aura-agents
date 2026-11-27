@@ -1,4 +1,4 @@
-timeout-worker=180
+timeout-worker=300
 timeout-role=10
 timeout-planner=40
 strip=ok

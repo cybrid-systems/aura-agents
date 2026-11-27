@@ -122,21 +122,48 @@
 
 ;; One task, with a bounded number of extra replies when the model
 ;; returns markup or anything that is not a RESULT plus a change.
+(define (orchestrate:timeout-retries)
+  (let ((v (getenv "AURA_AGENTS_TIMEOUT_RETRIES")))
+    (let ((n (if (and (string? v) (> (string-length v) 0)) (string->number v) 1)))
+      (if (and (number? n) (>= n 0))
+        (if (integer? n) n (inexact->exact (floor n)))
+        1))))
+
+;; A transport timeout is recorded as http-timeout and retried once,
+;; unless AURA_AGENTS_TIMEOUT_RETRIES says otherwise. Other failures
+;; use the full retry budget.
+(define (orchestrate:should-retry? kind try retries timeout-retries)
+  (if (equal? kind "http-timeout")
+    (< try (min retries timeout-retries))
+    (< try retries)))
+
+(define (orchestrate:task-context context requirement spec)
+  (let ((root (trial:root)))
+    (if root
+      (trial:external-context root
+                              (string-append (if (string? requirement) requirement "")
+                                             "\n"
+                                             (if (string? spec) spec "")))
+      context)))
+
 (define (orchestrate:invoke name spec mode target context requirement feedback retries)
-  (let loop ((try 0) (note feedback))
-    (let ((ev (worker:run (contract:worker-user target context requirement spec note) mode)))
-      (if (orchestrate:ok? ev)
-        ev
-        (begin
-          (orchestrate:note-error name ev)
-          (if (< try retries)
-            (let ((note "previous reply was not a RESULT plus PATCH or MUTATE"))
-              (display "worker-retry=")
-              (display (+ try 1))
-              (newline)
-              (orchestrate:feedback-summary note)
-              (loop (+ try 1) note))
-            ev))))))
+  (let ((context (orchestrate:task-context context requirement spec)))
+    (let loop ((try 0) (note feedback))
+      (let ((ev (worker:run (contract:worker-user target context requirement spec note) mode)))
+        (if (orchestrate:ok? ev)
+          ev
+          (begin
+            (orchestrate:note-error name ev)
+            (if (orchestrate:should-retry?
+                  (if (and (pair? ev) (pair? (cdr ev))) (cadr ev) "")
+                  try retries (orchestrate:timeout-retries))
+              (let ((note "previous reply was not a RESULT plus PATCH or MUTATE"))
+                (display "worker-retry=")
+                (display (+ try 1))
+                (newline)
+                (orchestrate:feedback-summary note)
+                (loop (+ try 1) note))
+              ev)))))))
 
 ;; One claim for this worker. #f when the queue is empty or the reply
 ;; never parsed. The pool drains in waves, so workers < tasks still
@@ -333,22 +360,26 @@
     contract
     (append contract (list (list "applied" "all")))))
 
-;; KEEP needs a red-then-green test, or a bench that was short before
-;; and met after. A bench result is the expected value in that case.
+;; KEEP needs a red-then-green test, a bench that was short before and
+;; met after, or a performance speedup with equivalent output.
 (define (orchestrate:with-redgreen contract evidence)
   (if (text:lookup contract "redgreen")
     contract
-    (append contract
-            (list (list "redgreen"
-                        (if (equal? (text:lookup evidence "redgreen") "bench")
-                          "bench"
-                          "pass"))))))
+    (let ((got (text:lookup evidence "redgreen")))
+      (append contract
+              (list (list "redgreen"
+                          (cond
+                            ((equal? got "bench") "bench")
+                            ((equal? got "speed") "speed")
+                            (else "pass"))))))))
 
 (define (orchestrate:rerun mode target context requirement feedback)
   (let loop ((specs *orchestrate-specs*) (acc '()))
     (if (not (pair? specs))
       (reverse acc)
-      (let ((ev (worker:run (contract:worker-user target context requirement
+      (let ((ev (worker:run (contract:worker-user target
+                                                   (orchestrate:task-context context requirement (car specs))
+                                                   requirement
                                                    (car specs) feedback)
                             mode)))
         (if (not (orchestrate:ok? ev))
