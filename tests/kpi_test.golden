@@ -1,3 +1,4 @@
+add-wall=400
 kind=kpi-summary
 rounds=3
 wall-per-round=666

@@ -117,10 +117,13 @@
           ((equal? (l-get (car xs) "id" "") id) (car xs))
           (else (loop (cdr xs))))))
 
+;; Tail-recursive so a single batch larger than the evaluator's
+;; recursion limit (512) is a normal rehearsal, not an internal error.
 (define (l-take xs n)
-  (cond ((<= n 0) '())
-        ((not (pair? xs)) '())
-        (else (cons (car xs) (l-take (cdr xs) (- n 1))))))
+  (let loop ((xs xs) (n n) (acc '()))
+    (cond ((<= n 0) (reverse acc))
+          ((not (pair? xs)) (reverse acc))
+          (else (loop (cdr xs) (- n 1) (cons (car xs) acc))))))
 
 (define (loop:rehearse-bounded root candidates inputs ids max-n)
   (if (not (pair? candidates))

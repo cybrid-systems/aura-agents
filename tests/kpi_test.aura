@@ -10,9 +10,10 @@
 
 (define k (kpi:new (hash "label" "tank-battle"
                          "hardware" (hash "cpus" 8 "mem_mb" 16384))))
-(kpi:add-round k (hash "wall_ms" 400 "candidates" 4 "n" 4
-                       "stage" "move" "early_stop" 0
-                       "oom" #f "hot_swap_ok" #t))
+(define first-add
+  (kpi:add-round k (hash "wall_ms" 400 "candidates" 4 "n" 4
+                         "stage" "move" "early_stop" 0
+                         "oom" #f "hot_swap_ok" #t)))
 (kpi:add-round k (hash "wall_ms" 600 "candidates" 6 "n" 6
                        "stage" "move" "early_stop" 1
                        "oom" #f "hot_swap_ok" #t))
@@ -25,6 +26,7 @@
 (kpi:mark-milestone k "fun" 60000)
 (kpi:record-pr k)
 
+(line "add-wall" (hash-ref first-add "wall_ms"))
 (define s (kpi:summary k))
 (line "kind" (hash-ref s "kind"))
 (line "rounds" (hash-ref s "rounds"))

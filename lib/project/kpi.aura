@@ -63,7 +63,7 @@
          (hash-set! kpi "hot_swap_failures" (+ 1 (kp-num kpi "hot_swap_failures" 0))))
        (hash "ok" #t
              "rounds" (length (kp-get kpi "rounds" '()))
-             "wall_ms" (kp-num kpi "rounds_since_pr" 0))))))
+             "wall_ms" (kp-num r "wall_ms" 0))))))
 
 (define (kpi:mark-milestone kpi stage elapsed_ms)
   (cond

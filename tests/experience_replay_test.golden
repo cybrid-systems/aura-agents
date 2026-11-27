@@ -1,0 +1,10 @@
+events0=2
+load1-events=2
+load1-nodes=0
+load2-events=2
+load2-nodes=0
+load3-events=4
+load3-status=invalidated
+log-lines=4
+first-op=add-node
+last-op=invalidate-node

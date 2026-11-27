@@ -1,0 +1,60 @@
+;; Regression: loading a saved graph replays events.jsonl exactly once.
+;; A drop event used to re-record itself (and resurrect then re-drop the
+;; node), doubling the log on every save/load cycle.
+(require "std/string")
+(require "std/list")
+(require "std/json")
+(require "std/io")
+(require "lib/graph/schema")
+(require "lib/graph/store")
+
+(define (line k v)
+  (display k)
+  (display "=")
+  (display v)
+  (newline))
+
+(define ws 9175)
+(graph:reset! ws)
+(define g (graph:new ws))
+
+(define (make-node seq summary)
+  (cadr (graph:make-node
+          (hash "type" "keep-evidence"
+                "workspace_id" ws
+                "worldline" 1
+                "candidate_hash" "c"
+                "caps_mask" 1
+                "budget_snapshot" (hash)
+                "seq" seq
+                "timestamp_ms" seq
+                "summary" summary))))
+
+(define a (make-node 1 "a"))
+(graph:add-node! g a)
+(graph:drop-node! g (hash-ref a "node_id"))
+(line "events0" (length (hash-ref g "events" '())))
+
+(graph:save! g)
+(define g2 (graph:load ws))
+(line "load1-events" (length (hash-ref g2 "events" '())))
+(line "load1-nodes" (graph:node-count g2))
+
+(graph:save! g2)
+(define g3 (graph:load ws))
+(line "load2-events" (length (hash-ref g3 "events" '())))
+(line "load2-nodes" (graph:node-count g3))
+
+(define b (make-node 2 "b"))
+(graph:add-node! g3 b)
+(graph:invalidate-node! g3 (hash-ref b "node_id") 3 "test")
+(graph:save! g3)
+(define g4 (graph:load ws))
+(line "load3-events" (length (hash-ref g4 "events" '())))
+(line "load3-status" (hash-ref (graph:get-node g4 (hash-ref b "node_id")) "status"))
+
+(define log (file-read (string-append "out/experience/" (number->string ws) "/events.jsonl")))
+(define lines (filter (lambda (l) (> (string-length l) 0)) (string-split log "\n")))
+(line "log-lines" (length lines))
+(line "first-op" (hash-ref (json-parse (car lines)) "op"))
+(line "last-op" (hash-ref (json-parse (car (reverse lines))) "op"))

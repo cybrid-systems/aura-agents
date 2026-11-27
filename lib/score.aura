@@ -20,13 +20,20 @@
 
 ; ── deterministic fingerprint ─────────────────────────────────
 
+;; Length-prefix every field so a value that itself contains '=' or '&'
+;; cannot alias a different key/value split. Without this, the two
+;; contracts (("a" "b&c=d")) and (("a" "b") ("c" "d")) share a fingerprint.
+(define (score-field s)
+  (string-append (number->string (string-length s)) ":" s))
+
 (define (score-contract-text contract)
   (if (not (pair? contract))
     ""
     (let* ((keys (sort (map car contract)))
            (rows (map (lambda (k)
                         (let ((p (assoc k contract)))
-                          (string-append k "=" (if (pair? p) (cadr p) ""))))
+                          (string-append (score-field k) "="
+                                         (score-field (if (pair? p) (cadr p) "")))))
                       keys)))
       (string-join rows "&"))))
 
@@ -39,7 +46,8 @@
     (foldl (lambda (c h)
              (bitwise-and (* (bitwise-xor h (char->integer c)) 16777619) 4294967295))
            2166136261
-           (string->list (string-append requirement "|" (score-contract-text contract))))))
+           (string->list (string-append (score-field requirement) "|"
+                                        (score-contract-text contract))))))
 
 ; ── construction ───────────────────────────────────────────────
 

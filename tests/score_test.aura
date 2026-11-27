@@ -19,6 +19,10 @@
 (define s (cadr compiled))
 (line "parts" (length (hash-ref s "parts")))
 (line "fingerprint" (hash-ref s "contract_fingerprint"))
+(line "separator-distinct"
+      (not (equal? (score:contract-fingerprint "req" (list (list "a" "b&c=d")))
+                   (score:contract-fingerprint "req" (list (list "a" "b")
+                                                           (list "c" "d"))))))
 (define v (score:validate s (manifest:registry)))
 (line "validate" (car v))
 (line "order" (string-join (car (cddr v)) ","))

@@ -42,3 +42,15 @@
 (line "commit-x" (hash-ref (hash-ref (hash-ref committed "state") "player") "x"))
 
 (line "no-candidates" (hash-ref (loop:rehearse root '() '() ids) "error"))
+
+;; One batch larger than the evaluator's 512-frame recursion limit must
+;; be a normal rehearsal, not an internal error.
+(define (range n)
+  (let loop ((i 0) (acc '()))
+    (if (>= i n) (reverse acc) (loop (+ i 1) (cons i acc)))))
+(define many
+  (map (lambda (i) (hash "id" (number->string i) "step" (lambda (s inp) s)))
+       (range 520)))
+(define bounded (loop:rehearse-bounded root many (list (hash)) '() 520))
+(line "bounded-batches" (hash-ref bounded "batches"))
+(line "bounded-results" (length (hash-ref bounded "results" '())))

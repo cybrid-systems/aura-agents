@@ -1,6 +1,7 @@
 compile=ok
 parts=5
-fingerprint=3725536110
+fingerprint=1652247378
+separator-distinct=#t
 validate=ok
 order=observe,patch,static,judge,memory
 run=done

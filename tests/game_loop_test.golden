@@ -7,3 +7,5 @@ frozen-x=4
 root-x=4
 commit-x=5
 no-candidates=no-candidates
+bounded-batches=1
+bounded-results=520
